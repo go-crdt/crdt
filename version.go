@@ -1,6 +1,9 @@
 package crdt
 
-import "sort"
+import (
+	"encoding/binary"
+	"sort"
+)
 
 // A VersionVector records, per site, the highest sequence number a replica has
 // applied. Because a site's sequence numbers have no gaps and [Doc] refuses to
@@ -56,4 +59,57 @@ func (v VersionVector) sites() []SiteID {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+// MarshalBinary encodes the vector. Entries are written in ascending site
+// order, so the same state always produces the same bytes and a caller may
+// compare or cache them.
+//
+// A replica sends this to be told what it has missed; see [Doc.OpsSince].
+func (v VersionVector) MarshalBinary() ([]byte, error) {
+	sites := v.sites()
+	out := binary.AppendUvarint(nil, uint64(len(sites)))
+	for _, site := range sites {
+		out = binary.AppendUvarint(out, uint64(site))
+		out = binary.AppendUvarint(out, v[site])
+	}
+	return out, nil
+}
+
+// UnmarshalBinary decodes a vector written by MarshalBinary. A site listed
+// twice, a sequence number of zero, and trailing bytes are all rejected: each
+// would leave what the vector means dependent on decoding order.
+func (v *VersionVector) UnmarshalBinary(data []byte) error {
+	count, used := binary.Uvarint(data)
+	if used <= 0 {
+		return ErrMalformed
+	}
+	rest := data[used:]
+	// Each entry is at least two bytes, so a count larger than the remaining
+	// bytes allow is a corrupt header — refuse it before allocating for it.
+	if count > uint64(len(rest)) {
+		return ErrMalformed
+	}
+	out := make(VersionVector, count)
+	for range count {
+		site, used := binary.Uvarint(rest)
+		if used <= 0 {
+			return ErrMalformed
+		}
+		rest = rest[used:]
+		seq, used := binary.Uvarint(rest)
+		if used <= 0 || seq == 0 {
+			return ErrMalformed
+		}
+		rest = rest[used:]
+		if _, dup := out[SiteID(site)]; dup {
+			return ErrMalformed
+		}
+		out[SiteID(site)] = seq
+	}
+	if len(rest) != 0 {
+		return ErrMalformed
+	}
+	*v = out
+	return nil
 }

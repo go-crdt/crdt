@@ -130,3 +130,39 @@ func FuzzLoad(f *testing.F) {
 		}
 	})
 }
+
+// A version vector arrives from a peer asking to be caught up, so it is decoded
+// from bytes someone else wrote.
+func FuzzVersionVector(f *testing.F) {
+	seed, err := VersionVector{1: 4, 9: 2}.MarshalBinary()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(seed)
+	f.Add([]byte{0})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var v VersionVector
+		if err := v.UnmarshalBinary(data); err != nil {
+			return
+		}
+		encoded, err := v.MarshalBinary()
+		if err != nil {
+			t.Fatalf("re-encoding an accepted vector failed: %v", err)
+		}
+		var again VersionVector
+		if err := again.UnmarshalBinary(encoded); err != nil {
+			t.Fatalf("a re-encoded vector no longer decodes: %v", err)
+		}
+		if !again.Equal(v) {
+			t.Fatalf("round trip gave %v, want %v", again, v)
+		}
+		// Whatever it decodes to must be usable as a peer's position: asking a
+		// document what it holds beyond that vector must not panic.
+		d := New(1)
+		if _, err := d.Insert(0, "text"); err != nil {
+			t.Fatal(err)
+		}
+		_ = d.OpsSince(v)
+	})
+}

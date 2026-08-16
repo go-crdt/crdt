@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"errors"
 	"hash/fnv"
 	"testing"
 )
@@ -190,6 +191,82 @@ func TestVersionVectorSitesAreSortedAndSkipZero(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("sites() = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestVersionVectorRoundTrip(t *testing.T) {
+	for _, want := range []VersionVector{
+		nil,
+		{},
+		{1: 4},
+		{9: 1, 2: 300, 1 << 40: 1 << 40},
+	} {
+		data, err := want.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary(%v): %v", want, err)
+		}
+		var got VersionVector
+		if err := got.UnmarshalBinary(data); err != nil {
+			t.Fatalf("UnmarshalBinary(%v): %v", want, err)
+		}
+		if !got.Equal(want) {
+			t.Errorf("round trip gave %v, want %v", got, want)
+		}
+	}
+}
+
+// The encoding is deterministic, which is what lets a peer compare or cache one.
+func TestVersionVectorEncodingIsStable(t *testing.T) {
+	v := VersionVector{7: 2, 1: 9, 4: 1, 3: 0}
+	first, err := v.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 20 {
+		again, err := v.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(again) != string(first) {
+			t.Fatal("the same vector encoded differently across calls")
+		}
+	}
+	// A site recorded with a zero sequence number is absent, and must not be
+	// written, or two replicas in the same state would disagree on the bytes.
+	other := VersionVector{7: 2, 1: 9, 4: 1}
+	if data, err := other.MarshalBinary(); err != nil || string(data) != string(first) {
+		t.Fatalf("a zero entry changed the encoding (err %v)", err)
+	}
+}
+
+func TestVersionVectorRejectsMalformed(t *testing.T) {
+	valid, err := VersionVector{1: 2, 3: 4}.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"empty", nil},
+		{"more entries than bytes", []byte{0x40, 1, 1}},
+		{"sequence number of zero", []byte{0x01, 0x01, 0x00}},
+		{"the same site twice", []byte{0x02, 0x01, 0x01, 0x01, 0x02}},
+		{"trailing bytes", append(append([]byte{}, valid...), 0)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var v VersionVector
+			if err := v.UnmarshalBinary(tt.data); !errors.Is(err, ErrMalformed) {
+				t.Errorf("UnmarshalBinary() = %v, want ErrMalformed", err)
+			}
+		})
+	}
+	for n := range len(valid) {
+		var v VersionVector
+		if err := v.UnmarshalBinary(valid[:n]); err == nil {
+			t.Errorf("UnmarshalBinary(%d of %d bytes) succeeded, want an error", n, len(valid))
 		}
 	}
 }
