@@ -12,10 +12,11 @@ import (
 // operations long.
 
 // permute calls fn with every ordering of ops (Heap's algorithm), reusing one
-// slice, so fn must not retain it.
-func permute(ops []Op, fn func([]Op)) {
+// slice, so fn must not retain it. It is written over the element type because
+// every replicated structure in the package needs it.
+func permute[T any](ops []T, fn func([]T)) {
 	n := len(ops)
-	work := append([]Op{}, ops...)
+	work := append([]T{}, ops...)
 	counters := make([]int, n)
 	fn(work)
 	for i := 0; i < n; {

@@ -36,4 +36,13 @@
 // before the operations they depend on: an operation that is not yet ready is
 // buffered and integrated as soon as its dependencies land. Callers therefore do
 // not need an ordered transport, only an eventually-complete one.
+//
+// # A replicated map
+//
+// [Map] is the same machinery applied to a key-value map, for what an editor
+// keeps beside its text — a spreadsheet of cells, a table of settings. The last
+// write to a key wins, under the same (clock, site) order, and a deleted key
+// keeps its clock so that an older write arriving later cannot resurrect it. It
+// shares [ID], [VersionVector], [ErrMalformed] and the wire conventions with
+// [Doc] and nothing else, so neither structure can disturb the other.
 package crdt
