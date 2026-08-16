@@ -90,7 +90,19 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		if _, dup := d.vv[SiteID(s)]; dup {
 			return nil, ErrMalformed
 		}
+		// Every operation a site claims has to be accounted for later by bytes
+		// still in the buffer, so a count larger than those bytes allow is a
+		// corrupt header — refuse it before sizing anything from it.
+		if seq > uint64(len(r.buf)) {
+			return nil, ErrMalformed
+		}
 		d.vv[SiteID(s)] = seq
+		// The characters arrive in document order, not in sequence order, so the
+		// index cannot simply be appended to as it is when operations are applied.
+		// The version vector says exactly how many operations each site made, so
+		// it is sized once here and filled in as they are decoded; whatever is
+		// left nil was a deletion, which makes no character.
+		d.chars[SiteID(s)] = make([]*item, seq)
 	}
 
 	// A snapshot has to account for every operation its version vector claims,
@@ -129,7 +141,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		// deleted, and the item keeps the lower of the two operations. Anything
 		// else describes a document no replica could reach: a deletion of a
 		// character still visible would take effect on replay and diverge.
-		it, known := d.byID[target]
+		it, known := d.lookup(target)
 		if !known || target.IsRoot() || it.alive() || !idLess(it.delID, delID) {
 			return nil, ErrMalformed
 		}
@@ -191,7 +203,7 @@ func (d *Doc) link(last, it *item, l *ledger) error {
 	if !l.claim(it.id) {
 		return ErrMalformed
 	}
-	origin, known := d.byID[it.origin.id]
+	origin, known := d.lookup(it.origin.id)
 	if !known {
 		return ErrMalformed
 	}
@@ -213,7 +225,7 @@ func (d *Doc) link(last, it *item, l *ledger) error {
 	}
 	it.origin = origin
 	last.next = it
-	d.byID[it.id] = it
+	d.chars[it.id.Site][it.id.Seq-1] = it
 	d.total++
 	if it.alive() {
 		d.visible++

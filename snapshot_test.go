@@ -247,6 +247,14 @@ func TestLoadRejectsMalformedSnapshots(t *testing.T) {
 		{"an origin with a sequence number of zero", func(b *snapshotBuilder) {
 			b.items[1].originSite, b.items[1].originSeq = 1, 0
 		}},
+		{"an origin that is a deletion", func(b *snapshotBuilder) {
+			// Operation 3 is the deletion of the second character; it made no
+			// character, so nothing can have been inserted after it.
+			b.sites = [][2]uint64{{1, 4}}
+			b.items = append(b.items, snapshotItem{
+				site: 1, seq: 4, clock: 4, originSite: 1, originSeq: 3, char: 'c',
+			})
+		}},
 		{"characters in an order integration could not produce", func(b *snapshotBuilder) {
 			// Both hang off the root, so the higher clock has to come first.
 			b.sites = [][2]uint64{{1, 2}, {2, 1}}
