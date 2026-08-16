@@ -32,10 +32,12 @@ type block struct {
 	clock    uint64 // Lamport clock of the first character
 	originID ID     // what the first character was inserted after
 	text     []rune
-	// dead is nil while every character in the block is visible. Otherwise it
-	// has one entry per character: the identity of the operation that deleted
-	// it, or the zero ID if it is still visible.
-	dead []ID
+	// dels records the stretches of this run that have been deleted, ascending
+	// and never overlapping. One record covers a whole stretch, so a word
+	// backspaced away costs one entry rather than one per letter; keeping an
+	// entry per character instead was measured, on a real editing history, as
+	// more than half the memory the document used.
+	dels []delRange
 	next *block
 	// prev makes the walk in visibleAt run both ways. Editing is local: the next
 	// position asked for is usually just before or just after the last one, and
@@ -44,9 +46,176 @@ type block struct {
 	prev *block
 }
 
+// A delRange is one stretch of a block that was deleted in one go: characters
+// [from, to) were removed by one site's operations id.Seq, id.Seq+1, … in that
+// order, so the operation that removed character from+k is id.Seq+k.
+//
+// The contiguity is not an assumption about the world; it is enforced. A
+// deletion only joins a range when its identity continues that range's
+// sequence, and starts a new one otherwise.
+type delRange struct {
+	from, to uint32
+	id       ID
+}
+
+func (r delRange) holds(i int) bool { return uint32(i) >= r.from && uint32(i) < r.to }
+
 func (b *block) idAt(i int) ID        { return ID{Site: b.id.Site, Seq: b.id.Seq + uint64(i)} }
 func (b *block) clockAt(i int) uint64 { return b.clock + uint64(i) }
-func (b *block) aliveAt(i int) bool   { return b.dead == nil || b.dead[i].IsRoot() }
+
+// deadIndex returns the index of the range covering offset i, or -1 when the
+// character is still visible. Ranges ascend, so the search is a bisection; most
+// blocks hold none or one.
+func (b *block) deadIndex(i int) int {
+	lo, hi := 0, len(b.dels)
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		if b.dels[mid].to <= uint32(i) {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo < len(b.dels) && b.dels[lo].holds(i) {
+		return lo
+	}
+	return -1
+}
+
+func (b *block) aliveAt(i int) bool { return b.deadIndex(i) < 0 }
+
+// delIDAt returns the operation that deleted character i, or the zero ID if it
+// is still visible.
+func (b *block) delIDAt(i int) ID {
+	n := b.deadIndex(i)
+	if n < 0 {
+		return ID{}
+	}
+	r := b.dels[n]
+	return ID{Site: r.id.Site, Seq: r.id.Seq + uint64(uint32(i)-r.from)}
+}
+
+// visibleFrom counts the visible characters at offset i or later.
+func (b *block) visibleFrom(i int) int {
+	n := len(b.text) - i
+	for _, r := range b.dels {
+		if int(r.to) <= i {
+			continue
+		}
+		from := max(int(r.from), i)
+		n -= int(r.to) - from
+	}
+	return n
+}
+
+// visibleUpto counts the visible characters at offset i or earlier.
+func (b *block) visibleUpto(i int) int {
+	n := i + 1
+	for _, r := range b.dels {
+		if int(r.from) > i {
+			break
+		}
+		n -= min(int(r.to), i+1) - int(r.from)
+	}
+	return n
+}
+
+// visibleOffset returns the offset of the k'th visible character at offset i or
+// later, counting from zero.
+func (b *block) visibleOffset(i, k int) int {
+	for _, r := range b.dels {
+		if int(r.to) <= i {
+			continue
+		}
+		if gap := int(r.from) - i; k < gap {
+			return i + k
+		} else if gap > 0 {
+			k -= gap
+		}
+		i = int(r.to)
+	}
+	return i + k
+}
+
+// markDeleted records that character i was removed by the operation id. The
+// character must still be visible.
+//
+// A deletion extends the record ending where it lands, when its identity
+// continues that record's sequence — which is what lets one record stand for a
+// whole stretch. Backspacing over a word produces one record; scattered
+// corrections produce one each.
+//
+// Nothing else can ever be joined, and that is a consequence rather than a
+// simplification: a site's operations are applied in sequence order, so a record
+// whose identities *follow* this deletion's cannot already exist. There is no
+// case where a deletion fills a gap between two records, or leads into one.
+func (b *block) markDeleted(i int, id ID) {
+	at := uint32(i)
+	n := 0
+	for n < len(b.dels) && b.dels[n].to <= at {
+		n++
+	}
+	if n > 0 {
+		if prev := &b.dels[n-1]; prev.to == at && prev.continuesTo(at) == id {
+			prev.to = at + 1
+			return
+		}
+	}
+	b.dels = append(b.dels, delRange{})
+	copy(b.dels[n+1:], b.dels[n:])
+	b.dels[n] = delRange{from: at, to: at + 1, id: id}
+}
+
+// continuesTo returns the identity this record's sequence would give to the
+// character at offset i.
+func (r delRange) continuesTo(i uint32) ID {
+	return ID{Site: r.id.Site, Seq: r.id.Seq + uint64(i-r.from)}
+}
+
+// isolate makes character i a record of its own, cutting whatever record holds
+// it, and returns that record's index. It is what lets one character's deletion
+// be replaced when two replicas delete it at once.
+func (b *block) isolate(i int) int {
+	n := b.deadIndex(i)
+	r := b.dels[n]
+	at := uint32(i)
+	if r.from == at && r.to == at+1 {
+		return n
+	}
+	cut := make([]delRange, 0, 3)
+	if r.from < at {
+		cut = append(cut, delRange{from: r.from, to: at, id: r.id})
+	}
+	cut = append(cut, delRange{from: at, to: at + 1, id: r.continuesTo(at)})
+	if r.to > at+1 {
+		cut = append(cut, delRange{from: at + 1, to: r.to, id: r.continuesTo(at + 1)})
+	}
+	rest := append([]delRange(nil), b.dels[n+1:]...)
+	b.dels = append(append(b.dels[:n:n], cut...), rest...)
+	if r.from < at {
+		return n + 1
+	}
+	return n
+}
+
+// A delCursor walks a block's deletion records in step with its characters, so
+// that reading every character's deletion costs one pass rather than a search
+// each time.
+type delCursor struct {
+	b *block
+	n int
+}
+
+// at returns the operation that deleted character i, or the zero ID.
+func (c *delCursor) at(i int) ID {
+	for c.n < len(c.b.dels) && int(c.b.dels[c.n].to) <= i {
+		c.n++
+	}
+	if c.n < len(c.b.dels) && c.b.dels[c.n].holds(i) {
+		return c.b.dels[c.n].continuesTo(uint32(i))
+	}
+	return ID{}
+}
 
 // originAt returns what character i was inserted after.
 func (b *block) originAt(i int) ID {
@@ -160,9 +329,8 @@ func (d *Doc) split(b *block, i int) *block {
 		text:     b.text[i:len(b.text):len(b.text)],
 		next:     b.next,
 	}
-	if b.dead != nil {
-		right.dead = b.dead[i:len(b.dead):len(b.dead)]
-		b.dead = b.dead[:i:i]
+	if len(b.dels) > 0 {
+		right.dels = b.cutDels(i)
 	}
 	b.text = b.text[:i:i]
 	right.prev = b
@@ -172,6 +340,31 @@ func (d *Doc) split(b *block, i int) *block {
 	b.next = right
 	d.indexAdd(right)
 	return right
+}
+
+// cutDels takes the deletion records from offset i onwards off b and returns
+// them rebased to zero, for the block being split off. A record straddling the
+// cut is divided, the right-hand part inheriting the identities its sequence
+// gives those characters.
+func (b *block) cutDels(i int) []delRange {
+	at := uint32(i)
+	n := 0
+	for n < len(b.dels) && b.dels[n].to <= at {
+		n++
+	}
+	moved := make([]delRange, 0, len(b.dels)-n)
+	keep := b.dels[:n:n]
+	if n < len(b.dels) && b.dels[n].from < at {
+		straddling := b.dels[n]
+		keep = append(keep, delRange{from: straddling.from, to: at, id: straddling.id})
+		moved = append(moved, delRange{to: straddling.to - at, id: straddling.continuesTo(at)})
+		n++
+	}
+	for _, r := range b.dels[n:] {
+		moved = append(moved, delRange{from: r.from - at, to: r.to - at, id: r.id})
+	}
+	b.dels = keep
+	return moved
 }
 
 // extends reports whether a character is exactly the next one of b's run: the
@@ -213,15 +406,20 @@ func (d *Doc) String() string {
 	var b strings.Builder
 	b.Grow(d.visible)
 	for blk := d.head.next; blk != nil; blk = blk.next {
-		if blk.dead == nil {
+		if len(blk.dels) == 0 {
 			// The common case by far: a whole run still visible, written in one go.
 			b.WriteString(string(blk.text))
 			continue
 		}
-		for i, r := range blk.text {
-			if blk.dead[i].IsRoot() {
-				b.WriteRune(r)
+		at := 0
+		for _, r := range blk.dels {
+			if int(r.from) > at {
+				b.WriteString(string(blk.text[at:r.from]))
 			}
+			at = int(r.to)
+		}
+		if at < len(blk.text) {
+			b.WriteString(string(blk.text[at:]))
 		}
 	}
 	return b.String()
@@ -247,53 +445,27 @@ func (d *Doc) visibleAt(pos int) (*block, int) {
 // forward walks towards the end of the document from a known position.
 func forward(b *block, i, n, pos int) (*block, int) {
 	for ; ; b, i = b.next, 0 {
-		if b.dead == nil {
-			if rest := len(b.text) - i; n+rest <= pos {
-				n += rest
-				continue
-			}
-			return b, i + pos - n
+		rest := b.visibleFrom(i)
+		if n+rest <= pos {
+			n += rest
+			continue
 		}
-		for ; i < len(b.text); i++ {
-			if !b.aliveAt(i) {
-				continue
-			}
-			if n == pos {
-				return b, i
-			}
-			n++
-		}
+		return b, b.visibleOffset(i, pos-n)
 	}
 }
 
 // backward walks towards the start of the document from a known position.
 func backward(b *block, i, n, pos int) (*block, int) {
 	for {
-		// Step back over tombstones and block boundaries until (b, i) names a
-		// visible character again — which is then the n'th.
-		for i < 0 || !b.aliveAt(i) {
-			if i < 0 {
-				b = b.prev
-				i = len(b.text) - 1
-				continue
-			}
-			i--
+		// The visible characters at offset i or earlier are the ones ending at
+		// n, so the first of them is n-v+1'th in the document.
+		first := n - b.visibleUpto(i) + 1
+		if pos >= first {
+			return b, b.visibleOffset(0, pos-first)
 		}
-		if n == pos {
-			return b, i
-		}
-		if b.dead == nil {
-			// Every character before this one in the run is visible too, so the
-			// one wanted is here whenever it is within reach.
-			if n-pos <= i {
-				return b, i - (n - pos)
-			}
-			n -= i + 1 // stepping off the front of the run costs i+1 of them
-			i = -1
-			continue
-		}
-		n--
-		i--
+		n = first - 1
+		b = b.prev
+		i = len(b.text) - 1
 	}
 }
 
@@ -519,9 +691,6 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	// appended in place: no block, no index entry, nothing to merge afterwards.
 	if extends(at, id, clock, origin) {
 		at.text = append(at.text, ch)
-		if at.dead != nil {
-			at.dead = append(at.dead, ID{})
-		}
 		return at, len(at.text) - 1
 	}
 
@@ -545,16 +714,13 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 // remembered separately so it can still be replayed to peers.
 func (d *Doc) tombstone(op Op) {
 	b, i, _ := d.lookupChar(op.Target)
-	switch {
-	case b.aliveAt(i):
-		if b.dead == nil {
-			b.dead = make([]ID, len(b.text))
-		}
-		b.dead[i] = op.ID
+	switch existing := b.delIDAt(i); {
+	case existing.IsRoot():
+		b.markDeleted(i, op.ID)
 		d.visible--
-	case idLess(op.ID, b.dead[i]):
-		d.recordDuplicate(b.dead[i], op.Target)
-		b.dead[i] = op.ID
+	case idLess(op.ID, existing):
+		b.dels[b.isolate(i)].id = op.ID
+		d.recordDuplicate(existing, op.Target)
 	default:
 		d.recordDuplicate(op.ID, op.Target)
 	}
@@ -589,6 +755,7 @@ func idLess(a, b ID) bool {
 func (d *Doc) OpsSince(vv VersionVector) []Op {
 	var ops []Op
 	for b := d.head.next; b != nil; b = b.next {
+		cursor := delCursor{b: b}
 		for i, r := range b.text {
 			id := b.idAt(i)
 			if !vv.Includes(id) {
@@ -600,8 +767,8 @@ func (d *Doc) OpsSince(vv VersionVector) []Op {
 					Char:   r,
 				})
 			}
-			if b.dead != nil && !b.dead[i].IsRoot() && !vv.Includes(b.dead[i]) {
-				ops = append(ops, deleteOp(b.dead[i], id))
+			if del := cursor.at(i); !del.IsRoot() && !vv.Includes(del) {
+				ops = append(ops, deleteOp(del, id))
 			}
 		}
 	}

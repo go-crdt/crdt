@@ -38,6 +38,7 @@ func (d *Doc) Snapshot() []byte {
 
 	out = binary.AppendUvarint(out, uint64(d.total))
 	for b := d.head.next; b != nil; b = b.next {
+		cursor := delCursor{b: b}
 		for i, r := range b.text {
 			out = binary.AppendUvarint(out, uint64(b.id.Site))
 			out = binary.AppendUvarint(out, b.id.Seq+uint64(i))
@@ -46,10 +47,7 @@ func (d *Doc) Snapshot() []byte {
 			out = binary.AppendUvarint(out, uint64(origin.Site))
 			out = binary.AppendUvarint(out, origin.Seq)
 			out = binary.AppendUvarint(out, uint64(r))
-			var del ID
-			if b.dead != nil {
-				del = b.dead[i]
-			}
+			del := cursor.at(i)
 			out = binary.AppendUvarint(out, uint64(del.Site))
 			out = binary.AppendUvarint(out, del.Seq)
 		}
@@ -139,7 +137,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		// Anything else describes a document no replica could reach: a deletion
 		// of a character still visible would take effect on replay and diverge.
 		b, i, known := d.lookupChar(target)
-		if !known || b.aliveAt(i) || !idLess(b.dead[i], delID) {
+		if !known || b.aliveAt(i) || !idLess(b.delIDAt(i), delID) {
 			return nil, ErrMalformed
 		}
 		d.recordDuplicate(delID, target)
@@ -196,10 +194,7 @@ func (d *Doc) adopt(c character, l *ledger) error {
 	if c.delID.IsRoot() {
 		d.visible++
 	} else {
-		if b.dead == nil {
-			b.dead = make([]ID, len(b.text))
-		}
-		b.dead[i] = c.delID
+		b.markDeleted(i, c.delID)
 	}
 	if c.clock > d.clock {
 		d.clock = c.clock

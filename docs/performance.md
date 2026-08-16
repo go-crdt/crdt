@@ -12,10 +12,10 @@ Apple M4 Max, Go 1.26.4, `darwin/arm64`:
 
 | | Result |
 |---|---|
-| replay the whole history locally | **54.6 ms** — 210 ns/edit |
-| apply the same history as a peer's operations | **80.7 ms** — 311 ns/operation |
-| deliver it **back to front**, nothing applicable until the last operation | **0.30 s** |
-| memory held afterwards | **4.7 MiB** — 26.4 bytes per character including tombstones |
+| replay the whole history locally | **24.4 ms** — 94 ns/edit |
+| apply the same history as a peer's operations | **55.9 ms** — 215 ns/operation |
+| deliver it **back to front**, nothing applicable until the last operation | **0.24 s** |
+| memory held afterwards | **3.9 MiB** — 22.7 bytes per character including tombstones |
 
 Reproduce it, and check the result against the recorded final text:
 
@@ -33,13 +33,13 @@ snapshot round trip and a full reload. CI runs it on every change.
 
 On a document of 10 000 characters:
 
-| Benchmark | 0.1.0 | 0.2.0 | 0.3.0 |
-|---|---|---|---|
-| `InsertAtEnd` | 231 ns | 65 ns | **34.8 ns** |
-| `ApplyRemote` (10 000 operations) | 823 µs | 441 µs | **302 µs** |
-| `Load` | 1.48 ms | 1.02 ms | **830 µs** |
-| `String` | 34.7 µs | 31.0 µs | **27.4 µs** |
-| memory, one run | 107.7 B/char | 73.1 | **4.19** |
+| Benchmark | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 |
+|---|---|---|---|---|
+| `InsertAtEnd` | 231 ns | 65 ns | 34.8 ns | **32.9 ns** |
+| `ApplyRemote` (10 000 operations) | 823 µs | 441 µs | 302 µs | **279 µs** |
+| `Load` | 1.48 ms | 1.02 ms | 830 µs | **756 µs** |
+| `String` | 34.7 µs | 31.0 µs | 27.4 µs | **23.7 µs** |
+| memory, one run | 107.7 B/char | 73.1 | 4.19 | **4.20** |
 
 `go test -run '^$' -bench . -benchmem`.
 
@@ -103,29 +103,49 @@ arrival rescanned everything still parked. Delivering the real trace in reverse 
 Operations now wait in a map keyed by the single operation each needs, so
 integrating one wakes exactly its dependents. **210 s → 0.30 s.**
 
+### Deletions stored as stretches
+
+A block used to keep one deletion identity per character as soon as any
+character in it died — 2289 KiB of the 4015 the real trace occupied, and half of
+those entries described characters that were still visible.
+
+A record now covers a whole stretch: characters `[from, to)` removed by one
+site's operations `seq, seq+1, …`, so the operation that removed character
+`from+k` is `seq+k`. Backspacing over a word is one record rather than one per
+letter. The contiguity is enforced, not assumed — a deletion joins the record
+beside it only when its identity continues that record's sequence.
+
+Measuring first was worth it: the trace's 77 463 tombstones collapse to 50 276
+records, 1.5 characters each, because most are scattered corrections rather than
+long runs. That put the honest expectation at 2289 → 1178 KiB rather than the
+larger figure a guess would have promised.
+
+The speed-up was the surprise. **54.6 ms → 24.4 ms on the real trace**, because
+everything that walks a block — the text, the positional search, counting what is
+visible — now steps over stretches instead of testing characters one at a time.
+
+One simplification fell out and is worth stating, because it looks like a missing
+case: a deletion can only ever *extend* the record ending where it lands. It can
+never fill a gap between two records, or lead into one, because a site's
+operations are applied in sequence order — a record whose identities follow this
+deletion's cannot already exist.
+
 ## Where the memory goes now
 
-Measured on the real trace: 10 824 blocks holding 182 315 characters.
+Measured on the real trace: 10 824 blocks holding 182 315 characters, of which
+77 463 are tombstones, in 3.9 MiB.
 
 | | |
 |---|---|
-| block headers | 1014 KiB |
+| block headers | ~1050 KiB |
 | text | 712 KiB |
-| deletion records | **2289 KiB** |
+| deletion records | ~1180 KiB |
 
-The deletion records dominate, and half of what they hold is nothing: a block
-keeps one entry per character as soon as *any* character in it is deleted, so
-146 546 entries carry 77 463 actual tombstones. Two designs would fix it, and the
-measurement says which is worth trying first:
-
-- **Split on deletion** so a block is wholly visible or wholly deleted, keeping
-  one deletion identity per block instead of one per character. It trades
-  deletion records for block headers, and headers are already a quarter of the
-  total — worth measuring before committing to.
-- **A visibility bitmap** plus a compact list of the deletions themselves. One
-  bit per character instead of sixteen bytes, at the cost of a search to recover
-  a deletion's identity — which only `OpsSince` and `Snapshot` need, never the
-  editing path.
+The remaining lever is the block headers, at 104 bytes each. An order-statistic
+tree over the sequence would replace both the linked list and the per-site slice
+index, make a cold positional lookup logarithmic rather than linear in runs, and
+remove the adversarial quadratic described below — worth measuring before
+committing to.
 
 ## Complexity
 
@@ -134,7 +154,7 @@ measurement says which is worth trying first:
 | `Insert` or `Delete` near the last edit | O(distance in characters), which is what locality makes small |
 | `Insert` or `Delete` cold | O(runs), not O(characters) |
 | `Apply` an insertion | O(runs scanned from the origin) |
-| `Apply` a deletion | O(log runs of the target's site) |
+| `Apply` a deletion | O(log runs of the target's site), then O(records in the run) |
 | an operation arriving before its dependencies | O(1) to park, O(1) to wake |
 | `String`, `Snapshot`, `OpsSince` | O(characters, alive and tombstoned) |
 
