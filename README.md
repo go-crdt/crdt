@@ -22,7 +22,7 @@ Zero dependencies.
 
 | Package | Purpose |
 |---|---|
-| `crdt` | the replicated text document (`Doc`), a replicated sequence of values (`List`) and a replicated map (`Map`) — operations, version vectors, snapshots |
+| `crdt` | the replicated text document (`Doc`), a replicated sequence of values (`List`), a replicated map (`Map`) and a document of named parts (`Composite`) — operations, version vectors, snapshots |
 | `crdt/awareness` | ephemeral presence — who is here and where their cursor is |
 
 ## Using it
@@ -89,6 +89,40 @@ A deleted key keeps its clock. Dropping it would let an older write arriving
 afterwards bring the key back on the replica that heard it late and not on the
 one that heard it early, permanently — the classic mistake in a last-writer-wins
 map, and the thing here most worth reading [docs/design.md](docs/design.md) for.
+
+## One document, many parts
+
+An editor does not hold one structure. It holds the text, the comments on it,
+the record of who changed what, the messages beside it and a sheet of cells —
+and persisting those separately means five snapshots saved at five moments, five
+things to authorize, and no instant at which the set of them is consistent.
+`Composite` is those parts under one name:
+
+```go
+doc := crdt.NewComposite(site)
+
+text, _ := doc.Text("file:src/main.tex")   // a *Doc,  created on first use
+chat, _ := doc.List("chat")                // a *List
+cells, _ := doc.Map("cells")               // a *Map
+
+snapshot := doc.Snapshot()                 // one thing to persist
+missed := server.OpsSince(client.Version())
+```
+
+A part is identified by its **name and its kind together**, and it exists
+because operations for it exist — so there is no operation to create one, and
+two replicas that reach for `"chat"` at the same moment are already holding the
+same part. It follows that a part which exists and holds nothing is
+indistinguishable from one that was never created, and that has to be true
+rather than convenient: an empty part is in no snapshot and no version, or two
+replicas holding the same operations would disagree about their state.
+
+Each part keeps its own site counter, clock and version vector, so a `Doc` inside
+a composite behaves exactly as one standing alone, and the version is per part.
+On a document of three hundred parts — one small map per comment, which is how a
+`resolved` flag flips with one write instead of a delete and a reinsert — the
+version encodes to 16 KB with the site identities shared in one table rather than
+repeated in every part, a third less than writing them out.
 
 ## Keeping a view in step
 
@@ -165,9 +199,9 @@ are checked against node's, not against ours.
 
 ## Status
 
-Version 0.10: the text, list and map CRDTs, the wire and snapshot formats,
-awareness, and the surface an editor needs — reported changes, anchors,
-authorship, and UTF-16 addressing.
+Version 0.11: the text, list and map CRDTs, a composite document that holds them
+as named parts, the wire and snapshot formats, awareness, and the surface an
+editor needs — reported changes, anchors, authorship, and UTF-16 addressing.
 Pure Go, CGO=0, **100% statement coverage** on both packages, race-clean, six-arch
 CI, and the full suite green under `js/wasm`.
 

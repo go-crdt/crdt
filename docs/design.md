@@ -346,6 +346,125 @@ bytes hand a replica a counter one step from wrapping — the same defect as the
 paragraph above, arriving by a different road. Both roads are now closed by the
 same constant.
 
+## A document of named parts
+
+An editor holds a text, the comments on it, a record of changes, a chat and a
+sheet of cells. Persisting those as five snapshots means five moments at which
+they were saved and no instant at which the five agree — a session restored from
+them can hold a comment on a sentence the text beside it does not have. `Composite`
+holds them as named parts: one snapshot, one version, one thing to authorize.
+
+It adds no merge rule. Everything below is about identity, about cost when there
+are hundreds of parts, and about what its decoder has to refuse.
+
+### Each part keeps its own counters
+
+A part is an ordinary `Doc`, `List` or `Map`, with its own site counter, Lamport
+clock and version vector. One counter for the whole document was considered and
+rejected twice over. It would make `Doc.Version` describe operations a standalone
+`Doc` knows nothing about, damaging three clean types for a container's
+convenience — and it would not buy cross-part causality anyway, because
+contiguous sequence numbers only order operations issued by the *same* site, so a
+comment Bob writes on text Ada typed is unprotected either way.
+
+The version is therefore per part: `map[Part]VersionVector`.
+
+### A part is (name, kind), and exists because its operations exist
+
+Two replicas that have never spoken may each reach for `"notes"`, one as a list
+and one as a map. There is no operation to exchange that would tell them so.
+Identifying a part by name alone makes that a conflict needing a tie-break, and
+whichever way the tie-break falls one replica finds its writes gone; identifying
+it by name *and* kind makes it two parts, which is convergent, needs no
+arbitration, and needs no rule anybody has to know.
+
+That is also why there is no part-creation operation. `c.List("comments")` on two
+replicas at once must converge with nothing exchanged, and it does, because
+reaching for a part is not an event.
+
+### An empty part is not merely cheap — it does not exist
+
+The consequence is forced rather than chosen. A replica that reached for `"chat"`
+and typed nothing must produce the same snapshot bytes as one that never heard
+the word, or two replicas holding exactly the same operations would disagree
+about their state and the snapshot would stop being a convergence check. So a
+part holding no operations is in no snapshot, in no version, and not among
+`Parts()`. A part holding only tombstones has had operations and stays.
+
+### What it costs in the number of parts
+
+The consumer this was written for gives every comment its own map part, so that a
+`resolved` flag flips with one `Set` rather than a delete and a reinsert. That
+means hundreds of parts of eight keys each. Measured on 1 text part of 2 000
+characters, 3 lists of 100 values and 300 maps of 8 keys, edited by three sites
+whose identities are `DeriveSiteID` hashes — Apple M4 Max, Go 1.26.4,
+`darwin/arm64`, `BenchmarkComposite*`:
+
+| | | |
+|---|---|---|
+| `Snapshot` | 277 µs | 113 068 bytes |
+| `LoadComposite` | 615 µs | |
+| `OpsSince(nil)` — the whole history | 690 µs | |
+| `OpsSince(v)` — a peer missing one part | 21 µs | |
+| `Version().MarshalBinary()` | 110 µs | 16 052 bytes |
+
+The last two are the ones that matter in a live session. `OpsSince` compares the
+peer's vector against each part's before touching a history, so a peer that has
+missed one comment does not pay for the other two hundred and ninety-nine; and
+neither it nor `Version` asks `Parts()` for its parts in order, because sorting
+three hundred names costs more than the answer. Sorting is left to the batches
+actually being sent, of which there is usually one. That alone took `OpsSince`
+from 71 µs to 21 µs.
+
+A version travels on every join, so its encoding writes the sites once in a table
+and each part's entries name an index into it. A `SiteID` is a whole uint64 —
+`DeriveSiteID` uses the range — so it is ten bytes as a varint where an index into
+a table of three is one. Measured: 16 052 bytes against 23 926 for the same
+version with the identities repeated, a third less. What is left is mostly the
+names themselves, and interning those would mean a version could not be read
+without the snapshot that defines them, which is not a trade worth making for a
+message this size.
+
+### Loading is a trust boundary, three times over
+
+Each part's bytes go to that part's own loader, so the clock ceiling, the version
+vector's promise and everything `Load`, `LoadList` and `LoadMap` refuse are
+enforced there and not re-derived here. A composite has no clock of its own — it
+mints nothing — so `MaxClock` reaches it only through a part, except in
+`CompositeVersion.UnmarshalBinary`, which a part never sees and which holds the
+ceiling itself.
+
+What this decoder adds is what only it can see: that parts ascend strictly by
+kind and then name, that a name is non-empty valid UTF-8, and that no part is
+empty. The last is not tidiness. An empty part is one no snapshot carries, so
+accepting one would mean re-encoding gave back different bytes.
+
+The hazard the list loader had — a ledger sharing its version vector with the
+list it was checking — has the same shape here and appears in two places. Each
+part's loader is handed a window on the caller's buffer, which the caller may
+overwrite; all three copy what they keep, and the round trip is asserted against a
+buffer that is scribbled over after loading. And `Version` hands out copies of
+every vector, because handing out the live ones would put the position a server
+measures a client against under the control of the thing being measured.
+
+One thing this loader deliberately does not insist on is that a part's bytes are
+the *current* encoding. A text part written by an older build is still read by
+`Load` and written back in the current form, so a snapshot this package accepts is
+normalised on load while one it produced reloads to itself byte for byte.
+Refusing the older form would buy an exact fixed point on arbitrary input at the
+price of the migration that form exists for.
+
+### A name
+
+Names are arbitrary UTF-8 carrying structure — `file:src/main.tex`,
+`comment:9f3c…`, `chat`. Invalid UTF-8 is refused, for the reason `Map` refuses
+it in a key: a name crosses into JavaScript, where a string is UTF-16 and bytes
+that are not text cannot survive the trip. The empty name is refused too, and
+that is a decision rather than an omission — the name is the only thing telling
+one part from another, `""` is what a caller passes when the name it meant to
+compute never got computed, and two unrelated bugs would then share one part with
+nothing downstream able to notice.
+
 ## Awareness
 
 Cursors and selections are not part of the document. They are never persisted,

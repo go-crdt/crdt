@@ -47,6 +47,33 @@ func (v VersionVector) Equal(other VersionVector) bool {
 	return true
 }
 
+// promises reports whether the vector describes any operation at all. A site
+// recorded with a zero sequence number counts as absent, as it does for Equal,
+// so this is not len(v) != 0.
+func (v VersionVector) promises() bool {
+	for _, seq := range v {
+		if seq != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// covers reports whether v accounts for every operation other describes.
+//
+// It is the question a replica asks before working out what a peer is missing:
+// if the peer covers what this replica holds, there is nothing to send, and the
+// answer costs a walk of the vector rather than of the history. [Composite]
+// asks it once per part, of which there may be hundreds.
+func (v VersionVector) covers(other VersionVector) bool {
+	for site, seq := range other {
+		if v[site] < seq {
+			return false
+		}
+	}
+	return true
+}
+
 // sites returns the sites with a non-zero sequence number, ascending, so that
 // anything derived from a vector — a snapshot, a comparison — is deterministic
 // rather than dependent on Go's map iteration order.

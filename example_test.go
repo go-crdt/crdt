@@ -1,6 +1,7 @@
 package crdt_test
 
 import (
+	"bytes"
 	"fmt"
 
 	"github.com/go-crdt/crdt"
@@ -201,4 +202,60 @@ func ExampleDoc_UTF16Offset() {
 		fmt.Println("caret at code unit", at)
 	}
 	// Output: caret at code unit 8
+}
+
+// A composite holds a text, the lists beside it and a map of cells as one
+// document. Nothing is exchanged to create a part: both replicas reach for
+// "chat" and are already holding the same one.
+func ExampleComposite() {
+	ada, grace := crdt.NewComposite(1), crdt.NewComposite(2)
+
+	text, err := ada.Text("file:main.tex")
+	if err != nil {
+		panic(err)
+	}
+	typed, err := text.Insert(0, "\\section{Results}")
+	if err != nil {
+		panic(err)
+	}
+
+	chat, err := grace.List("chat")
+	if err != nil {
+		panic(err)
+	}
+	said, err := chat.Insert(0, []byte("looks good"))
+	if err != nil {
+		panic(err)
+	}
+
+	// Operations are addressed to a part by the caller; only the caller knows.
+	err = grace.Apply(crdt.PartOps{
+		Part: crdt.Part{Kind: crdt.PartText, Name: "file:main.tex"},
+		Text: typed,
+	})
+	if err != nil {
+		panic(err)
+	}
+	err = ada.Apply(crdt.PartOps{
+		Part: crdt.Part{Kind: crdt.PartList, Name: "chat"},
+		List: said,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	fmt.Println(ada.Parts())
+	fmt.Println(bytes.Equal(ada.Snapshot(), grace.Snapshot()))
+
+	// A part reached for and left empty is in no snapshot: it is
+	// indistinguishable from one nobody ever named.
+	if _, err := ada.Map("cells"); err != nil {
+		panic(err)
+	}
+	fmt.Println(bytes.Equal(ada.Snapshot(), grace.Snapshot()))
+
+	// Output:
+	// [{text file:main.tex} {list chat}]
+	// true
+	// true
 }

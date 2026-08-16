@@ -45,4 +45,14 @@
 // keeps its clock so that an older write arriving later cannot resurrect it. It
 // shares [ID], [VersionVector], [ErrMalformed] and the wire conventions with
 // [Doc] and nothing else, so neither structure can disturb the other.
+//
+// # One document of many parts
+//
+// [Composite] holds named parts, each a [Doc], a [List] or a [Map], so that a
+// text, the comments on it and a sheet of cells are one snapshot, one version
+// and one thing to authorize rather than five. It adds no merge rule: each part
+// keeps its own counters and converges exactly as it does standing alone. A part
+// is identified by its name and its kind together, and exists because operations
+// for it exist, so two replicas that reach for the same part are already holding
+// it and nothing is exchanged to create one.
 package crdt
