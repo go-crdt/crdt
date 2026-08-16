@@ -29,6 +29,112 @@ The replay is a correctness test before it is a benchmark: a quarter of a millio
 edits at positions a real person chose, with the answer known in advance, plus a
 snapshot round trip and a full reload. CI runs it on every change.
 
+## Measured against other implementations
+
+The numbers above are ours. Setting them beside the figures other projects
+publish would compare four machines, so the other implementations were run here
+instead: same machine, same trace, same protocol, on 2026-08-16.
+
+Every implementation is driven the way its own published benchmark drives it,
+and every run rebuilds the document and compares it against the `endContent`
+recorded in the trace before any time is reported — a replay that produces the
+wrong text fails rather than printing a number. Verification is outside the
+clock. The harness is in [`docs/comparison/`](comparison/): one file with one
+timing loop and one adapter per library, so the measurement cannot differ
+between them.
+
+Apple M4 Max (16 cores, 128 GiB), macOS 26.6.1, Go 1.26.4 `darwin/arm64`,
+Node v26.4.0. Ten replays of the whole 259 778-edit trace per implementation;
+the median is quoted and the full spread is in the last column.
+
+| Implementation | Runs on | Replay (median) | ns/edit | × ours | min–max |
+|---|---|---|---|---|---|
+| diamond-types 1.0.2 | Rust → WebAssembly | **18.4 ms** | 71 | **0.76×** | 17.7–23.8 ms |
+| **go-crdt/crdt 0.4.0** | Go | **24.1 ms** | 93 | 1.00× | 23.9–24.1 ms |
+| loro-crdt 1.14.1 | Rust → WebAssembly | 692 ms | 2 662 | 28.7× | 573–1007 ms |
+| yjs 13.6.32 | JavaScript | 3 079 ms | 11 851 | 127.6× | 3068–3141 ms |
+| @automerge/automerge-wasm 1.0.0-preview.0 | Rust → WebAssembly | 8 262 ms | 31 803 | 342.5× | 8235–8497 ms |
+| @automerge/automerge 3.4.1 | Rust → WebAssembly, JS wrapper | 26 492 ms | 101 980 | 1098× | 25 660–30 672 ms |
+
+**diamond-types is faster than we are**, by a third, and that is the result. It
+is the fastest text CRDT anyone has published and it stays that way here. The
+honest reading of this table is that we are in its range — same order of
+magnitude, same trace, same machine — and ahead of everything else measured.
+
+### Document size, where we do badly
+
+Encoding the replayed document:
+
+| Implementation | Encoded document |
+|---|---|
+| diamond-types 1.0.2 | 109 KB |
+| @automerge/automerge 3.4.1 | 129 KB |
+| yjs 13.6.32 (V2 encoding) | 160 KB |
+| loro-crdt 1.14.1 | 251 KB |
+| yjs 13.6.32 (V1 encoding) | 311 KB |
+| **go-crdt/crdt 0.4.0** | **2 663 KB** |
+
+Ours is between eight and twenty-four times larger than anyone else's. The
+others compress the sequence — run-length identities, variable-length integers,
+columnar layout — and `Snapshot` does not; it writes the state out plainly. This
+is the clearest thing this comparison found to fix, and nothing about the format
+prevents fixing it.
+
+### Memory
+
+Only where it can be read honestly. Yjs is JavaScript, so `heapUsed` after a
+forced collection is its document; Automerge, Loro and diamond-types keep theirs
+in WebAssembly linear memory, which `process.memoryUsage()` does not see, so
+there is no figure for them here rather than a bad one.
+
+| Implementation | Held after replay | Per visible character |
+|---|---|---|
+| **go-crdt/crdt 0.4.0** | **4 034 KiB** | **39.4 B** |
+| yjs 13.6.32, `gc: true` (default) | 5 678 KiB | 55.5 B |
+| yjs 13.6.32, `gc: false` | 7 573 KiB | 74.0 B |
+
+Per *visible* character, because that is the only count the two agree on: the
+document ends with 104 852 characters, and we additionally hold 77 463
+tombstones, which is where the 22.7 B/char quoted earlier comes from. Yjs's
+default `gc: true` discards deleted content, so the `gc: false` row is the
+closer comparison — and we are below both.
+
+Ours varied by not one byte across three runs; Yjs's readings spanned 5678–5997
+KiB (`gc: true`) and 7255–7573 KiB (`gc: false`).
+
+### What this does not say
+
+- **These libraries do not all do the same job.** Automerge maintains a whole
+  JSON document with history, rich-text marks and branch metadata; Yjs and Loro
+  carry several shared types. This is a text CRDT. A trace of single-character
+  text edits is the workload they all publish against, but it flatters the
+  implementation that does least.
+- **Yjs is JavaScript** and the rest are compiled. That it is 128× slower than
+  compiled code on a tight per-character loop is not a defect in Yjs.
+- The Yjs figure here is faster than the 5 714 ms dmonad publishes for the same
+  benchmark, on newer hardware and without the update observer his harness
+  registers. Our encoded size for Yjs, 159 929 bytes, matches his published
+  `docSize` exactly, which is the check that this harness reproduces his.
+- Automerge measured **slower** than the 14 326 ms dmonad publishes, on faster
+  hardware. He pins `@automerge/automerge@^2.1.10` and this is 3.4.1. That
+  difference was not investigated, and no claim of a regression is made from one
+  measurement. The `automerge-wasm` row is the same trace against Automerge's
+  Rust core with the JavaScript document wrapper removed, which puts about two
+  thirds of the cost in the wrapper.
+- Wrapping the whole Yjs replay in a single `doc.transact` makes it *slower*,
+  9 406 ms against 3 079 ms, so the per-edit form used here is both what Yjs's
+  own benchmark does and the faster of the two.
+- One `Automerge.change` per edit, rather than one for the trace, costs about
+  101 µs/edit over the first 20 000 edits — Automerge's own benchmark batches,
+  and this is why.
+
+Reproduce all of it:
+
+```sh
+cd docs/comparison && npm install
+CRDT_TRACE=…/automerge-paper.json.gz node --expose-gc bench.js yjs --runs 10
+```
+
 ## Synthetic benchmarks
 
 On a document of 10 000 characters:
