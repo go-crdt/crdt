@@ -52,6 +52,23 @@ client, err := crdt.Load(siteID, snapshot)   // join
 missed := server.OpsSince(client.Version())  // catch up
 ```
 
+## Anchoring, and who wrote what
+
+An offset names a place; an anchor names a character, and keeps naming it however
+the document moves around it. That is what a comment, a mark or a stored
+selection should be:
+
+```go
+anchor, _ := doc.Anchor(pos)     // the identity of the character there
+pos, ok := doc.Position(anchor)  // where it is now — or where it was, if deleted
+doc.Visible(anchor)              // whether it is still in the text
+doc.AuthorRuns()                 // the visible text split by who wrote each stretch
+```
+
+Every character already carried the identity of the operation that created it,
+and the site is part of that identity, so none of this costs the document
+anything to store.
+
 ## What it guarantees
 
 - **Convergence.** Replicas holding the same operations hold the same document,
