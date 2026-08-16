@@ -53,7 +53,15 @@ type block struct {
 	left, right, up *block
 	subMin          *block
 	subVis          int32
-	height          uint8
+	// subSup is the same summary for supplementary characters — those written as
+	// two UTF-16 code units rather than one — which is what turns a UTF-16 offset
+	// into a descent instead of a walk. See utf16.go.
+	subSup int32
+	// nsup counts the supplementary characters in text, deleted ones included, so
+	// that a block holding none — every block of a document with no emoji in it —
+	// answers any question about UTF-16 units without looking at its characters.
+	nsup   int32
+	height uint8
 }
 
 // A delRange is one stretch of a block that was deleted in one go: characters
@@ -253,6 +261,7 @@ type Doc struct {
 	tree     *block
 	dirty    *block
 	dirtyVis int32
+	dirtySup int32
 
 	// bySite indexes each site's blocks by the sequence numbers they cover,
 	// ascending. Finding the character an operation names is a binary search
@@ -294,6 +303,11 @@ type Doc struct {
 
 	visible int // characters not tombstoned
 	total   int // characters ever inserted
+	// sup is how many of the visible characters are supplementary — outside the
+	// Basic Multilingual Plane, and so two UTF-16 code units rather than one.
+	// Held at the document as well as in the index because [Doc.LenUTF16] must
+	// answer without reading, and therefore without flushing, the tree.
+	sup int
 }
 
 // New returns an empty document that issues operations as site. Every replica
@@ -353,6 +367,13 @@ func (d *Doc) split(b *block, i int) *block {
 		text:     b.text[i:len(b.text):len(b.text)],
 		next:     b.next,
 	}
+	// Dividing the supplementary count needs the characters read, so it is done
+	// only for a block that has any — which for a document with no emoji in it is
+	// no block at all.
+	if b.nsup != 0 {
+		right.nsup = countSup(right.text)
+		b.nsup -= right.nsup
+	}
 	if len(b.dels) > 0 {
 		right.dels = b.cutDels(i)
 	}
@@ -365,7 +386,7 @@ func (d *Doc) split(b *block, i int) *block {
 	d.indexAdd(right)
 	// The characters the right-hand block takes over are the ones the left-hand
 	// one no longer holds; index puts them back under the new block.
-	d.addVis(b, -int32(right.visibleFrom(0)))
+	d.addVis(b, -int32(right.visibleFrom(0)), -right.visibleSup())
 	d.index(b, right)
 	return right
 }
@@ -691,6 +712,7 @@ func (d *Doc) integrate(op Op) (*block, int) {
 	}
 	d.visible++
 	d.total++
+	d.sup += int(supUnit(op.Char))
 	b, i := d.place(op.ID, op.Clock, op.Origin, op.Char)
 	d.recordInsert(b, i, op.Char)
 	return b, i
@@ -738,14 +760,15 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	// appended in place: no block, no index entry, nothing to merge afterwards.
 	if extends(at, id, clock, origin) {
 		at.text = append(at.text, ch)
-		d.addVis(at, 1)
+		at.nsup += supUnit(ch)
+		d.addVis(at, 1, supUnit(ch))
 		return at, len(at.text) - 1
 	}
 
 	// Otherwise it starts a run of its own. It can never join the run in the
 	// block that follows: doing so would need the sequence number that block
 	// already holds.
-	fresh := &block{id: id, clock: clock, originID: origin, text: []rune{ch}, next: at.next, prev: at}
+	fresh := &block{id: id, clock: clock, originID: origin, text: []rune{ch}, nsup: supUnit(ch), next: at.next, prev: at}
 	if fresh.next != nil {
 		fresh.next.prev = fresh
 	}
@@ -765,11 +788,13 @@ func (d *Doc) tombstone(op Op) {
 	b, i, _ := d.lookupChar(op.Target)
 	switch existing := b.delIDAt(i); {
 	case existing.IsRoot():
+		sup := supUnit(b.text[i])
 		// While it is still visible, which is what gives it an offset of its own.
 		d.recordDelete(b, i)
 		b.markDeleted(i, op.ID)
-		d.addVis(b, -1)
+		d.addVis(b, -1, -sup)
 		d.visible--
+		d.sup -= int(sup)
 	case idLess(op.ID, existing):
 		b.dels[b.isolate(i)].id = op.ID
 		d.recordDuplicate(existing, op.Target)

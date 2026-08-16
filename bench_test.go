@@ -36,6 +36,37 @@ func BenchmarkInsertAtEnd(b *testing.B) {
 	}
 }
 
+// The same keystroke addressed in UTF-16 code units, on a document that holds
+// no supplementary character. That is the common case — ASCII, Latin, Greek,
+// BMP CJK — and the conversion has nothing to do in it, so the difference
+// between this and BenchmarkInsertAtEnd is what a browser client pays for
+// addressing the document the way its editor does.
+func BenchmarkInsertAtEndUTF16(b *testing.B) {
+	d, _ := filled(b, benchSize)
+	b.ResetTimer()
+	for range b.N {
+		if _, err := d.InsertUTF16(d.LenUTF16(), "a"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// And on a document that does hold them, where the offset can no longer be
+// taken at face value and every call descends the index. This is the cost of
+// one emoji, and it is charged per keystroke for as long as the emoji is there.
+func BenchmarkInsertAtEndUTF16Supplementary(b *testing.B) {
+	d, _ := filled(b, benchSize)
+	if _, err := d.Insert(0, "\U0001F600"); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		if _, err := d.InsertUTF16(d.LenUTF16(), "a"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 // Typing at the start finds its position immediately, so the difference between
 // this and BenchmarkInsertAtEnd is the walk alone.
 func BenchmarkInsertAtStart(b *testing.B) {

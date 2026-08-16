@@ -173,6 +173,62 @@ a real way to make a document unable to reproduce itself:
 - A site listed twice in the version vector, a concurrent deletion aimed at the
   root sentinel, and a concurrent deletion of a character still visible.
 
+## Counting in UTF-16
+
+The document counts characters. CodeMirror, the DOM, the Language Server
+Protocol and every index into a JavaScript string count UTF-16 code units, in
+which a character above U+FFFF — an emoji, an extended CJK ideograph, most
+mathematical alphanumerics — is two units rather than one. This is not an
+encoding detail that stops at the edge: it is a browser sending a cursor offset,
+and the offset naming a different position at each end.
+
+The failure is silent and it is permanent. A document holding one emoji before
+the cursor takes every later insertion one place to the left of where the user
+put it, produces no error, and leaves nothing behind that a later read could use
+to notice. The intended consumer is a LaTeX and Markdown editor, so the content
+that triggers it — `𝔸`, `∫`, `𝒮`, an emoji in a comment — is the content it is
+for.
+
+So `Doc` addresses the same three operations both ways. `Len`, `Insert` and
+`Delete` count runes and are unchanged; `LenUTF16`, `InsertUTF16` and
+`DeleteUTF16` count code units, and `UTF16Offset` and `RuneOffset` convert
+between the two. Nothing else grows a second form: `Anchor`, `Position` and
+`Author` speak of the document as it stands, so the conversions compose with
+them exactly.
+
+`Change` is the exception worth naming, because composing there looks safe and
+is not. Its offsets are against the text as it stood after the changes before
+it, so converting one of them against the finished document is right only for
+the last. A caller patching its own copy has the intermediate text in hand and
+converts there.
+
+### An offset that splits a character is refused
+
+A UTF-16 offset can land between the two code units of one character. There are
+three things to do about it — round down, round up, or refuse — and the third is
+the only one that keeps a promise.
+
+Such an offset names a position that does not exist. Half of an emoji is not
+somewhere a caret can be, and no user put it there: it comes from a bug, or from
+an offset computed against a different string. Rounding it silently moves the
+edit somewhere the caller did not ask for and leaves nothing to say so, which is
+the same class of failure this whole surface exists to remove — and this package
+already refuses invalid UTF-8 rather than substituting replacement characters,
+for the same reason.
+
+The control instrument settles it. JavaScript will do the operation, and
+`"a😀b".slice(0, 2) + "X"` is a string containing a lone high surrogate: not
+text, not valid UTF-8, and nothing this package can hold. An offset whose own
+definition can only be honoured by producing a broken string has already lost
+the information needed to honour it. `testdata/utf16-control.json` records those
+results as code units, and the test asserts they decode to a replacement
+character — the argument is checked, not asserted.
+
+Refusing costs the tolerant caller nothing, because rounding down needs no
+second API. An offset that splits a character is always exactly one past that
+character's first unit, so `RuneOffset(pos-1)` is the position of the character
+it landed inside, and it cannot fail.
+
 ## Awareness
 
 Cursors and selections are not part of the document. They are never persisted,
@@ -180,6 +236,20 @@ they are dropped when a peer leaves, and merging them needs nothing stronger tha
 last-writer-wins per peer — so `crdt/awareness` carries a counter of its own
 rather than borrowing the document's, and a departure keeps that counter so an
 update still in flight cannot resurrect a peer who has gone.
+
+Its offsets stay in runes, and that is a decision rather than an omission. Both
+ends have to agree what an offset means and an `Update` has nowhere to say:
+adding a unit to the encoding changes the wire format for every peer, and not
+adding one leaves a browser publishing UTF-16 and a server reading runes, with
+no error anywhere — the document's failure moved somewhere nothing can detect
+it.
+
+What makes runes safe here rather than merely incumbent is that nothing in
+awareness is authoritative. A cursor is advisory, stale before it is drawn,
+clamped rather than trusted, and replaced by the next keystroke. An offset a
+character out draws a caret a character out until the next update arrives; it
+can never edit anything and it is never stored. A peer counting in UTF-16
+converts at its own edge, where it has to clamp in any case.
 
 ## Next
 

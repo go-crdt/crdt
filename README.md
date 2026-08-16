@@ -82,6 +82,32 @@ Every character already carried the identity of the operation that created it,
 and the site is part of that identity, so none of this costs the document
 anything to store.
 
+## Counting the way a browser counts
+
+The document counts characters. CodeMirror, the DOM, the Language Server
+Protocol and every index into a JavaScript string count UTF-16 code units, in
+which an emoji, an extended CJK ideograph or a `𝔸` is **two** units and one
+character. An editor handing its cursor offset to `Insert` therefore edits in
+the wrong place as soon as the document holds one of them — silently, and with
+nothing left behind that a later read could notice.
+
+So the same operations are addressed both ways, and a caller who counts in
+UTF-16 never converts by hand:
+
+```go
+doc.LenUTF16()                 // what JavaScript's String.length would report
+doc.InsertUTF16(pos, "text")   // pos in code units
+doc.DeleteUTF16(pos, n)        // pos and n in code units
+doc.UTF16Offset(runePos)       // and the conversion, both ways
+doc.RuneOffset(utf16Pos)
+```
+
+An offset landing between the two units of one character is refused rather than
+rounded; [docs/design.md](docs/design.md) says why, and how to round it in one
+step if that is what you want. A document holding no such character converts in
+constant time, so nothing pays for this until it has an emoji in it. The answers
+are checked against node's, not against ours.
+
 ## What it guarantees
 
 - **Convergence.** Replicas holding the same operations hold the same document,

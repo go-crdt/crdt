@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/go-crdt/crdt"
+	"github.com/go-crdt/crdt/awareness"
 )
 
 // Two people edit the same document at the same time, neither having seen the
@@ -106,4 +107,57 @@ func ExampleDeriveSiteID() {
 	second := crdt.DeriveSiteID([]byte("session-8f2c"))
 	fmt.Println(first == second, first == crdt.DeriveSiteID([]byte("session-91ab")))
 	// Output: true false
+}
+
+// A browser's cursor offset counts UTF-16 code units, and an emoji is two of
+// them. Handing that offset to Insert would put the text one place to the left
+// of where the user asked for it, without an error and without a trace.
+func ExampleDoc_InsertUTF16() {
+	doc := crdt.New(1)
+	if _, err := doc.Insert(0, "ship \U0001F680 it"); err != nil {
+		panic(err)
+	}
+
+	// Nine characters, ten code units: the rocket is one and two.
+	fmt.Println(doc.Len(), doc.LenUTF16())
+
+	// The editor reports its caret just after the rocket, which is code unit
+	// seven and character six.
+	if _, err := doc.InsertUTF16(7, " now"); err != nil {
+		panic(err)
+	}
+	fmt.Println(doc)
+
+	// The offset between the rocket's two units names no position at all.
+	_, err := doc.InsertUTF16(6, "x")
+	fmt.Println(err)
+
+	// Output:
+	// 9 10
+	// ship 🚀 now it
+	// crdt: UTF-16 offset splits a surrogate pair
+}
+
+// Awareness offsets are rune positions, because both peers have to agree what
+// an offset means and an update has nowhere to say. A peer whose editor counts
+// UTF-16 converts at its own edge — where it has to clamp in any case, since a
+// cursor may describe a document longer than the one it now has.
+func ExampleDoc_UTF16Offset() {
+	doc := crdt.New(1)
+	if _, err := doc.Insert(0, "\U0001F600 hello"); err != nil {
+		panic(err)
+	}
+
+	peers := awareness.New()
+	peers.Apply(awareness.Update{Site: 2, Clock: 1, Cursor: awareness.Cursor{Anchor: 2, Head: 99}})
+
+	for _, peer := range peers.Peers() {
+		head := min(max(peer.Cursor.Head, 0), doc.Len())
+		at, err := doc.UTF16Offset(head)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println("caret at code unit", at)
+	}
+	// Output: caret at code unit 8
 }

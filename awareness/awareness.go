@@ -10,6 +10,33 @@
 // Offsets are rune positions in the document text as the publishing peer saw
 // it. A concurrent edit can leave them briefly stale; a renderer should clamp
 // them to the current length rather than trust them.
+//
+// # Why offsets here stay in runes
+//
+// [crdt.Doc] has a UTF-16 addressing surface because a browser's offsets have
+// to reach the document exactly. A cursor does not, and giving it a second unit
+// would make it worse rather than better.
+//
+// Both ends have to agree what an offset means, and an [Update] has nowhere to
+// say. Adding a unit to the encoding changes the wire format for every peer;
+// not adding one leaves a browser peer publishing UTF-16 and a server peer
+// reading runes, with no error anywhere and a caret drawn in the wrong place —
+// which is the failure the document API was given this treatment to prevent,
+// moved somewhere nothing can detect it.
+//
+// What makes runes the safe choice rather than merely the incumbent one is that
+// nothing here is authoritative. A cursor is advisory, it is stale before it is
+// drawn, it is clamped rather than trusted, and the next keystroke replaces it.
+// An offset a character out draws a caret a character out for as long as it
+// takes the next update to arrive; it can never edit anything and it is never
+// stored. That is the whole of the damage, and it is why this is the one place
+// in the library where rounding is the right answer.
+//
+// A peer that counts in UTF-16 converts at its own edge, where it has to clamp
+// in any case:
+//
+//	pos := min(max(peer.Cursor.Head, 0), doc.Len()) // it may describe a longer document
+//	head, err := doc.UTF16Offset(pos)
 package awareness
 
 import (
