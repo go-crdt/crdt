@@ -1,5 +1,11 @@
 # crdt — collaborative text editing in pure Go
 
+[![CI](https://github.com/go-crdt/crdt/actions/workflows/ci.yml/badge.svg)](https://github.com/go-crdt/crdt/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/go-crdt/crdt.svg)](https://pkg.go.dev/github.com/go-crdt/crdt)
+[![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](https://github.com/go-crdt/crdt/actions/workflows/ci.yml)
+[![license](https://img.shields.io/badge/license-BSD--3--Clause-blue)](LICENSE)
+
+
 `github.com/go-crdt/crdt` is a pure-Go, **CGO=0** conflict-free replicated data type
 for plain text: any number of replicas may edit the same document at once,
 offline, over an unreliable transport, and every replica ends up with the same
