@@ -97,6 +97,28 @@ integration rule can replace the current one without disturbing anything that
 imports it. Version 0.1 ships RGA because it is the variant whose correctness can
 be demonstrated rather than argued.
 
+## Telling a view what changed
+
+An editor cannot be handed the new text. Replacing the whole buffer throws away
+the selection, the scroll position, the folded regions and every decoration, and
+it would do so on each keystroke anyone else makes. It has to be told the edits.
+
+[Doc.ApplyChanges] is [Doc.Apply] and also reports them, against the text as it
+stands after the edits before them, so applying them in order to a copy brings
+the copy up to date. That is the property the randomised test asserts: a copy
+that only ever applies reported changes holds what the document holds, through
+two hundred sessions of shuffled and duplicated delivery.
+
+They are coalesced, because a peer typing a word produces one operation per
+character and a view would rather hear about the word. Accumulating that word
+naively — appending to the change's string per character — copies the whole word
+each time, and measured **fifty-seven times** the cost of applying the operations
+at all; the text is built in a buffer and sealed once instead, which brings the
+overhead to a fifth over [Doc.Apply].
+
+Finding where each edit landed costs a walk up the index per operation, so
+[Doc.Apply] does not collect anything and does not pay.
+
 ## Anchors, and authorship
 
 An editor needs somewhere stable to hang a comment. An offset is not that: the

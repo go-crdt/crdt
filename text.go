@@ -288,6 +288,10 @@ type Doc struct {
 	markPos int
 	markIdx int
 
+	// collect gathers what each operation did to the visible text, for callers
+	// that have to keep a view in step. It is nil unless someone asked.
+	collect *collector
+
 	visible int // characters not tombstoned
 	total   int // characters ever inserted
 }
@@ -608,23 +612,6 @@ func (d *Doc) Delete(pos, length int) ([]Op, error) {
 	return ops, nil
 }
 
-// Apply integrates operations from peers. Duplicates are ignored, and an
-// operation that arrives before the operations it depends on is buffered until
-// they do, so the caller needs no ordered delivery.
-//
-// A malformed operation is rejected and nothing in the batch is applied.
-func (d *Doc) Apply(ops ...Op) error {
-	for _, op := range ops {
-		if err := op.validate(); err != nil {
-			return err
-		}
-	}
-	for _, op := range ops {
-		d.admit(op)
-	}
-	return nil
-}
-
 // admit integrates an operation, or parks it under whatever it is waiting for,
 // and then does the same for everything that was waiting on what it integrated.
 //
@@ -704,7 +691,9 @@ func (d *Doc) integrate(op Op) (*block, int) {
 	}
 	d.visible++
 	d.total++
-	return d.place(op.ID, op.Clock, op.Origin, op.Char)
+	b, i := d.place(op.ID, op.Clock, op.Origin, op.Char)
+	d.recordInsert(b, i, op.Char)
+	return b, i
 }
 
 // place puts one character into the sequence and returns where it landed.
@@ -776,6 +765,8 @@ func (d *Doc) tombstone(op Op) {
 	b, i, _ := d.lookupChar(op.Target)
 	switch existing := b.delIDAt(i); {
 	case existing.IsRoot():
+		// While it is still visible, which is what gives it an offset of its own.
+		d.recordDelete(b, i)
 		b.markDeleted(i, op.ID)
 		d.addVis(b, -1)
 		d.visible--
