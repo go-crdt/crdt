@@ -457,7 +457,7 @@ func TestListEveryOrderingConverges(t *testing.T) {
 		}
 
 		var want []byte
-		permuteList(all, func(p []ListOp) {
+		permute(all, func(p []ListOp) {
 			l := NewList(99)
 			for _, op := range p {
 				if err := l.Apply(op); err != nil {
@@ -476,28 +476,6 @@ func TestListEveryOrderingConverges(t *testing.T) {
 				t.Fatalf("trial %d: one delivery order produced different state", trial)
 			}
 		})
-	}
-}
-
-// permuteList calls fn with every ordering of ops (Heap's algorithm).
-func permuteList(ops []ListOp, fn func([]ListOp)) {
-	work := append([]ListOp{}, ops...)
-	counters := make([]int, len(work))
-	fn(work)
-	for i := 0; i < len(work); {
-		if counters[i] >= i {
-			counters[i] = 0
-			i++
-			continue
-		}
-		j := 0
-		if i%2 == 1 {
-			j = counters[i]
-		}
-		work[i], work[j] = work[j], work[i]
-		fn(work)
-		counters[i]++
-		i = 0
 	}
 }
 
