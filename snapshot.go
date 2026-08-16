@@ -345,11 +345,12 @@ func (d *Doc) adopt(c character, l *ledger) error {
 	d.total++
 	if c.delID.IsRoot() {
 		d.visible++
+		d.sup += int(supUnit(c.ch))
 	} else {
 		// place counted the character as visible, as it is when it arrives; the
 		// snapshot says it was deleted before this replica ever saw it.
 		b.markDeleted(i, c.delID)
-		d.addVis(b, -1)
+		d.addVis(b, -1, -supUnit(c.ch))
 	}
 	if c.clock > d.clock {
 		d.clock = c.clock

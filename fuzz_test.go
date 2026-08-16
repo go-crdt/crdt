@@ -1,7 +1,9 @@
 package crdt
 
 import (
+	"strings"
 	"testing"
+	"unicode/utf16"
 	"unicode/utf8"
 )
 
@@ -164,5 +166,67 @@ func FuzzVersionVector(f *testing.F) {
 			t.Fatal(err)
 		}
 		_ = d.OpsSince(v)
+	})
+}
+
+// FuzzUTF16Offsets is the one target here that is not about a decoder, and it
+// earns its place for the same reason the others do: the offsets come from
+// outside. A browser computes them, and it computes them over a string this
+// package built out of whatever anyone typed.
+//
+// The invariant is stated against unicode/utf16 rather than against anything in
+// utf16.go — a second implementation of the encoding, in the standard library —
+// and it is checked on a document with a stretch cut out of it, because a
+// tombstoned supplementary character is the case where a count kept per subtree
+// can be wrong without the text looking wrong.
+func FuzzUTF16Offsets(f *testing.F) {
+	f.Add("a\U0001F600b", 1, 1)
+	f.Add("\U0001F600\U0001F601\U0001F602", 0, 2)
+	f.Add("plain ascii", 3, 4)
+	f.Add("é日\U00020BB7\U0001D538x", 2, 2)
+	f.Fuzz(func(t *testing.T, text string, cut, length int) {
+		// Whatever the fuzzer produced is made into something a document can
+		// hold, rather than skipped: a skipped input tests nothing.
+		text = strings.ToValidUTF8(text, "")
+		if runes := []rune(text); len(runes) > 256 {
+			text = string(runes[:256])
+		}
+		d := New(1)
+		if _, err := d.Insert(0, text); err != nil {
+			t.Fatalf("Insert(0, %q): %v", text, err)
+		}
+		if n := d.Len(); n > 0 {
+			cut = ((cut % n) + n) % n
+			length = ((length % (n - cut + 1)) + (n - cut + 1)) % (n - cut + 1)
+			if _, err := d.Delete(cut, length); err != nil {
+				t.Fatalf("Delete(%d, %d): %v", cut, length, err)
+			}
+		}
+
+		runes := []rune(d.String())
+		units := utf16.Encode(runes)
+		if d.LenUTF16() != len(units) {
+			t.Fatalf("LenUTF16 = %d, unicode/utf16 encodes %q in %d units", d.LenUTF16(), d.String(), len(units))
+		}
+		at := 0
+		for i, r := range runes {
+			pos, err := d.RuneOffset(at)
+			if err != nil || pos != i {
+				t.Fatalf("RuneOffset(%d) = %d, %v; want %d, nil", at, pos, err, i)
+			}
+			back, err := d.UTF16Offset(i)
+			if err != nil || back != at {
+				t.Fatalf("UTF16Offset(%d) = %d, %v; want %d, nil", i, back, err, at)
+			}
+			if n := len(utf16.Encode([]rune{r})); n == 2 {
+				if pos, err := d.RuneOffset(at + 1); err != ErrSurrogateBoundary {
+					t.Fatalf("RuneOffset(%d) = %d, %v; that offset splits %q", at+1, pos, err, string(r))
+				}
+			}
+			at += len(utf16.Encode([]rune{r}))
+		}
+		if pos, err := d.RuneOffset(at); err != nil || pos != len(runes) {
+			t.Fatalf("RuneOffset(%d) = %d, %v; want %d, nil", at, pos, err, len(runes))
+		}
 	})
 }

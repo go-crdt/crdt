@@ -43,6 +43,13 @@ func subVisOf(b *block) int32 {
 	return b.subVis
 }
 
+func subSupOf(b *block) int32 {
+	if b == nil {
+		return 0
+	}
+	return b.subSup
+}
+
 func heightOf(b *block) uint8 {
 	if b == nil {
 		return 0
@@ -88,6 +95,7 @@ func (d *Doc) startIndex() {
 // is where the list has just put it.
 func (d *Doc) index(at, fresh *block) {
 	fresh.subVis = int32(fresh.visibleFrom(0))
+	fresh.subSup = fresh.visibleSup()
 	fresh.subMin = fresh
 	fresh.height = 1
 	// Immediately after a block with a right subtree is the leftmost block of
@@ -117,11 +125,12 @@ func (d *Doc) index(at, fresh *block) {
 func (d *Doc) repair(p, fresh *block) {
 	// Read once: a rotation on the way up can make fresh the root of a subtree,
 	// and its count then stands for that whole subtree rather than for itself.
-	delta := fresh.subVis
+	vis, sup := fresh.subVis, fresh.subSup
 	balancing := true
 	for p != nil {
 		up := p.up // a rotation moves p, so the way out is taken before it happens
-		p.subVis += delta
+		p.subVis += vis
+		p.subSup += sup
 		if sortsLower(fresh, p.subMin) {
 			p.subMin = fresh
 		}
@@ -171,6 +180,7 @@ func (d *Doc) rotateRight(x *block) {
 	// A rotation moves whole subtrees, so the counts follow from what changed
 	// hands: y ends up holding exactly what x held, and x keeps the rest.
 	y.subVis, x.subVis = x.subVis, x.subVis-y.subVis+subVisOf(x.left)
+	y.subSup, x.subSup = x.subSup, x.subSup-y.subSup+subSupOf(x.left)
 	x.fixHeight()
 	y.fixHeight()
 	x.pullMin()
@@ -188,6 +198,7 @@ func (d *Doc) rotateLeft(x *block) {
 	d.reparent(x, y)
 	x.up = y
 	y.subVis, x.subVis = x.subVis, x.subVis-y.subVis+subVisOf(x.right)
+	y.subSup, x.subSup = x.subSup, x.subSup-y.subSup+subSupOf(x.right)
 	x.fixHeight()
 	y.fixHeight()
 	x.pullMin()
@@ -207,8 +218,8 @@ func (d *Doc) reparent(x, y *block) {
 	}
 }
 
-// addVis records that b holds delta more visible characters than the tree
-// believes.
+// addVis records that b holds vis more visible characters, sup of which are
+// supplementary, than the tree believes.
 //
 // Typing appends character after character to one block, and carrying each of
 // them to the root would cost the height of the tree per keystroke. The change
@@ -221,12 +232,13 @@ func (d *Doc) reparent(x, y *block) {
 // the walk that inserts a block only ever add and subtract whole subtree
 // counts. What is short stays short by the same amount, and lands on whichever
 // blocks are the ancestors of b by the time the change is carried up.
-func (d *Doc) addVis(b *block, delta int32) {
+func (d *Doc) addVis(b *block, vis, sup int32) {
 	if d.dirty != b {
 		d.flush()
 		d.dirty = b
 	}
-	d.dirtyVis += delta
+	d.dirtyVis += vis
+	d.dirtySup += sup
 }
 
 // flush carries the held change to the root, leaving the tree readable.
@@ -236,8 +248,9 @@ func (d *Doc) flush() {
 	}
 	for p := d.dirty; p != nil; p = p.up {
 		p.subVis += d.dirtyVis
+		p.subSup += d.dirtySup
 	}
-	d.dirty, d.dirtyVis = nil, 0
+	d.dirty, d.dirtyVis, d.dirtySup = nil, 0, 0
 }
 
 // seek returns the block and offset of the visible character at index pos,

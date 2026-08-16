@@ -27,9 +27,12 @@ func checkIndex(t *testing.T, d *Doc) {
 		t.Fatal("the root of the tree has a parent")
 	}
 
-	var walk func(b *block) (count, vis int, min *block, height uint8)
-	walk = func(b *block) (int, int, *block, uint8) {
-		count, vis, min, height := 1, b.visibleFrom(0), b, uint8(1)
+	var walk func(b *block) (count, vis, sup int, min *block, height uint8)
+	walk = func(b *block) (int, int, int, *block, uint8) {
+		count, vis, sup, min, height := 1, b.visibleFrom(0), countAliveSup(b), b, uint8(1)
+		if n := countAllSup(b); int(b.nsup) != n {
+			t.Fatalf("block %v claims %d supplementary characters, holds %d", b.id, b.nsup, n)
+		}
 		if l := b.left; l != nil {
 			if l.up != b {
 				t.Fatalf("block %v is the left child of %v but does not point back", l.id, b.id)
@@ -37,8 +40,8 @@ func checkIndex(t *testing.T, d *Doc) {
 			if order[l] >= order[b] {
 				t.Fatalf("block %v is left of %v but after it in the document", l.id, b.id)
 			}
-			c, v, m, h := walk(l)
-			count, vis, height = count+c, vis+v, max(height, h+1)
+			c, v, s, m, h := walk(l)
+			count, vis, sup, height = count+c, vis+v, sup+s, max(height, h+1)
 			if sortsLower(m, min) {
 				min = m
 			}
@@ -50,14 +53,17 @@ func checkIndex(t *testing.T, d *Doc) {
 			if order[r] <= order[b] {
 				t.Fatalf("block %v is right of %v but before it in the document", r.id, b.id)
 			}
-			c, v, m, h := walk(r)
-			count, vis, height = count+c, vis+v, max(height, h+1)
+			c, v, s, m, h := walk(r)
+			count, vis, sup, height = count+c, vis+v, sup+s, max(height, h+1)
 			if sortsLower(m, min) {
 				min = m
 			}
 		}
 		if int(b.subVis) != vis {
 			t.Fatalf("block %v claims %d visible characters below it, holds %d", b.id, b.subVis, vis)
+		}
+		if int(b.subSup) != sup {
+			t.Fatalf("block %v claims %d visible supplementary characters below it, holds %d", b.id, b.subSup, sup)
 		}
 		if b.subMin != min {
 			t.Fatalf("block %v claims %v sorts lowest below it, %v does", b.id, b.subMin.id, min.id)
@@ -68,15 +74,51 @@ func checkIndex(t *testing.T, d *Doc) {
 		if l, r := heightOf(b.left), heightOf(b.right); l > r+1 || r > l+1 {
 			t.Fatalf("block %v is out of balance: %d against %d", b.id, l, r)
 		}
-		return count, vis, min, height
+		return count, vis, sup, min, height
 	}
-	count, vis, _, _ := walk(d.tree)
+	count, vis, sup, _, _ := walk(d.tree)
 	if count != len(order) {
 		t.Fatalf("the tree holds %d blocks, the list %d", count, len(order))
 	}
 	if vis != d.visible {
 		t.Fatalf("the tree holds %d visible characters, the document reports %d", vis, d.visible)
 	}
+	if sup != d.sup {
+		t.Fatalf("the tree holds %d visible supplementary characters, the document reports %d", sup, d.sup)
+	}
+}
+
+// countAliveSup and countAllSup count what the index summarises, without using
+// anything the index uses to maintain it: the deletion records are read
+// directly rather than through deadIndex, and the characters one at a time
+// rather than a span at a time.
+func countAliveSup(b *block) int {
+	n := 0
+	for i, r := range b.text {
+		if r > 0xFFFF && !deletedByHand(b, i) {
+			n++
+		}
+	}
+	return n
+}
+
+func countAllSup(b *block) int {
+	n := 0
+	for _, r := range b.text {
+		if r > 0xFFFF {
+			n++
+		}
+	}
+	return n
+}
+
+func deletedByHand(b *block, i int) bool {
+	for _, r := range b.dels {
+		if uint32(i) >= r.from && uint32(i) < r.to {
+			return true
+		}
+	}
+	return false
 }
 
 // fragment builds a document of n characters in n runs, by inserting single

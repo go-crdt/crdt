@@ -342,18 +342,74 @@ the leaves. It costs the pointer identity of a block, which the mark, the
 per-site index and every walk in `text.go` are written in terms of. That is the
 next thing to measure, not something to guess at.
 
+### A second summary, for UTF-16 offsets
+
+Addressing the document in UTF-16 code units means turning a count of units into
+a count of characters, and the obvious way to do that is to walk the document
+counting. That is O(n) per keystroke, so the index carries a second summary
+instead — the visible characters of a subtree that take two code units, beside
+the count of visible characters it already carried — and a conversion becomes a
+descent.
+
+The cost was measured before it was decided to keep the summary, because one
+nobody needs is still paid for by everybody. Both builds were run alternately in
+one session on a machine under a load average of nine, so that whatever the
+machine was doing landed on both; `benchstat`, n=14 on the trace and n=12 on the
+synthetic benchmarks.
+
+| | before | after | |
+|---|---|---|---|
+| the real trace, replayed | 20.60 ms ± 3% | **20.74 ms ± 1%** | ~ (p=0.27) |
+| the real trace, as a peer's operations | 100.2 ms ± 14% | **104.2 ms ± 14%** | ~ (p=0.76) |
+| `InsertAtEnd` | 49.10 ns ± 6% | **48.88 ns ± 16%** | ~ (p=0.68) |
+| `ApplyRemote` | 410.4 µs ± 7% | **407.1 µs ± 10%** | ~ (p=0.93) |
+| `InsertAtStart` | 199.0 ns ± 2% | **211.9 ns ± 9%** | ~ (p=0.07) |
+| `ScatteredInsert` | 1.791 µs ± 7% | **1.903 µs ± 3%** | ~ (p=0.07) |
+| `SameOriginFlood` | 1.656 ms ± 9% | **1.702 ms ± 6%** | ~ (p=0.44) |
+
+Nothing moved by a distinguishable amount, and the trace — which is ASCII, and
+so should not have moved at all — did not. The two rows that come closest,
+`InsertAtStart` and `ScatteredInsert` at about +6% with p=0.07, are the two
+benchmarks that allocate one block per character, which is where the memory
+below is charged rather than the arithmetic.
+
+The memory is exact, and it is the real cost:
+
+| | before | after | |
+|---|---|---|---|
+| a block header | 144 B | **160 B** | +16 B |
+| held on the real trace | 4372 KiB | **4541 KiB** | +3.9% |
+| per stored character, real trace | 24.56 B | **25.51 B** | +3.9% |
+| `MemoryPerCharacter`, 10 000 characters in one run | 4.19 B/char | **4.19 B/char** | — |
+
+The summary is two `int32`s: the visible supplementary characters below a block,
+and the supplementary characters the block itself holds, deleted ones included.
+Sixteen bytes rather than eight, because the header was 141 bytes in Go's
+144-byte size class with three bytes spare — *any* field, of any width, takes it
+to the 160-byte class. A single `bool` would have cost exactly what these two
+counters cost, which is why they are two counters and not a compromise.
+
+The second of them is what keeps the work off documents with no emoji in them. A
+block that holds no supplementary character answers every question about UTF-16
+units without reading a character, so splitting one or indexing one stays
+arithmetic instead of becoming a scan. And a document with none anywhere
+converts in constant time without touching the index at all, because its rune
+and UTF-16 offsets are equal by construction: `InsertAtEndUTF16` measures 44.9 ns
+against `InsertAtEnd`'s 48.9, and 46.5 ns on the same document with one emoji
+added, which is the descent.
+
 ## Where the memory goes now
 
 Measured on the real trace: 10 824 blocks holding 182 315 characters, of which
-77 463 are tombstones, in 4.3 MiB.
+77 463 are tombstones, in 4.4 MiB.
 
 | | |
 |---|---|
-| block headers | ~1390 KiB |
+| block headers | ~1690 KiB |
 | text | 712 KiB |
 | deletion records | ~1180 KiB |
 
-The remaining lever is still the block headers, now 144 bytes each.
+The remaining lever is still the block headers, now 160 bytes each.
 
 ## Complexity
 

@@ -161,6 +161,7 @@ jobs:
           - { pkg: ".",           target: FuzzApply }
           - { pkg: ".",           target: FuzzLoad }
           - { pkg: ".",           target: FuzzVersionVector }
+          - { pkg: ".",           target: FuzzUTF16Offsets }
           - { pkg: "./awareness", target: FuzzUpdate }
     steps:
       - uses: actions/checkout@v4
