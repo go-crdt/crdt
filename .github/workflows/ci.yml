@@ -165,6 +165,8 @@ jobs:
           - { pkg: ".",           target: FuzzUTF16Offsets }
           - { pkg: ".",           target: FuzzLoadMap }
           - { pkg: ".",           target: FuzzParseMapOps }
+          - { pkg: ".",           target: FuzzLoadComposite }
+          - { pkg: ".",           target: FuzzCompositeVersion }
           - { pkg: "./awareness", target: FuzzUpdate }
     steps:
       - uses: actions/checkout@v4

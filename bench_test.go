@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"fmt"
 	"runtime"
 	"strings"
 	"testing"
@@ -193,4 +194,190 @@ func BenchmarkApplyRemoteWithChanges(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+// A composite is not measured by how much it holds but by how many parts it is
+// divided into. The consumer this type was written for gives every comment its
+// own map part — so that a "resolved" flag can flip with one write rather than a
+// delete and a reinsert — which means hundreds of parts holding eight keys each
+// beside one text part holding a paper. Snapshot, Load, Version and OpsSince
+// all have to be cheap in that number, not merely correct.
+const (
+	benchTextPart  = 2000
+	benchListParts = 3
+	benchListLen   = 100
+	benchMapParts  = 300
+	benchMapKeys   = 8
+)
+
+// The site identities are derived rather than counted, because that is what a
+// caller does and because it is what the encoding costs turn on: a [DeriveSiteID]
+// hash uses the whole uint64 range and takes ten bytes as a varint, where a
+// SiteID of 2 takes one. Measuring with 1, 2, 3 would report a version a
+// fraction of its real size.
+var benchSites = []SiteID{
+	DeriveSiteID([]byte("ada@example.org")),
+	DeriveSiteID([]byte("grace@example.org")),
+	DeriveSiteID([]byte("alan@example.org")),
+}
+
+// loomShaped builds that document, edited by three replicas so that every part's
+// version vector names three sites — which is what the version costs on the
+// wire, and the thing the encoding shares a site table for.
+func loomShaped(b *testing.B) *Composite {
+	b.Helper()
+	c := NewComposite(benchSites[0])
+	d, err := c.Text("file:src/main.tex")
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := d.Insert(0, strings.Repeat("the quick brown fox ", benchTextPart/20)); err != nil {
+		b.Fatal(err)
+	}
+	for i := range benchListParts {
+		l, err := c.List(fmt.Sprintf("comments:src/file%d.tex", i))
+		if err != nil {
+			b.Fatal(err)
+		}
+		for j := range benchListLen {
+			if _, err := l.Insert(j, fmt.Appendf(nil, "value %d", j)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	for i := range benchMapParts {
+		m, err := c.Map(fmt.Sprintf("comment:%08x-4d21-11f0-9cd2-0242ac120002", i))
+		if err != nil {
+			b.Fatal(err)
+		}
+		for j := range benchMapKeys {
+			if _, err := m.Set(fmt.Sprintf("field%d", j), fmt.Appendf(nil, "value %d", j)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+	// Two more replicas touch every part, so no part's version is a single site.
+	for _, site := range benchSites[1:] {
+		peer := NewComposite(site)
+		if err := peer.Apply(c.OpsSince(nil)...); err != nil {
+			b.Fatal(err)
+		}
+		var back []PartOps
+		for _, p := range peer.Parts() {
+			switch p.Kind {
+			case PartText:
+				d, err := peer.Text(p.Name)
+				if err != nil {
+					b.Fatal(err)
+				}
+				ops, err := d.Insert(0, "x")
+				if err != nil {
+					b.Fatal(err)
+				}
+				back = append(back, PartOps{Part: p, Text: ops})
+			case PartList:
+				l, err := peer.List(p.Name)
+				if err != nil {
+					b.Fatal(err)
+				}
+				ops, err := l.Insert(0, []byte("x"))
+				if err != nil {
+					b.Fatal(err)
+				}
+				back = append(back, PartOps{Part: p, List: ops})
+			default:
+				m, err := peer.Map(p.Name)
+				if err != nil {
+					b.Fatal(err)
+				}
+				op, err := m.Set("touched", []byte("x"))
+				if err != nil {
+					b.Fatal(err)
+				}
+				back = append(back, PartOps{Part: p, Map: []MapOp{op}})
+			}
+		}
+		if err := c.Apply(back...); err != nil {
+			b.Fatal(err)
+		}
+	}
+	return c
+}
+
+func BenchmarkCompositeSnapshot(b *testing.B) {
+	c := loomShaped(b)
+	b.ResetTimer()
+	for range b.N {
+		if len(c.Snapshot()) == 0 {
+			b.Fatal("empty")
+		}
+	}
+	// Reported after the loop: ResetTimer discards user metrics.
+	b.StopTimer()
+	b.ReportMetric(float64(len(c.Snapshot())), "snapshot-bytes")
+}
+
+func BenchmarkLoadComposite(b *testing.B) {
+	snapshot := loomShaped(b).Snapshot()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := LoadComposite(9, snapshot); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Catching up a replica that holds nothing: the whole history, every part.
+func BenchmarkCompositeOpsSinceNothing(b *testing.B) {
+	c := loomShaped(b)
+	b.ResetTimer()
+	for range b.N {
+		if len(c.OpsSince(nil)) == 0 {
+			b.Fatal("nothing to send")
+		}
+	}
+}
+
+// And the case a live session is almost always in: a peer that is up to date on
+// every part but one. It must cost a comparison per part rather than a walk of
+// each part's history, which is the difference between this and the benchmark
+// above.
+func BenchmarkCompositeOpsSinceOnePart(b *testing.B) {
+	c := loomShaped(b)
+	peer := NewComposite(99)
+	if err := peer.Apply(c.OpsSince(nil)...); err != nil {
+		b.Fatal(err)
+	}
+	held := peer.Version()
+	m, err := c.Map("comment:00000000-4d21-11f0-9cd2-0242ac120002")
+	if err != nil {
+		b.Fatal(err)
+	}
+	if _, err := m.Set("resolved", []byte("true")); err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		if len(c.OpsSince(held)) != 1 {
+			b.Fatal("want the one part that moved")
+		}
+	}
+}
+
+// The version travels on every join, so its size is what a client pays to say
+// where it is.
+func BenchmarkCompositeVersionMarshal(b *testing.B) {
+	v := loomShaped(b).Version()
+	encoded, err := v.MarshalBinary()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		if _, err := v.MarshalBinary(); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(len(encoded)), "version-bytes")
 }
