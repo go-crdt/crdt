@@ -70,9 +70,14 @@ missed := server.OpsSince(client.Version())  // catch up
 
 ## Status
 
-Version 0.1: the sequence CRDT, the wire and snapshot formats, and awareness.
+Version 0.3: the sequence CRDT, the wire and snapshot formats, and awareness.
 Pure Go, CGO=0, **100% statement coverage** on both packages, race-clean, six-arch
 CI, and the full suite green under `js/wasm`.
+
+A real editing history — 259 778 edits from the trace text CRDTs are commonly
+measured on — replays in **54.6 ms** and matches the recorded text exactly; the
+same history delivered back to front, nothing applicable until the last
+operation, settles in 0.30 s. See [docs/performance.md](docs/performance.md).
 
 See [docs/design.md](docs/design.md) for how it works and why, and
 [docs/performance.md](docs/performance.md) for what it costs and what changes

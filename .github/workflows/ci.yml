@@ -74,6 +74,39 @@ jobs:
           GOOS=js GOARCH=wasm go test \
             -exec="$(go env GOROOT)/lib/wasm/go_js_wasm_exec" ./...
 
+  # Replay a real editing history: 259 778 edits recorded from someone writing a
+  # paper, against the text they are known to produce. It is the common yardstick
+  # for text CRDTs, and a correctness test no synthetic case reproduces — a
+  # quarter of a million edits at positions a real person chose, with the answer
+  # given in advance. The timings it prints are the ones in docs/performance.md.
+  editing-trace:
+    name: real editing trace
+    runs-on: ubuntu-latest
+    env:
+      CRDT_TRACE: automerge-paper.json.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: Cache the trace
+        id: trace
+        uses: actions/cache@v4
+        with:
+          path: automerge-paper.json.gz
+          key: editing-trace-automerge-paper-v1
+      - name: Fetch the trace
+        if: steps.trace.outputs.cache-hit != 'true'
+        run: curl -sfLO https://raw.githubusercontent.com/josephg/editing-traces/master/sequential_traces/automerge-paper.json.gz
+      - name: Replay it
+        run: |
+          # The test skips when CRDT_TRACE is unset, so prove it did not skip.
+          go test -run TestEditingTrace -v ./... | tee trace.log
+          grep -q 'edits in' trace.log || {
+            echo "::error::the editing-trace replay did not run"; exit 1; }
+      - name: Time it
+        run: go test -run '^$' -bench EditingTrace -benchtime 3x ./...
+
   # Run the suite on the six supported 64-bit targets. amd64/arm64 run natively;
   # the rest run under qemu-user. A CRDT has to agree with itself across
   # architectures — a replica on s390x and one on amd64 are peers in the same

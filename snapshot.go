@@ -15,6 +15,10 @@ const snapshotVersion = 1
 // in document order, plus the version vector. It is what a server sends a
 // client joining an existing session, and what it persists.
 //
+// The encoding is per character rather than per run, deliberately: it is the
+// interchange format, and holding it independent of how a replica happens to
+// store the document in memory is what lets that change without a flag day.
+//
 // The encoding is deterministic: two replicas holding the same operations
 // produce identical bytes, so a snapshot doubles as a convergence check.
 //
@@ -33,15 +37,22 @@ func (d *Doc) Snapshot() []byte {
 	}
 
 	out = binary.AppendUvarint(out, uint64(d.total))
-	for it := d.head.next; it != nil; it = it.next {
-		out = binary.AppendUvarint(out, uint64(it.id.Site))
-		out = binary.AppendUvarint(out, it.id.Seq)
-		out = binary.AppendUvarint(out, it.clock)
-		out = binary.AppendUvarint(out, uint64(it.origin.id.Site))
-		out = binary.AppendUvarint(out, it.origin.id.Seq)
-		out = binary.AppendUvarint(out, uint64(it.ch))
-		out = binary.AppendUvarint(out, uint64(it.delID.Site))
-		out = binary.AppendUvarint(out, it.delID.Seq)
+	for b := d.head.next; b != nil; b = b.next {
+		for i, r := range b.text {
+			out = binary.AppendUvarint(out, uint64(b.id.Site))
+			out = binary.AppendUvarint(out, b.id.Seq+uint64(i))
+			out = binary.AppendUvarint(out, b.clockAt(i))
+			origin := b.originAt(i)
+			out = binary.AppendUvarint(out, uint64(origin.Site))
+			out = binary.AppendUvarint(out, origin.Seq)
+			out = binary.AppendUvarint(out, uint64(r))
+			var del ID
+			if b.dead != nil {
+				del = b.dead[i]
+			}
+			out = binary.AppendUvarint(out, uint64(del.Site))
+			out = binary.AppendUvarint(out, del.Seq)
+		}
 	}
 
 	dups := make([]ID, 0, len(d.dupDeletes))
@@ -90,19 +101,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		if _, dup := d.vv[SiteID(s)]; dup {
 			return nil, ErrMalformed
 		}
-		// Every operation a site claims has to be accounted for later by bytes
-		// still in the buffer, so a count larger than those bytes allow is a
-		// corrupt header — refuse it before sizing anything from it.
-		if seq > uint64(len(r.buf)) {
-			return nil, ErrMalformed
-		}
 		d.vv[SiteID(s)] = seq
-		// The characters arrive in document order, not in sequence order, so the
-		// index cannot simply be appended to as it is when operations are applied.
-		// The version vector says exactly how many operations each site made, so
-		// it is sized once here and filled in as they are decoded; whatever is
-		// left nil was a deletion, which makes no character.
-		d.chars[SiteID(s)] = make([]*item, seq)
 	}
 
 	// A snapshot has to account for every operation its version vector claims,
@@ -115,16 +114,14 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	if !ok || nItems > uint64(len(r.buf)) {
 		return nil, ErrMalformed
 	}
-	last := d.head
 	for range nItems {
-		it, ok := r.item()
+		c, ok := r.character()
 		if !ok {
 			return nil, ErrMalformed
 		}
-		if err := d.link(last, it, ledger); err != nil {
+		if err := d.adopt(c, ledger); err != nil {
 			return nil, err
 		}
-		last = it
 	}
 
 	nDups, ok := r.uvarint()
@@ -138,11 +135,11 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 			return nil, ErrMalformed
 		}
 		// A duplicate deletion only ever arises when a character was already
-		// deleted, and the item keeps the lower of the two operations. Anything
-		// else describes a document no replica could reach: a deletion of a
-		// character still visible would take effect on replay and diverge.
-		it, known := d.lookup(target)
-		if !known || target.IsRoot() || it.alive() || !idLess(it.delID, delID) {
+		// deleted, and the character keeps the lower of the two operations.
+		// Anything else describes a document no replica could reach: a deletion
+		// of a character still visible would take effect on replay and diverge.
+		b, i, known := d.lookupChar(target)
+		if !known || b.aliveAt(i) || !idLess(b.dead[i], delID) {
 			return nil, ErrMalformed
 		}
 		d.recordDuplicate(delID, target)
@@ -161,6 +158,53 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		}
 	}
 	return d, nil
+}
+
+// A character is one decoded entry of a snapshot.
+type character struct {
+	id     ID
+	clock  uint64
+	origin ID
+	ch     rune
+	delID  ID
+}
+
+// adopt puts a decoded character into the document, checking that it is
+// consistent with what came before.
+//
+// The order a snapshot states is not a matter of choice: integration determines
+// exactly where a character goes. So rather than trusting the stated order and
+// re-deriving the check, the character is integrated exactly as an operation
+// would be — and then required to have landed at the end. Anywhere else means
+// the snapshot claims an order integration could not have produced.
+func (d *Doc) adopt(c character, l *ledger) error {
+	if !l.claim(c.id) {
+		return ErrMalformed
+	}
+	if _, _, known := d.lookupChar(c.origin); !known {
+		return ErrMalformed
+	}
+	if !c.delID.IsRoot() && !l.claim(c.delID) {
+		return ErrMalformed
+	}
+
+	b, i := d.place(c.id, c.clock, c.origin, c.ch)
+	if b.next != nil || i != len(b.text)-1 {
+		return ErrMalformed
+	}
+	d.total++
+	if c.delID.IsRoot() {
+		d.visible++
+	} else {
+		if b.dead == nil {
+			b.dead = make([]ID, len(b.text))
+		}
+		b.dead[i] = c.delID
+	}
+	if c.clock > d.clock {
+		d.clock = c.clock
+	}
+	return nil
 }
 
 // A ledger tracks which operations a snapshot has accounted for, so that Load
@@ -196,46 +240,6 @@ func (l *ledger) complete() bool {
 	return true
 }
 
-// link appends a decoded item to the document, checking that it is consistent
-// with what came before: an identity and a deletion the ledger accepts, and an
-// origin that already exists.
-func (d *Doc) link(last, it *item, l *ledger) error {
-	if !l.claim(it.id) {
-		return ErrMalformed
-	}
-	origin, known := d.lookup(it.origin.id)
-	if !known {
-		return ErrMalformed
-	}
-	if !it.delID.IsRoot() && !l.claim(it.delID) {
-		return ErrMalformed
-	}
-	// The order a snapshot states is not a matter of choice: integration
-	// determines exactly where a character goes, so an order no replica could
-	// have produced is corrupt input. Walking from the origin to the end of what
-	// has been decoded so far repeats the scan [Doc.integrate] would have made —
-	// everything the character was placed after has to sort after it.
-	for at := origin.next; at != nil; at = at.next {
-		if !before(it.clock, it.id.Site, at.clock, at.id.Site) {
-			return ErrMalformed
-		}
-		if at == last {
-			break
-		}
-	}
-	it.origin = origin
-	last.next = it
-	d.chars[it.id.Site][it.id.Seq-1] = it
-	d.total++
-	if it.alive() {
-		d.visible++
-	}
-	if it.clock > d.clock {
-		d.clock = it.clock
-	}
-	return nil
-}
-
 // A reader consumes a snapshot, reporting failure rather than panicking on
 // truncated input.
 type reader struct{ buf []byte }
@@ -267,30 +271,30 @@ func (r *reader) id() (ID, bool) {
 	return ID{Site: SiteID(site), Seq: seq}, true
 }
 
-// item decodes one character. The origin is left as a bare ID for [Doc.link] to
-// resolve against the items already decoded.
-func (r *reader) item() (*item, bool) {
+// character decodes one entry, rejecting field combinations that cannot describe
+// a real character before anything is built from them.
+func (r *reader) character() (character, bool) {
 	id, ok := r.id()
 	if !ok {
-		return nil, false
+		return character{}, false
 	}
 	clock, ok := r.uvarint()
 	if !ok {
-		return nil, false
+		return character{}, false
 	}
 	origin, ok := r.id()
 	if !ok {
-		return nil, false
+		return character{}, false
 	}
 	ch, ok := r.uvarint()
 	if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
-		return nil, false
+		return character{}, false
 	}
 	delID, ok := r.id()
 	if !ok || clock < id.Seq || !origin.wellFormed() || !delID.wellFormed() {
-		return nil, false
+		return character{}, false
 	}
-	return &item{id: id, origin: &item{id: origin}, clock: clock, ch: rune(ch), delID: delID}, true
+	return character{id: id, clock: clock, origin: origin, ch: rune(ch), delID: delID}, true
 }
 
 // sortIDs orders IDs in place by site then sequence, keeping every derived
