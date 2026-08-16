@@ -138,6 +138,47 @@ func ExampleDoc_InsertUTF16() {
 	// crdt: UTF-16 offset splits a surrogate pair
 }
 
+// Two replicas write to the same cell at the same time, and one of them then
+// deletes it. The later write wins wherever the operations arrive, and the
+// deleted cell keeps the clock that beat them: an older write turning up
+// afterwards cannot bring it back.
+func ExampleMap() {
+	ada, grace := crdt.NewMap(1), crdt.NewMap(2)
+
+	fromAda, err := ada.Set("B7", []byte("41"))
+	if err != nil {
+		panic(err)
+	}
+	fromGrace, err := grace.Set("B7", []byte("42"))
+	if err != nil {
+		panic(err)
+	}
+	if err := ada.Apply(fromGrace); err != nil {
+		panic(err)
+	}
+	if err := grace.Apply(fromAda); err != nil {
+		panic(err)
+	}
+
+	value, _ := ada.Get("B7")
+	fmt.Printf("%s %s\n", value, ada.Keys())
+
+	// Grace clears the cell, having seen both writes.
+	cleared, err := grace.Delete("B7")
+	if err != nil {
+		panic(err)
+	}
+	if err := ada.Apply(cleared); err != nil {
+		panic(err)
+	}
+	_, present := ada.Get("B7")
+	fmt.Println(present, ada.Len())
+
+	// Output:
+	// 42 [B7]
+	// false 0
+}
+
 // Awareness offsets are rune positions, because both peers have to agree what
 // an offset means and an update has nowhere to say. A peer whose editor counts
 // UTF-16 converts at its own edge — where it has to clamp in any case, since a
