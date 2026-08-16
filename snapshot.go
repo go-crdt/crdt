@@ -9,23 +9,34 @@ import (
 // so a decoder rejects foreign or future bytes instead of misreading them.
 var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 
-const snapshotVersion = 1
+// snapshotVersion 2 writes runs; version 1 wrote one record per character and is
+// still read, so a document stored by an older build still opens.
+const (
+	snapshotVersion   = 2
+	snapshotVersionV1 = 1
+)
 
 // Snapshot encodes the whole document — every character, alive or tombstoned,
 // in document order, plus the version vector. It is what a server sends a
 // client joining an existing session, and what it persists.
 //
-// The encoding is per character rather than per run, deliberately: it is the
-// interchange format, and holding it independent of how a replica happens to
-// store the document in memory is what lets that change without a flag day.
+// Characters are written in runs: one header for a stretch one site typed
+// consecutively, then its text, then the stretches of it that have been
+// deleted. Writing one record per character instead, as version 1 did, cost
+// twenty-five bytes for every character of a real document — measured against
+// other implementations, between eight and twenty-four times what they need.
 //
-// The encoding is deterministic: two replicas holding the same operations
-// produce identical bytes, so a snapshot doubles as a convergence check.
+// The runs written are maximal, whatever boundaries the document happens to
+// hold in memory. That is what keeps the encoding canonical: two replicas that
+// have applied the same operations produce identical bytes even if the
+// operations arrived in different orders, so a snapshot doubles as a convergence
+// check. It also keeps the format independent of the layout a replica stores,
+// which is what let that layout change twice without a flag day.
 //
 // The full history is recoverable from a snapshot: [Doc.OpsSince] on a loaded
 // document returns the same operations it would have on the original.
 func (d *Doc) Snapshot() []byte {
-	out := make([]byte, 0, 5+8*d.total)
+	out := make([]byte, 0, 5+2*d.total)
 	out = append(out, snapshotMagic[:]...)
 	out = append(out, snapshotVersion)
 
@@ -36,20 +47,28 @@ func (d *Doc) Snapshot() []byte {
 		out = binary.AppendUvarint(out, d.vv[site])
 	}
 
-	out = binary.AppendUvarint(out, uint64(d.total))
-	for b := d.head.next; b != nil; b = b.next {
-		cursor := delCursor{b: b}
-		for i, r := range b.text {
-			out = binary.AppendUvarint(out, uint64(b.id.Site))
-			out = binary.AppendUvarint(out, b.id.Seq+uint64(i))
-			out = binary.AppendUvarint(out, b.clockAt(i))
-			origin := b.originAt(i)
-			out = binary.AppendUvarint(out, uint64(origin.Site))
-			out = binary.AppendUvarint(out, origin.Seq)
-			out = binary.AppendUvarint(out, uint64(r))
-			del := cursor.at(i)
-			out = binary.AppendUvarint(out, uint64(del.Site))
-			out = binary.AppendUvarint(out, del.Seq)
+	runs := d.runs()
+	out = binary.AppendUvarint(out, uint64(len(runs)))
+	for _, r := range runs {
+		out = binary.AppendUvarint(out, uint64(r.id.Site))
+		out = binary.AppendUvarint(out, r.id.Seq)
+		out = binary.AppendUvarint(out, r.clock)
+		out = binary.AppendUvarint(out, uint64(r.origin.Site))
+		out = binary.AppendUvarint(out, r.origin.Seq)
+		out = binary.AppendUvarint(out, uint64(len(r.text)))
+		for _, ch := range r.text {
+			out = binary.AppendUvarint(out, uint64(ch))
+		}
+		out = binary.AppendUvarint(out, uint64(len(r.dels)))
+		at := uint32(0)
+		for _, del := range r.dels {
+			// Offsets ascend and never overlap, so each is written as the gap
+			// since the end of the one before it.
+			out = binary.AppendUvarint(out, uint64(del.from-at))
+			out = binary.AppendUvarint(out, uint64(del.to-del.from))
+			out = binary.AppendUvarint(out, uint64(del.id.Site))
+			out = binary.AppendUvarint(out, del.id.Seq)
+			at = del.to
 		}
 	}
 
@@ -69,6 +88,51 @@ func (d *Doc) Snapshot() []byte {
 	return out
 }
 
+// A run is a stretch of characters one site typed consecutively, as the snapshot
+// writes it.
+type run struct {
+	id     ID
+	clock  uint64
+	origin ID
+	text   []rune
+	dels   []delRange
+}
+
+// appendDel adds a deletion record, joining it to the one before when they touch
+// and its identities continue.
+//
+// This is what makes the encoding canonical. The blocks themselves already are:
+// two blocks that continue one another are never adjacent, because a character
+// bridging them would need the sequence number the right-hand one already holds.
+// Their deletion records are not — cutting a block divides a record, and
+// replacing one character's deletion when two replicas delete it at once cuts
+// another — so two replicas can hold the same deletions in differently shaped
+// records. Writing them joined hides that difference, which is the difference
+// between a snapshot that can be compared and one that cannot.
+func appendDel(dels []delRange, r delRange) []delRange {
+	if n := len(dels); n > 0 {
+		if last := &dels[n-1]; last.to == r.from && last.continuesTo(r.from) == r.id {
+			last.to = r.to
+			return dels
+		}
+	}
+	return append(dels, r)
+}
+
+// runs returns the document as the snapshot writes it: one run per block, with
+// deletion records joined.
+func (d *Doc) runs() []run {
+	var out []run
+	for b := d.head.next; b != nil; b = b.next {
+		fresh := run{id: b.id, clock: b.clock, origin: b.originID, text: b.text}
+		for _, del := range b.dels {
+			fresh.dels = appendDel(fresh.dels, del)
+		}
+		out = append(out, fresh)
+	}
+	return out
+}
+
 // Load rebuilds a document from a snapshot, to be edited as site. The site need
 // not be one that appears in the snapshot — a client joining an existing
 // document brings its own.
@@ -78,9 +142,11 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	if !ok || string(magic) != string(snapshotMagic[:]) {
 		return nil, ErrMalformed
 	}
-	if v, ok := r.bytes(1); !ok || v[0] != snapshotVersion {
+	v, ok := r.bytes(1)
+	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV1) {
 		return nil, ErrMalformed
 	}
+	version := v[0]
 
 	d := New(site)
 	nSites, ok := r.uvarint()
@@ -108,16 +174,18 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	// silently drop a deletion two characters both claimed.
 	ledger := &ledger{vv: d.vv, seen: map[ID]struct{}{}, counts: map[SiteID]uint64{}}
 
-	nItems, ok := r.uvarint()
-	if !ok || nItems > uint64(len(r.buf)) {
+	count, ok := r.uvarint()
+	if !ok || count > uint64(len(r.buf)) {
 		return nil, ErrMalformed
 	}
-	for range nItems {
-		c, ok := r.character()
-		if !ok {
-			return nil, ErrMalformed
+	for range count {
+		var err error
+		if version == snapshotVersionV1 {
+			err = d.readCharacter(r, ledger)
+		} else {
+			err = d.readRun(r, ledger)
 		}
-		if err := d.adopt(c, ledger); err != nil {
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -156,6 +224,90 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		}
 	}
 	return d, nil
+}
+
+// readCharacter decodes one version 1 entry, which described a single character.
+func (d *Doc) readCharacter(r *reader, l *ledger) error {
+	c, ok := r.character()
+	if !ok {
+		return ErrMalformed
+	}
+	return d.adopt(c, l)
+}
+
+// readRun decodes one version 2 entry and adopts its characters one by one, so
+// that a run gets exactly the checks a character-at-a-time snapshot got: the
+// shorter encoding buys space, not trust.
+func (d *Doc) readRun(r *reader, l *ledger) error {
+	id, ok1 := r.id()
+	clock, ok2 := r.uvarint()
+	origin, ok3 := r.id()
+	length, ok4 := r.uvarint()
+	if !ok1 || !ok2 || !ok3 || !ok4 {
+		return ErrMalformed
+	}
+	// A run of no characters says nothing and would let a snapshot claim any
+	// number of them; each character costs at least a byte still to be read.
+	if length == 0 || length > uint64(len(r.buf)) || clock < id.Seq ||
+		!origin.wellFormed() || !id.wellFormed() {
+		return ErrMalformed
+	}
+	text := make([]rune, length)
+	for i := range text {
+		ch, ok := r.uvarint()
+		if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
+			return ErrMalformed
+		}
+		text[i] = rune(ch)
+	}
+
+	// The deleted stretches, as gaps and lengths. They must ascend, not overlap
+	// and stay inside the run, or the characters they name would be the wrong
+	// ones.
+	nDels, ok := r.uvarint()
+	if !ok || nDels > uint64(len(r.buf)) {
+		return ErrMalformed
+	}
+	dels := make([]delRange, 0, nDels)
+	at := uint64(0)
+	for range nDels {
+		gap, ok1 := r.uvarint()
+		span, ok2 := r.uvarint()
+		delID, ok3 := r.id()
+		if !ok1 || !ok2 || !ok3 || span == 0 || gap > length ||
+			!delID.wellFormed() || delID.IsRoot() {
+			return ErrMalformed
+		}
+		from := at + gap
+		if from+span > length {
+			return ErrMalformed
+		}
+		dels = append(dels, delRange{from: uint32(from), to: uint32(from + span), id: delID})
+		at = from + span
+	}
+
+	cursor := 0
+	for i, ch := range text {
+		c := character{
+			id:     ID{Site: id.Site, Seq: id.Seq + uint64(i)},
+			clock:  clock + uint64(i),
+			origin: origin,
+			ch:     ch,
+		}
+		if i > 0 {
+			c.origin = ID{Site: id.Site, Seq: id.Seq + uint64(i) - 1}
+		}
+		for cursor < len(dels) && int(dels[cursor].to) <= i {
+			cursor++
+		}
+		if cursor < len(dels) && dels[cursor].holds(i) {
+			c.delID = dels[cursor].continuesTo(uint32(i))
+		}
+		if err := d.adopt(c, l); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // A character is one decoded entry of a snapshot.

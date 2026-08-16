@@ -1,8 +1,11 @@
 package crdt
 
 import (
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -153,7 +156,7 @@ func (b snapshotBuilder) build() []byte {
 func wellFormed() snapshotBuilder {
 	return snapshotBuilder{
 		magic:   []byte("crdt"),
-		version: snapshotVersion,
+		version: snapshotVersionV1,
 		sites:   [][2]uint64{{1, 3}},
 		items: []snapshotItem{
 			{site: 1, seq: 1, clock: 1, char: 'a'},
@@ -182,6 +185,7 @@ func TestLoadRejectsMalformedSnapshots(t *testing.T) {
 	}{
 		{"foreign magic", func(b *snapshotBuilder) { b.magic = []byte("yjs!") }},
 		{"future format version", func(b *snapshotBuilder) { b.version = snapshotVersion + 1 }},
+		{"version zero", func(b *snapshotBuilder) { b.version = 0 }},
 		{"site with no operations", func(b *snapshotBuilder) { b.sites = [][2]uint64{{1, 0}} }},
 		{"more items than bytes", func(b *snapshotBuilder) { b.itemCount = 1 << 20 }},
 		{"more duplicates than bytes", func(b *snapshotBuilder) { b.dupCount = 1 << 20 }},
@@ -313,4 +317,202 @@ func TestSnapshotCarriesDuplicateDeletions(t *testing.T) {
 	if !fresh.Version().Equal(a.Version()) {
 		t.Fatalf("Version() = %v, want %v", fresh.Version(), a.Version())
 	}
+}
+
+// runBuilder assembles version 2 snapshots field by field, so that every
+// rejection in the run reader can be provoked directly.
+type runBuilder struct {
+	sites [][2]uint64
+	runs  []encodedRun
+	count int // overrides the encoded number of runs
+	tail  []byte
+	ver   byte
+}
+
+type encodedRun struct {
+	site, seq, clock, originSite, originSeq uint64
+	text                                    []rune
+	length                                  uint64 // overrides the encoded length
+	dels                                    [][4]uint64
+	delCount                                int // overrides the encoded number of deletions
+}
+
+func (b runBuilder) build() []byte {
+	out := append([]byte{}, "crdt"...)
+	version := b.ver
+	if version == 0 {
+		version = snapshotVersion
+	}
+	out = append(out, version)
+	out = binary.AppendUvarint(out, uint64(len(b.sites)))
+	for _, s := range b.sites {
+		out = binary.AppendUvarint(out, s[0])
+		out = binary.AppendUvarint(out, s[1])
+	}
+	n := b.count
+	if n == 0 {
+		n = len(b.runs)
+	}
+	out = binary.AppendUvarint(out, uint64(n))
+	for _, r := range b.runs {
+		for _, v := range []uint64{r.site, r.seq, r.clock, r.originSite, r.originSeq} {
+			out = binary.AppendUvarint(out, v)
+		}
+		length := r.length
+		if length == 0 {
+			length = uint64(len(r.text))
+		}
+		out = binary.AppendUvarint(out, length)
+		for _, ch := range r.text {
+			out = binary.AppendUvarint(out, uint64(ch))
+		}
+		dn := r.delCount
+		if dn == 0 {
+			dn = len(r.dels)
+		}
+		out = binary.AppendUvarint(out, uint64(dn))
+		for _, d := range r.dels {
+			for _, v := range d {
+				out = binary.AppendUvarint(out, v)
+			}
+		}
+	}
+	out = binary.AppendUvarint(out, 0) // no duplicate deletions
+	return append(out, b.tail...)
+}
+
+// wellFormedRun is a four-character run from site 1 with its third character
+// deleted, the shape every rejection below varies from.
+func wellFormedRun() runBuilder {
+	return runBuilder{
+		sites: [][2]uint64{{1, 5}},
+		runs: []encodedRun{{
+			site: 1, seq: 1, clock: 1, text: []rune("abcd"),
+			dels: [][4]uint64{{2, 1, 1, 5}}, // gap 2, span 1, deleted by 5@1
+		}},
+	}
+}
+
+func TestLoadAcceptsAHandBuiltRun(t *testing.T) {
+	d, err := Load(2, wellFormedRun().build())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got, want := d.String(), "abd"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+	if got, want := d.Tombstones(), 1; got != want {
+		t.Fatalf("Tombstones() = %d, want %d", got, want)
+	}
+	// It has to re-encode to exactly the bytes it was given.
+	if string(d.Snapshot()) != string(wellFormedRun().build()) {
+		t.Fatal("re-encoding a hand-built run did not reproduce it")
+	}
+}
+
+func TestLoadRejectsMalformedRuns(t *testing.T) {
+	tests := []struct {
+		name  string
+		alter func(*runBuilder)
+	}{
+		{"a run of no characters", func(b *runBuilder) { b.runs[0].text = nil; b.runs[0].dels = nil }},
+		{"more characters than bytes", func(b *runBuilder) { b.runs[0].length = 1 << 20 }},
+		{"more runs than bytes", func(b *runBuilder) { b.count = 1 << 20 }},
+		{"clock below the sequence", func(b *runBuilder) { b.runs[0].clock = 0; b.runs[0].seq = 1 }},
+		{"an identity with a sequence of zero", func(b *runBuilder) { b.runs[0].seq = 0 }},
+		{"an origin with a sequence of zero", func(b *runBuilder) { b.runs[0].originSite = 1 }},
+		{"a character above the highest rune", func(b *runBuilder) { b.runs[0].text = []rune{'a', 0, 'c'}; b.runs[0].text[1] = rune(0x110000) }},
+		{"a surrogate character", func(b *runBuilder) { b.runs[0].text[1] = rune(0xD800) }},
+		{"more deletions than bytes", func(b *runBuilder) { b.runs[0].delCount = 1 << 20 }},
+		{"a deletion of no characters", func(b *runBuilder) { b.runs[0].dels[0][1] = 0 }},
+		{"a deletion past the end of the run", func(b *runBuilder) { b.runs[0].dels[0][1] = 9 }},
+		{"a deletion starting past the end", func(b *runBuilder) { b.runs[0].dels[0][0] = 9 }},
+		{"a deletion with no identity", func(b *runBuilder) { b.runs[0].dels[0][2], b.runs[0].dels[0][3] = 0, 0 }},
+		{"a deletion with a sequence of zero", func(b *runBuilder) { b.runs[0].dels[0][3] = 0 }},
+		{"deletions that overlap", func(b *runBuilder) {
+			b.sites = [][2]uint64{{1, 6}}
+			b.runs[0].dels = [][4]uint64{{2, 1, 1, 5}, {0, 2, 1, 6}}
+		}},
+		{"an origin that does not exist", func(b *runBuilder) { b.runs[0].originSite, b.runs[0].originSeq = 9, 9 }},
+		{"a run the version vector does not cover", func(b *runBuilder) { b.sites = [][2]uint64{{1, 2}} }},
+		{"trailing bytes", func(b *runBuilder) { b.tail = []byte{0} }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := wellFormedRun()
+			tt.alter(&b)
+			if _, err := Load(2, b.build()); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Load() = %v, want ErrMalformed", err)
+			}
+		})
+	}
+}
+
+// Version 1 wrote one record per character, and documents stored by an older
+// build must still open — including refusing the ones it should refuse.
+func TestLoadRejectsTruncatedVersionOneSnapshots(t *testing.T) {
+	data := wellFormed().build()
+	if _, err := Load(2, data); err != nil {
+		t.Fatalf("the version 1 fixture does not load: %v", err)
+	}
+	for n := range len(data) {
+		if _, err := Load(2, data[:n]); err == nil {
+			t.Fatalf("Load(%d of %d bytes) succeeded, want an error", n, len(data))
+		}
+	}
+}
+
+// A document stored by an older build has to open. This snapshot was produced by
+// crdt v0.4.0, which wrote one record per character, and is kept verbatim: the
+// test is worth nothing if it is regenerated by the code it is meant to check.
+//
+// It carries the awkward parts on purpose — characters outside the basic plane,
+// a stretch deleted concurrently by two replicas, and a second site's work.
+func TestLoadReadsASnapshotWrittenByVersionOne(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/v1-snapshot.base64")
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		t.Fatalf("decoding the fixture: %v", err)
+	}
+	if got, want := raw[4], byte(snapshotVersionV1); got != want {
+		t.Fatalf("the fixture claims format version %d, want %d", got, want)
+	}
+
+	d, err := Load(9, raw)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const want = "written v0.4.0 — héllo 世界 🌍 and more"
+	if got := d.String(); got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+	if got, wantN := d.Tombstones(), 3; got != wantN {
+		t.Fatalf("Tombstones() = %d, want %d", got, wantN)
+	}
+
+	// It must be usable, not merely readable: the history replays, and writing it
+	// out again produces the current format, which reloads to the same thing.
+	peer := New(8)
+	apply(t, peer, d.OpsSince(nil))
+	if got := peer.String(); got != want {
+		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
+	}
+	fresh := d.Snapshot()
+	if fresh[4] != snapshotVersion {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersion)
+	}
+	again, err := Load(7, fresh)
+	if err != nil {
+		t.Fatalf("reloading the re-encoded snapshot: %v", err)
+	}
+	if got := again.String(); got != want {
+		t.Fatalf("the re-encoded snapshot reads %q, want %q", got, want)
+	}
+	if len(fresh) >= len(raw) {
+		t.Fatalf("re-encoding did not shrink it: %d bytes against %d", len(fresh), len(raw))
+	}
+	t.Logf("the same document: %d bytes in version 1, %d in version 2", len(raw), len(fresh))
 }
