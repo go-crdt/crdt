@@ -22,7 +22,7 @@ Zero dependencies.
 
 | Package | Purpose |
 |---|---|
-| `crdt` | the replicated text document: `Doc`, operations, version vectors, snapshots |
+| `crdt` | the replicated text document (`Doc`) and a replicated sequence of values (`List`) — operations, version vectors, snapshots |
 | `crdt/awareness` | ephemeral presence — who is here and where their cursor is |
 
 ## Using it
@@ -51,6 +51,24 @@ back from offline hands over its version vector and is sent only what it missed:
 client, err := crdt.Load(siteID, snapshot)   // join
 missed := server.OpsSince(client.Version())  // catch up
 ```
+
+## A list, for what sits beside the text
+
+The things built around a document are sequences too — the comments on it, the
+record of who changed what, the messages beside it — and they need the same
+guarantees. `List` is the same algorithm over values the caller encodes:
+
+```go
+comments := crdt.NewList(site)
+ops, _ := comments.Insert(0, encoded)   // values are opaque []byte
+comments.Apply(fromPeers...)
+anchor, _ := comments.Anchor(pos)       // a handle that survives other edits
+```
+
+It is a separate type rather than a generic one, deliberately: a document holds
+hundreds of thousands of characters and earns run-length storage and an index
+over runs, while a list holds tens or hundreds of values, where a slice is both
+faster and obviously correct.
 
 ## Keeping a view in step
 

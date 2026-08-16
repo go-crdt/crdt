@@ -229,6 +229,26 @@ second API. An offset that splits a character is always exactly one past that
 character's first unit, so `RuneOffset(pos-1)` is the position of the character
 it landed inside, and it cannot fail.
 
+## A list of values
+
+`List` replicates a sequence of opaque values by the same algorithm as the text,
+because the things built around a document — its comments, its record of
+changes, the messages beside it — are sequences with the same requirements.
+
+They are two types rather than one generic one, and that is a judgement about
+shape rather than about taste. A document holds hundreds of thousands of
+characters, which is what earns run-length blocks, an order-statistic tree and a
+snapshot format written a run at a time; a list holds tens or hundreds of values,
+where a slice is both faster to walk and obviously correct, and where an element
+is a byte slice the caller encodes rather than a rune this package understands.
+Sharing the code would mean carrying the document's machinery for no gain.
+
+What is shared is what should be: identities, version vectors, the Lamport
+ordering, the ledger that makes a snapshot prove it accounts for its own history,
+and the discipline — convergence demonstrated against randomised delivery *and*
+against every permutation of small histories, replicas compared on encoded state
+rather than on what they show, every decoder fuzzed.
+
 ## Awareness
 
 Cursors and selections are not part of the document. They are never persisted,
