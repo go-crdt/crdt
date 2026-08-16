@@ -72,6 +72,33 @@ Keeping `Seq` contiguous has a second effect worth naming: `Apply` will not
 integrate an operation until its predecessor from the same site has landed, so
 delivery is causally ordered per site whatever the transport does.
 
+### The clock has a ceiling
+
+A Lamport clock is raised past every clock a replica is told about, so the number
+a peer writes on an operation is a number this replica adopts. Left unbounded,
+that is enough to break a replica permanently, and it takes one operation — a
+corrupted varint will do, no malice required. A clock at the top of the range
+leaves the receiver's clock there, its next edit wraps to zero, and every
+operation it issues from then on carries a timestamp below its own sequence
+number: an operation its own validator rejects, and one that loses every tie it
+takes part in. The peer goes on typing and nothing it types is ever seen again.
+
+So `crdt.MaxClock` (2⁶²) is part of what makes an operation valid, checked
+wherever an operation or a snapshot arrives — text, list, map, and the awareness
+registry, which has a counter of the same shape. A sequence number is bounded by
+the same constant, since a clock is never below the sequence number beside it, so
+a version vector cannot promise operations that could not exist either. Reaching
+the ceiling honestly would take four quintillion operations, one per nanosecond
+for a century and a half.
+
+**What this does not fix, stated plainly.** A peer may still claim a clock *at*
+the ceiling, and a replica that adopts it can issue nothing further. There is no
+local test that separates a legitimately high clock from an absurd one — a peer
+returning from a long spell offline genuinely has a high clock. What the ceiling
+buys is the difference between silent, permanent corruption and a refusal that
+names itself: the edit reports `ErrExhausted` having changed nothing, and an edit
+asks for room once for all of it, so it never happens by halves.
+
 ### What the ordering rule actually decides
 
 Under that causal readiness rule, convergence turns out **not** to depend on the
@@ -310,6 +337,14 @@ there is only one order, and a key given twice would leave which record applies
 up to decoding order — and that a record's clock is at least its own sequence
 number. What is left over is the superseded set, which `OpsSince` derives from
 exactly that difference rather than storing it.
+
+That missing check is not free, and the clock ceiling is what stands in its
+place. Because the text's loader demands its whole history back, a text snapshot
+cannot promise a sequence number larger than the operations it carries. A map
+snapshot can promise any number at all, which without a bound would let crafted
+bytes hand a replica a counter one step from wrapping — the same defect as the
+paragraph above, arriving by a different road. Both roads are now closed by the
+same constant.
 
 ## Awareness
 

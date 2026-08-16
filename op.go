@@ -62,13 +62,53 @@ var ErrInvalidOp = errors.New("crdt: invalid operation")
 // ErrMalformed reports bytes that are not a valid encoding.
 var ErrMalformed = errors.New("crdt: malformed encoding")
 
-// validate reports why an operation cannot be applied, or nil.
+// ErrExhausted reports a replica that can issue no further operations because
+// its Lamport clock has reached [MaxClock]. Reaching it honestly is not
+// something a running program does; see [MaxClock].
+var ErrExhausted = errors.New("crdt: the site has no clock left")
+
+// MaxClock is the highest Lamport timestamp an operation may carry, and so also
+// the highest sequence number, since a clock is never below the sequence number
+// beside it.
 //
-// A Clock below the operation's own Seq is impossible for an honest replica: a
-// site's Lamport clock advances at least once per operation it issues, so after
-// n operations its clock is at least n.
+// A clock counts operations: to reach this one, a session would have to issue
+// four quintillion of them, one per nanosecond for a century and a half. The
+// ceiling exists for what arrives from elsewhere, not for what is issued here. A
+// replica raises its clock past every clock it is told about, so without a
+// ceiling one operation from one peer — a corrupted varint is enough, no
+// malice required — leaves the receiver's clock at the top of the range, and its
+// next edit wraps to zero. That edit is then an operation every replica rejects
+// as invalid, its own author included, and one that loses every tie it takes
+// part in: the peer is silently and permanently unable to write. Refusing the
+// clock on arrival is what keeps that from being reachable at all.
+const MaxClock = 1 << 62
+
+// wellFormedStamp reports whether an identity and a Lamport timestamp could
+// belong together on an operation some replica actually issued. Every kind of
+// operation here is stamped the same way and is held to this.
+//
+// A clock below the operation's own sequence number is impossible for an honest
+// replica: a site's clock advances at least once per operation it issues, so
+// after n operations its clock is at least n.
+func wellFormedStamp(id ID, clock uint64) bool {
+	return !id.IsRoot() && clock >= id.Seq && clock <= MaxClock
+}
+
+// room reports whether this site can still issue n operations without its clock
+// passing [MaxClock]. It is asked once for a whole edit rather than once per
+// operation, so that an edit either happens or does not.
+//
+// The subtraction is the way round that cannot overflow.
+func room(clock uint64, n int) error {
+	if uint64(n) > MaxClock-clock {
+		return ErrExhausted
+	}
+	return nil
+}
+
+// validate reports why an operation cannot be applied, or nil.
 func (o Op) validate() error {
-	if o.ID.IsRoot() || o.Clock < o.ID.Seq {
+	if !wellFormedStamp(o.ID, o.Clock) {
 		return ErrInvalidOp
 	}
 	if !o.Origin.wellFormed() || !o.Target.wellFormed() {

@@ -49,7 +49,7 @@ type ListOp struct {
 
 // validate reports why an operation cannot be applied, or nil.
 func (o ListOp) validate() error {
-	if o.ID.IsRoot() || o.Clock < o.ID.Seq ||
+	if !wellFormedStamp(o.ID, o.Clock) ||
 		!o.Origin.wellFormed() || !o.Target.wellFormed() {
 		return ErrInvalidOp
 	}
@@ -185,6 +185,9 @@ func (l *List) Insert(pos int, values ...[]byte) ([]ListOp, error) {
 	if len(values) == 0 {
 		return nil, nil
 	}
+	if err := room(l.clock, len(values)); err != nil {
+		return nil, err
+	}
 	origin := ID{}
 	if pos > 0 {
 		origin = l.elements[l.at(pos-1)].id
@@ -214,6 +217,9 @@ func (l *List) Delete(pos, count int) ([]ListOp, error) {
 	}
 	if count == 0 {
 		return nil, nil
+	}
+	if err := room(l.clock, count); err != nil {
+		return nil, err
 	}
 	// Collect the targets first: removing one shifts every later index.
 	targets := make([]ID, 0, count)
@@ -526,7 +532,9 @@ func LoadList(site SiteID, snapshot []byte) (*List, error) {
 	for range nSites {
 		s, ok1 := r.uvarint()
 		seq, ok2 := r.uvarint()
-		if !ok1 || !ok2 || seq == 0 {
+		// A sequence number above the clock ceiling names an operation no replica
+		// could have issued; see [MaxClock].
+		if !ok1 || !ok2 || seq == 0 || seq > MaxClock {
 			return nil, ErrMalformed
 		}
 		if _, dup := l.vv[SiteID(s)]; dup {
@@ -604,7 +612,8 @@ func (l *List) adopt(r *reader, ldg *ledger) error {
 		return ErrMalformed
 	}
 	value, ok := r.bytes(int(size))
-	if !ok || clock < id.Seq || !origin.wellFormed() || !delID.wellFormed() {
+	if !ok || clock > MaxClock || clock < id.Seq ||
+		!origin.wellFormed() || !delID.wellFormed() {
 		return ErrMalformed
 	}
 	if !ldg.claim(id) {

@@ -101,7 +101,7 @@ func (r *Registry) Publish(site crdt.SiteID, cursor Cursor, meta map[string]stri
 		p = &Peer{Site: site}
 		r.peers[site] = p
 	}
-	p.clock++
+	p.tick()
 	p.gone = false
 	p.Cursor = cursor
 	p.Meta = cloneMeta(meta)
@@ -116,17 +116,34 @@ func (r *Registry) Leave(site crdt.SiteID) Update {
 		p = &Peer{Site: site}
 		r.peers[site] = p
 	}
-	p.clock++
+	p.tick()
 	p.gone = true
 	p.Cursor = Cursor{}
 	p.Meta = nil
 	return Update{Site: site, Clock: p.clock, Gone: true}
 }
 
+// tick advances a peer's counter, stopping at the ceiling rather than passing
+// it, so that a publication is always a number another registry will accept.
+// Reaching the ceiling by publishing would take four quintillion publications;
+// what this guards against is arriving near it in one step, from outside.
+func (p *Peer) tick() {
+	if p.clock < crdt.MaxClock {
+		p.clock++
+	}
+}
+
 // Apply merges a peer's update and reports whether it changed anything. A stale
 // or duplicate update changes nothing and returns false.
 func (r *Registry) Apply(u Update) bool {
-	if u.Clock == 0 {
+	// A counter above the ceiling is refused for the reason a document operation
+	// is: this registry adopts the number it is given, and the site it names goes
+	// on counting from there. Left unchecked, an update at the top of the range
+	// would make that site's own next publication wrap to zero, which every
+	// registry discards as stale — the peer would stay on the list frozen where
+	// it was, and nothing it did afterwards would ever be seen again. See
+	// [crdt.MaxClock].
+	if u.Clock == 0 || u.Clock > crdt.MaxClock {
 		return false
 	}
 	p := r.peers[u.Site]

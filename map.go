@@ -90,7 +90,7 @@ func (o MapOp) first() uint64 {
 // same reason [Doc] refuses invalid UTF-8 rather than substituting for it. A
 // value has no such constraint: it is opaque, and nothing here reads it.
 func (o MapOp) validate() error {
-	if o.ID.IsRoot() || o.Clock < o.ID.Seq {
+	if !wellFormedStamp(o.ID, o.Clock) {
 		return ErrInvalidOp
 	}
 	switch o.Kind {
@@ -356,6 +356,9 @@ func (m *Map) Set(key string, value []byte) (MapOp, error) {
 	if !utf8.ValidString(key) {
 		return MapOp{}, ErrInvalidText
 	}
+	if err := room(m.clock, 1); err != nil {
+		return MapOp{}, err
+	}
 	id, clock := m.mint()
 	op := MapOp{Kind: MapSet, ID: id, Clock: clock, Key: key, Value: cloneBytes(value)}
 	m.integrate(op)
@@ -371,6 +374,9 @@ func (m *Map) Set(key string, value []byte) (MapOp, error) {
 func (m *Map) Delete(key string) (MapOp, error) {
 	if !utf8.ValidString(key) {
 		return MapOp{}, ErrInvalidText
+	}
+	if err := room(m.clock, 1); err != nil {
+		return MapOp{}, err
 	}
 	id, clock := m.mint()
 	op := MapOp{Kind: MapDelete, ID: id, Clock: clock, Key: key}
@@ -684,7 +690,11 @@ func LoadMap(site SiteID, snapshot []byte) (*Map, error) {
 	for range nSites {
 		s, ok1 := r.uvarint()
 		seq, ok2 := r.uvarint()
-		if !ok1 || !ok2 || seq == 0 {
+		// A sequence number above the clock ceiling names an operation no replica
+		// could have issued. This loader has no ledger to hold the vector to, so it
+		// is the only thing standing between a crafted vector and a replica whose
+		// own next operation would wrap; see [MaxClock].
+		if !ok1 || !ok2 || seq == 0 || seq > MaxClock {
 			return nil, ErrMalformed
 		}
 		// A site listed twice would leave which of the two entries applies up to
@@ -726,7 +736,7 @@ func LoadMap(site SiteID, snapshot []byte) (*Map, error) {
 		// The root is checked for by hand: Includes admits a sequence number of
 		// zero against any site, because zero is what a version vector reads as
 		// when it has never heard of that site at all.
-		if id.IsRoot() || !m.vv.Includes(id) || clock < id.Seq {
+		if id.IsRoot() || !m.vv.Includes(id) || clock < id.Seq || clock > MaxClock {
 			return nil, ErrMalformed
 		}
 		if _, dup := claimed[id]; dup {

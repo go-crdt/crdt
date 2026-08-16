@@ -566,11 +566,15 @@ func (d *Doc) Insert(pos int, text string) ([]Op, error) {
 	if text == "" {
 		return nil, nil
 	}
+	n := utf8.RuneCountInString(text)
+	if err := room(d.clock, n); err != nil {
+		return nil, err
+	}
 	left, leftAt := d.head, -1
 	if pos > 0 {
 		left, leftAt = d.visibleAt(pos - 1)
 	}
-	ops := make([]Op, 0, utf8.RuneCountInString(text))
+	ops := make([]Op, 0, n)
 	for _, r := range text {
 		id, clock := d.mint()
 		op := Op{Kind: OpInsert, ID: id, Clock: clock, Origin: originOf(left, leftAt), Char: r}
@@ -597,6 +601,9 @@ func (d *Doc) Delete(pos, length int) ([]Op, error) {
 	}
 	if length == 0 {
 		return nil, nil
+	}
+	if err := room(d.clock, length); err != nil {
+		return nil, err
 	}
 	// Collect the targets before deleting any of them: tombstoning a character
 	// shifts every later visible index.

@@ -156,7 +156,9 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	for range nSites {
 		s, ok1 := r.uvarint()
 		seq, ok2 := r.uvarint()
-		if !ok1 || !ok2 || seq == 0 {
+		// A sequence number above the clock ceiling names an operation no replica
+		// could have issued; see [MaxClock].
+		if !ok1 || !ok2 || seq == 0 || seq > MaxClock {
 			return nil, ErrMalformed
 		}
 		// A site listed twice would leave which of the two entries applies up to
@@ -248,8 +250,8 @@ func (d *Doc) readRun(r *reader, l *ledger) error {
 	}
 	// A run of no characters says nothing and would let a snapshot claim any
 	// number of them; each character costs at least a byte still to be read.
-	if length == 0 || length > uint64(len(r.buf)) || clock < id.Seq ||
-		!origin.wellFormed() || !id.wellFormed() {
+	if length == 0 || length > uint64(len(r.buf)) || clock > MaxClock ||
+		clock < id.Seq || !origin.wellFormed() || !id.wellFormed() {
 		return ErrMalformed
 	}
 	text := make([]rune, length)
@@ -442,7 +444,8 @@ func (r *reader) character() (character, bool) {
 		return character{}, false
 	}
 	delID, ok := r.id()
-	if !ok || clock < id.Seq || !origin.wellFormed() || !delID.wellFormed() {
+	if !ok || clock > MaxClock || clock < id.Seq ||
+		!origin.wellFormed() || !delID.wellFormed() {
 		return character{}, false
 	}
 	return character{id: id, clock: clock, origin: origin, ch: rune(ch), delID: delID}, true
