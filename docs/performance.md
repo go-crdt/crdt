@@ -1,90 +1,145 @@
 # Performance
 
-Measured, not estimated. Apple M4 Max, Go 1.26.4, `darwin/arm64`, on a document
-of 10 000 characters:
+## On the trace everybody publishes against
 
-| Benchmark | Result | Was |
-|---|---|---|
-| `InsertAtEnd` | **64.8 ns/op** | 231 ns |
-| `InsertAtStart` | **58.0 ns/op** | 315 ns |
-| `ApplyRemote` (10 000 operations) | **441 µs** | 823 µs |
-| `String` | 31.0 µs | 34.7 µs |
-| `Snapshot` | 75.2 µs, **11.0 bytes/char** | 94.5 µs |
-| `Load` | **1.02 ms** | 1.48 ms |
-| memory | **73.1 bytes/char** | 107.7 |
+The sequential editing traces at [josephg/editing-traces](https://github.com/josephg/editing-traces)
+are the common yardstick for text CRDTs — Yjs, Automerge and diamond-types all
+report against them. `automerge-paper` is the canonical one: **259 778
+single-character edits** recorded from someone actually writing a paper, ending
+in 104 852 characters with 77 463 tombstones.
 
-Reproduce with `go test -run '^$' -bench . -benchmem`. The "was" column is the
-0.1.0 release, for the two changes described below.
+Apple M4 Max, Go 1.26.4, `darwin/arm64`:
 
-## The position mark
+| | Result |
+|---|---|
+| replay the whole history locally | **54.6 ms** — 210 ns/edit |
+| apply the same history as a peer's operations | **80.7 ms** — 311 ns/operation |
+| deliver it **back to front**, nothing applicable until the last operation | **0.30 s** |
+| memory held afterwards | **4.7 MiB** — 26.4 bytes per character including tombstones |
 
-Finding a rune offset means walking the list, and the first measurement made the
-cost plain: inserting at the end of a 10 000-character document took **68 052 ns**
-against 218 ns at the start. The whole difference was the walk.
+Reproduce it, and check the result against the recorded final text:
 
-Someone typing asks for very nearly the same position on every keystroke, so
-`Doc` remembers the character its last local insertion produced and resumes from
-there when the position wanted is at or after it. Any other change — a deletion,
-a peer's operation — drops the mark.
+```sh
+curl -sLO https://raw.githubusercontent.com/josephg/editing-traces/master/sequential_traces/automerge-paper.json.gz
+CRDT_TRACE=automerge-paper.json.gz go test -run TestEditingTrace -v
+CRDT_TRACE=automerge-paper.json.gz go test -run '^$' -bench EditingTrace -benchtime 5x
+```
 
-**68 052 ns → 231 ns, a factor of 294.** The shortcut is covered by a test that
-runs every edit twice, once with the mark and once with it cleared, and requires
-the same document both times; removing the invalidation makes the convergence
-suite fail immediately.
+The replay is a correctness test before it is a benchmark: a quarter of a million
+edits at positions a real person chose, with the answer known in advance, plus a
+snapshot round trip and a full reload. CI runs it on every change.
 
-## Indexing characters by sequence number rather than by identity
+## Synthetic benchmarks
 
-Integration has to find a character from the identity an operation names. The
-obvious structure is `map[ID]*item`, and it was measured costing about as much
-again as the character it points at — a 16-byte key and an 8-byte value carry
-roughly 48 bytes of map overhead against a 64-byte character.
+On a document of 10 000 characters:
 
-It is not needed. A site's sequence numbers start at one and have no gaps, and
-`Apply` refuses an operation until its predecessor has landed, so **position in a
-slice is the sequence number**: `chars[site][n]` is the character made by that
-site's operation `n+1`, or nil where that operation was a deletion and made none.
-Lookup stays O(1) and the per-character overhead falls to one pointer.
+| Benchmark | 0.1.0 | 0.2.0 | 0.3.0 |
+|---|---|---|---|
+| `InsertAtEnd` | 231 ns | 65 ns | **34.8 ns** |
+| `ApplyRemote` (10 000 operations) | 823 µs | 441 µs | **302 µs** |
+| `Load` | 1.48 ms | 1.02 ms | **830 µs** |
+| `String` | 34.7 µs | 31.0 µs | **27.4 µs** |
+| memory, one run | 107.7 B/char | 73.1 | **4.19** |
 
-**107.7 → 73.1 bytes/char, and the write path got faster too** — inserting at the
-end went from 231 ns to 65 ns, because a map insert per character was a larger
-cost than the list work around it. Applying a peer's operations nearly halved.
+`go test -run '^$' -bench . -benchmem`.
 
-## What 73 bytes per character means
+## What changed, and why
 
-A character costs a 64-byte list entry plus a pointer in its site's index. A 1 MB
-source file therefore needs roughly 73 MB, which is still the number that decides
-the next piece of work.
+### The position mark, and then a list that walks both ways
 
-The answer is **not** tombstone garbage collection. A tombstone cannot simply be
-dropped: a concurrent insertion may still name it as its origin, and removing it
-means rewriting those origins on every replica identically, plus keeping a mapping
-for operations still in flight that were made before the collection. Yjs sidesteps
-all of that by keeping the identity and dropping only the content — which wins
-nothing here, because the content of a character-level entry is four bytes of a
-sixty-four byte struct.
+Finding a rune offset means walking the document. The first measurement was
+blunt: inserting at the end of a 10 000-character document took **68 052 ns**
+against 218 ns at the start, and the whole difference was the walk. Remembering
+where the last local edit ended took that to 231 ns.
 
-The answer is **run-length blocks**: one entry per *run* of characters typed
-consecutively by one site, split only where a concurrent insertion or deletion
-actually lands. Within such a run the identities, Lamport clocks and origins all
-follow from the first character's, so a thousand-character run costs one entry and
-its text rather than a thousand entries. Typing produces long runs, so the entry
-count falls by orders of magnitude on real documents, and tombstones collapse with
-them. It is how Yjs and `ygo` are built, and the sequence-number index above is
-the structure it needs — a run is a contiguous range of one site's sequence
-numbers, which is exactly what that index addresses.
+That mark only helped forwards, which the real trace exposed immediately: a
+replay that should have taken milliseconds took **2.79 seconds**, because half
+the edits move the cursor back a little and every one of those walked from the
+start of the document. Blocks now carry a back pointer and the walk goes
+whichever way it must, and a deletion re-establishes the mark instead of dropping
+it.
+
+**2.79 s → 50 ms on the real trace, a factor of 56**, and it is the single change
+that put this in the same range as the fastest implementations rather than an
+order of magnitude behind them.
+
+### Characters indexed by sequence number, not by identity
+
+Integration finds a character from the identity an operation names. That was a
+`map[ID]*item`, and the map cost about as much again as the character it pointed
+at. It was never needed: a site's sequence numbers start at one and have no gaps,
+and `Apply` refuses an operation until its predecessor has landed, so **position
+in a slice is the sequence number**.
+
+107.7 → 73.1 bytes per character, and the write path halved — a map insert per
+character cost more than all the list work around it.
+
+### Run-length blocks
+
+A character used to be a struct of its own: identity, clock, origin pointer,
+rune, deletion, next. Everything but the rune is derivable. A block is a run of
+characters one site typed consecutively, and for character *k* of that run the
+identity is `{site, seq+k}`, the clock is `clock+k`, and the origin is character
+*k-1*. A thousand characters typed in a row cost one header and their text.
+
+Blocks are only ever split — by an insertion landing inside one — and extended,
+by the next character of the same run. There is no merging to do: a new character
+can never bridge two existing blocks, because that would need the sequence number
+the right-hand block already holds. Integration walks runs rather than
+characters, because within a run the clocks ascend, so whichever way the "sorts
+after the new character" test goes at the first character of a run holds for the
+whole run.
+
+**73.1 → 4.19 bytes per character** on a document typed in one run, and the
+index shrank with it: it now holds one entry per run rather than one per
+character.
+
+### Waiting operations filed under what they are waiting for
+
+A peer that sends a long history back to front used to be quadratic: every
+arrival rescanned everything still parked. Delivering the real trace in reverse —
+337 000 operations, none applicable until the last — took **210 seconds**.
+
+Operations now wait in a map keyed by the single operation each needs, so
+integrating one wakes exactly its dependents. **210 s → 0.30 s.**
+
+## Where the memory goes now
+
+Measured on the real trace: 10 824 blocks holding 182 315 characters.
+
+| | |
+|---|---|
+| block headers | 1014 KiB |
+| text | 712 KiB |
+| deletion records | **2289 KiB** |
+
+The deletion records dominate, and half of what they hold is nothing: a block
+keeps one entry per character as soon as *any* character in it is deleted, so
+146 546 entries carry 77 463 actual tombstones. Two designs would fix it, and the
+measurement says which is worth trying first:
+
+- **Split on deletion** so a block is wholly visible or wholly deleted, keeping
+  one deletion identity per block instead of one per character. It trades
+  deletion records for block headers, and headers are already a quarter of the
+  total — worth measuring before committing to.
+- **A visibility bitmap** plus a compact list of the deletions themselves. One
+  bit per character instead of sixteen bytes, at the cost of a search to recover
+  a deletion's identity — which only `OpsSince` and `Snapshot` need, never the
+  editing path.
 
 ## Complexity
 
 | Operation | Cost |
 |---|---|
-| `Insert` at the mark | O(1) amortised |
-| `Insert` elsewhere | O(distance from the mark, or from the start) |
-| `Apply` an insertion | O(1) plus the integration scan |
-| `Apply` a deletion | O(1) |
+| `Insert` or `Delete` near the last edit | O(distance in characters), which is what locality makes small |
+| `Insert` or `Delete` cold | O(runs), not O(characters) |
+| `Apply` an insertion | O(runs scanned from the origin) |
+| `Apply` a deletion | O(log runs of the target's site) |
+| an operation arriving before its dependencies | O(1) to park, O(1) to wake |
 | `String`, `Snapshot`, `OpsSince` | O(characters, alive and tombstoned) |
 
-The integration scan is bounded by the number of insertions made concurrently at
+The integration scan is bounded by the number of runs inserted concurrently at
 the same position, which is small in practice and adversarial in theory: a peer
-sending operations that all name the same origin can make it quadratic. That is a
-property of RGA's list representation shared with `Apply` and `Load` alike, and it
-goes away with the indexed structure that run-length blocks bring.
+sending operations that all name the same origin can make it quadratic. The
+answer there is an order-statistic tree over the sequence, which would also make
+a cold positional lookup logarithmic rather than linear in runs.
