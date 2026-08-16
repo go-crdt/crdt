@@ -82,6 +82,9 @@ func TestMapSetGetDelete(t *testing.T) {
 	if _, ok := m.Get("b"); ok {
 		t.Fatal("Get returned a deleted key")
 	}
+	if m.Tombstones() != 1 {
+		t.Fatalf("Tombstones() = %d, want 1: the key has to keep its clock", m.Tombstones())
+	}
 	if got, want := m.Keys(), []string{"a", "c"}; !equalStrings(got, want) {
 		t.Fatalf("after deleting: Keys() = %v, want %v", got, want)
 	}

@@ -395,6 +395,11 @@ func (m *Map) Keys() []string {
 // Len returns how many keys are present, not counting deleted ones.
 func (m *Map) Len() int { return m.live }
 
+// Tombstones returns how many keys are held only to keep their clock. They are
+// the one thing here that grows without bound, so a caller measuring what a long
+// session costs measures this.
+func (m *Map) Tombstones() int { return len(m.records) - m.live }
+
 // Pending reports how many received operations are still waiting for the
 // operation their own site issued before them.
 func (m *Map) Pending() int { return m.parked }

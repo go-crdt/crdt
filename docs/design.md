@@ -254,9 +254,9 @@ rather than on what they show, every decoder fuzzed.
 Not everything beside a document is a sequence. A spreadsheet is a map of cells:
 written and cleared, never woven in between its neighbours. So `Map` is
 last-writer-wins per key, ordered by the same `(clock, site)` total order the
-text uses. Convergence is immediate — the winner is a maximum, and a
-maximum does not depend on the order it is taken in — which moves all of the
-difficulty to two other places.
+text uses. Convergence is immediate — the winner is a maximum, and a maximum does
+not depend on the order it is taken in — which moves all of the difficulty to two
+other places.
 
 ### A deleted key keeps its clock
 
