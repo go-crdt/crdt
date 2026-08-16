@@ -127,6 +127,7 @@ jobs:
           - { pkg: ".",           target: FuzzParseOps }
           - { pkg: ".",           target: FuzzApply }
           - { pkg: ".",           target: FuzzLoad }
+          - { pkg: ".",           target: FuzzVersionVector }
           - { pkg: "./awareness", target: FuzzUpdate }
     steps:
       - uses: actions/checkout@v4
