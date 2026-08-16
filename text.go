@@ -44,6 +44,16 @@ type block struct {
 	// a list that can only be walked forwards turns "just before" into a walk
 	// from the beginning of the document.
 	prev *block
+	// A block is also a node of the index in tree.go, which puts the same blocks
+	// in the same order and summarises what a walk would otherwise have to
+	// count: subVis is the visible characters this subtree holds, subMin the
+	// block of it whose first character sorts lowest. The count is an int32
+	// because two billion visible characters is eight gigabytes of text before
+	// anything else, and the field would otherwise cost every block eight bytes.
+	left, right, up *block
+	subMin          *block
+	subVis          int32
+	height          uint8
 }
 
 // A delRange is one stretch of a block that was deleted in one go: characters
@@ -236,6 +246,14 @@ type Doc struct {
 	head *block // sentinel for the root ID; head.next is the first block
 	vv   VersionVector
 
+	// tree is the root of the index over the same blocks; see tree.go. dirty
+	// holds the one block whose visible-character count the tree has not been
+	// told about yet, which is what keeps typing from paying for the index on
+	// every keystroke.
+	tree     *block
+	dirty    *block
+	dirtyVis int32
+
 	// bySite indexes each site's blocks by the sequence numbers they cover,
 	// ascending. Finding the character an operation names is a binary search
 	// over one site's blocks rather than a map lookup per character, which
@@ -277,12 +295,14 @@ type Doc struct {
 // New returns an empty document that issues operations as site. Every replica
 // editing a document concurrently must pass a distinct site; see [SiteID].
 func New(site SiteID) *Doc {
-	return &Doc{
+	d := &Doc{
 		site:   site,
 		head:   &block{},
 		vv:     VersionVector{},
 		bySite: map[SiteID][]*block{},
 	}
+	d.startIndex()
+	return d
 }
 
 // lookupChar returns the block and offset holding the character an operation
@@ -339,6 +359,10 @@ func (d *Doc) split(b *block, i int) *block {
 	}
 	b.next = right
 	d.indexAdd(right)
+	// The characters the right-hand block takes over are the ones the left-hand
+	// one no longer holds; index puts them back under the new block.
+	d.addVis(b, -int32(right.visibleFrom(0)))
+	d.index(b, right)
 	return right
 }
 
@@ -431,42 +455,67 @@ func (d *Doc) String() string {
 // Editing is local — the position wanted is nearly always a few characters from
 // the last one — so the walk starts at the mark and goes whichever way it has
 // to, and steps over whole runs that are still intact rather than counting
-// their characters. Without the mark it starts at the beginning.
+// their characters. Without the mark, or when the position turns out to be
+// further off than the index would have cost, it descends the index instead.
 func (d *Doc) visibleAt(pos int) (*block, int) {
 	if d.mark != nil {
 		if pos >= d.markIdx {
-			return forward(d.mark, d.markPos, d.markIdx, pos)
+			if b, i, ok := forward(d.mark, d.markPos, d.markIdx, pos, scanBudget); ok {
+				return b, i
+			}
+		} else if b, i, ok := backward(d.mark, d.markPos, d.markIdx, pos, scanBudget); ok {
+			return b, i
 		}
-		return backward(d.mark, d.markPos, d.markIdx, pos)
 	}
-	return forward(d.head.next, 0, 0, pos)
+	return d.seek(pos)
 }
 
-// forward walks towards the end of the document from a known position.
-func forward(b *block, i, n, pos int) (*block, int) {
+// forward walks towards the end of the document from a known position, giving
+// up after budget runs so that a position far from the mark is answered by the
+// index instead.
+func forward(b *block, i, n, pos, budget int) (*block, int, bool) {
 	for ; ; b, i = b.next, 0 {
 		rest := b.visibleFrom(i)
 		if n+rest <= pos {
+			if budget == 0 {
+				return nil, 0, false
+			}
+			budget--
 			n += rest
 			continue
 		}
-		return b, b.visibleOffset(i, pos-n)
+		return b, b.visibleOffset(i, pos-n), true
 	}
 }
 
-// backward walks towards the start of the document from a known position.
-func backward(b *block, i, n, pos int) (*block, int) {
+// backward walks towards the start of the document from a known position, under
+// the same budget as forward.
+func backward(b *block, i, n, pos, budget int) (*block, int, bool) {
 	for {
 		// The visible characters at offset i or earlier are the ones ending at
 		// n, so the first of them is n-v+1'th in the document.
 		first := n - b.visibleUpto(i) + 1
 		if pos >= first {
-			return b, b.visibleOffset(0, pos-first)
+			return b, b.visibleOffset(0, pos-first), true
 		}
+		if budget == 0 {
+			return nil, 0, false
+		}
+		budget--
 		n = first - 1
 		b = b.prev
 		i = len(b.text) - 1
 	}
+}
+
+// leftOf returns the visible character before the one at (b, i), which is the
+// character at index pos. It is a step back, unless a stretch of tombstoned
+// runs lies between the two, which is what the budget catches.
+func (d *Doc) leftOf(b *block, i, pos int) (*block, int) {
+	if left, at, ok := backward(b, i, pos, pos-1, scanBudget); ok {
+		return left, at
+	}
+	return d.seek(pos - 1)
 }
 
 // mint allocates this site's next operation identity and Lamport timestamp.
@@ -534,7 +583,7 @@ func (d *Doc) Delete(pos, length int) ([]Op, error) {
 	var leftB *block
 	var leftAt int
 	if pos > 0 {
-		leftB, leftAt = backward(b, i, pos, pos-1)
+		leftB, leftAt = d.leftOf(b, i, pos)
 	}
 	for len(targets) < length {
 		if i == len(b.text) {
@@ -668,7 +717,7 @@ func (d *Doc) integrate(op Op) (*block, int) {
 func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	at, i, _ := d.lookupChar(origin)
 	i++
-	for {
+	for budget := scanBudget; ; {
 		if i < len(at.text) {
 			if !before(clock, id.Site, at.clockAt(i), at.id.Site) {
 				break // the character here sorts first; the new one goes before it
@@ -680,6 +729,15 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 		if next == nil || !before(clock, id.Site, next.clock, next.id.Site) {
 			break
 		}
+		if budget == 0 {
+			// The run of characters sorting after this one is longer than a
+			// descent, and a peer sending operations that all name one origin
+			// makes it as long as the document. The index finds its end.
+			at = d.lastOver(at, clock, id.Site)
+			i = len(at.text)
+			break
+		}
+		budget--
 		at, i = next, len(next.text)
 	}
 	if i < len(at.text) {
@@ -691,6 +749,7 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	// appended in place: no block, no index entry, nothing to merge afterwards.
 	if extends(at, id, clock, origin) {
 		at.text = append(at.text, ch)
+		d.addVis(at, 1)
 		return at, len(at.text) - 1
 	}
 
@@ -703,6 +762,7 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	}
 	at.next = fresh
 	d.indexAdd(fresh)
+	d.index(at, fresh)
 	return fresh, 0
 }
 
@@ -717,6 +777,7 @@ func (d *Doc) tombstone(op Op) {
 	switch existing := b.delIDAt(i); {
 	case existing.IsRoot():
 		b.markDeleted(i, op.ID)
+		d.addVis(b, -1)
 		d.visible--
 	case idLess(op.ID, existing):
 		b.dels[b.isolate(i)].id = op.ID
