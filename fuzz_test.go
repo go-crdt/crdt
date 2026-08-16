@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -227,6 +228,48 @@ func FuzzUTF16Offsets(f *testing.F) {
 		}
 		if pos, err := d.RuneOffset(at); err != nil || pos != len(runes) {
 			t.Fatalf("RuneOffset(%d) = %d, %v; want %d, nil", at, pos, err, len(runes))
+		}
+	})
+}
+
+// A list snapshot arrives from a server, so its decoder is a trust boundary like
+// every other in this package.
+func FuzzLoadList(f *testing.F) {
+	l := NewList(1)
+	if _, err := l.Insert(0, []byte("one"), []byte("two"), []byte("three")); err != nil {
+		f.Fatal(err)
+	}
+	if _, err := l.Delete(1, 1); err != nil {
+		f.Fatal(err)
+	}
+	f.Add(l.Snapshot())
+	f.Add([]byte("crdl\x01"))
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		loaded, err := LoadList(1, data)
+		if err != nil {
+			return
+		}
+		if got, want := loaded.Len()+loaded.Tombstones(), len(loaded.elements); got != want {
+			t.Fatalf("Len()+Tombstones() = %d, but the list holds %d elements", got, want)
+		}
+		// Re-encoding an accepted snapshot must be a fixed point: the format has
+		// one canonical form, whatever an accepted input looked like.
+		again, err := LoadList(1, loaded.Snapshot())
+		if err != nil {
+			t.Fatalf("a list could not reload its own snapshot: %v", err)
+		}
+		if !bytes.Equal(again.Snapshot(), loaded.Snapshot()) {
+			t.Fatal("re-encoding a loaded snapshot is not a fixed point")
+		}
+		// And the history has to replay into a fresh replica.
+		replayed := NewList(2)
+		if err := replayed.Apply(loaded.OpsSince(nil)...); err != nil {
+			t.Fatalf("replaying a loaded list's history was rejected: %v", err)
+		}
+		if !bytes.Equal(replayed.Snapshot(), loaded.Snapshot()) {
+			t.Fatal("replaying the history did not reproduce the state")
 		}
 	})
 }
