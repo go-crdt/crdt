@@ -150,3 +150,16 @@ func BenchmarkMemoryPerCharacter(b *testing.B) {
 	for range b.N {
 	}
 }
+
+// What collecting changes costs. Apply does not pay it; a caller keeping a view
+// in step does, once per operation, for a walk up the index.
+func BenchmarkApplyRemoteWithChanges(b *testing.B) {
+	source, _ := filled(b, benchSize)
+	ops := source.OpsSince(nil)
+	b.ResetTimer()
+	for range b.N {
+		if _, err := New(2).ApplyChanges(ops...); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

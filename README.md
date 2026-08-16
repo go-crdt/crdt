@@ -52,6 +52,18 @@ client, err := crdt.Load(siteID, snapshot)   // join
 missed := server.OpsSince(client.Version())  // catch up
 ```
 
+## Keeping a view in step
+
+A view of the text — an editor, a preview — has to be told what changed, not
+what the text now is. Handed only the new text it would have to replace
+everything, and replacing everything throws away the selection, the scroll
+position, the folded regions and the decorations, on every keystroke anybody
+else makes.
+
+`ApplyChanges` is `Apply` and also reports the edits, in the order they have to
+be made, coalesced: a peer typing a word is one change, not one per letter.
+`Apply` does not pay for that.
+
 ## Anchoring, and who wrote what
 
 An offset names a place; an anchor names a character, and keeps naming it however
@@ -59,6 +71,7 @@ the document moves around it. That is what a comment, a mark or a stored
 selection should be:
 
 ```go
+changes, _ := doc.ApplyChanges(ops...) // what a view has to do to catch up
 anchor, _ := doc.Anchor(pos)     // the identity of the character there
 pos, ok := doc.Position(anchor)  // where it is now — or where it was, if deleted
 doc.Visible(anchor)              // whether it is still in the text
