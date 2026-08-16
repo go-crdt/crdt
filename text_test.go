@@ -478,6 +478,99 @@ func TestADeletionsIdentityNamesNoCharacter(t *testing.T) {
 	}
 }
 
+// records counts the deletion records the document holds, which is what decides
+// whether deleting is cheap.
+func records(d *Doc) int {
+	n := 0
+	for b := d.head.next; b != nil; b = b.next {
+		n += len(b.dels)
+	}
+	return n
+}
+
+// A stretch deleted in one go is one record, however long it is; corrections
+// made in separate places are one each. This is the whole point of storing
+// deletions as ranges, so it is asserted rather than left to a memory figure.
+func TestDeletionsAreStoredAsStretches(t *testing.T) {
+	d := New(1)
+	insert(t, d, 0, "the quick brown fox")
+
+	remove(t, d, 4, 6) // "quick "
+	if got := records(d); got != 1 {
+		t.Fatalf("deleting one stretch left %d records, want 1", got)
+	}
+	remove(t, d, 0, 4) // "the ", a separate place
+	if got := records(d); got != 2 {
+		t.Fatalf("deleting a second stretch left %d records, want 2", got)
+	}
+	if got, want := d.String(), "brown fox"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+	if got, want := d.Tombstones(), 10; got != want {
+		t.Fatalf("Tombstones() = %d, want %d", got, want)
+	}
+
+	// Every deletion still has to be repeatable to a peer, one operation per
+	// character, whatever the records look like here.
+	peer := New(2)
+	apply(t, peer, d.OpsSince(nil))
+	if got, want := peer.String(), d.String(); got != want {
+		t.Fatalf("the peer holds %q, want %q", got, want)
+	}
+	if string(peer.Snapshot()) != string(d.Snapshot()) {
+		t.Fatal("the peer agrees on the text but not on the state")
+	}
+}
+
+// An insertion landing inside a deleted stretch divides the record, and each
+// half has to keep the right identity for its characters — otherwise the
+// deletions replay onto the wrong characters, or not at all.
+func TestAnInsertionInsideADeletedStretchDividesTheRecord(t *testing.T) {
+	a, b := New(1), New(2)
+	seed := insert(t, a, 0, "abcdef")
+	apply(t, b, seed)
+
+	// b writes between c and d; a meanwhile deletes both, in one stretch.
+	fromB := insert(t, b, 3, "X")
+	fromA := remove(t, a, 2, 2)
+	if got := records(a); got != 1 {
+		t.Fatalf("the deletion left %d records, want 1", got)
+	}
+
+	apply(t, a, fromB)
+	apply(t, b, fromA)
+	if got := records(a); got != 2 {
+		t.Fatalf("an insertion inside the stretch left %d records, want it divided into 2", got)
+	}
+
+	if a.String() != b.String() {
+		t.Fatalf("diverged: a = %q, b = %q", a.String(), b.String())
+	}
+	if got, want := a.String(), "abXef"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+	if string(a.Snapshot()) != string(b.Snapshot()) {
+		t.Fatal("the replicas agree on the text but not on the state")
+	}
+
+	// The divided records must still name the right operations.
+	third := New(3)
+	apply(t, third, a.OpsSince(nil))
+	if got, want := third.String(), "abXef"; got != want {
+		t.Fatalf("replaying gave %q, want %q", got, want)
+	}
+	if string(third.Snapshot()) != string(a.Snapshot()) {
+		t.Fatal("replaying the history did not reproduce the state")
+	}
+	loaded, err := Load(4, a.Snapshot())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if string(loaded.Snapshot()) != string(a.Snapshot()) {
+		t.Fatal("a snapshot of the divided records did not reload to the same state")
+	}
+}
+
 func TestStringBuildsFromVisibleCharactersOnly(t *testing.T) {
 	d := New(1)
 	insert(t, d, 0, strings.Repeat("x", 10))
