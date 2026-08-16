@@ -249,6 +249,68 @@ and the discipline — convergence demonstrated against randomised delivery *and
 against every permutation of small histories, replicas compared on encoded state
 rather than on what they show, every decoder fuzzed.
 
+## A replicated map
+
+Not everything beside a document is a sequence. A spreadsheet is a map of cells:
+written and cleared, never woven in between its neighbours. So `Map` is
+last-writer-wins per key, ordered by the same `(clock, site)` total order the
+text uses. Convergence is immediate — the winner is a maximum, and a
+maximum does not depend on the order it is taken in — which moves all of the
+difficulty to two other places.
+
+### A deleted key keeps its clock
+
+A deletion leaves a record behind. Dropping the key would leave nothing for an
+older write arriving later to lose against, so that write would take effect,
+resurrecting the key on the replica that heard it late and not on the one that
+heard it early — permanently, and with nothing left behind that a later read
+could use to notice. It is the classic mistake in a last-writer-wins map, and the
+tombstone is equally what makes a delete and a concurrent set to the same key
+resolve identically everywhere.
+
+`Delete` writes a tombstone whether or not this replica holds the key, for the
+same reason: what a deletion means cannot depend on what the deleting replica
+happens to have heard.
+
+### What a replica forgets, and how it says so
+
+One record per key means the value a write put there is gone as soon as a later
+write replaces it. The **operation** is not gone, and may not be: sequence
+numbers are contiguous per site, which is what lets a version vector describe a
+replica exactly, and `Apply` never skips one — an operation arriving before its
+predecessor waits rather than being dropped, because the number it would skip
+could be a key nobody would ever hear about again.
+
+So a peer catching up has to be told that the number was used. `OpsSince` says it
+with a `MapSuperseded` operation, which names no key and carries no value. That
+is sound only because the operation which superseded it travels in the same
+result: it is either the record now held for that key, which `OpsSince` sends
+whenever the peer lacks it, or something the peer already has. Induction on the
+`(clock, site)` order, which strictly increases at every step, closes it. A caller
+that filters what `OpsSince` returns breaks the map.
+
+A superseded operation covers a **run** of consecutive sequence numbers rather
+than one. That is not only an economy: the numbers a replica has forgotten are
+exactly the gaps between the ones it still holds, so a cell rewritten ten
+thousand times sends one record and one run rather than ten thousand operations,
+and catching a peer up costs what the state costs rather than what the history
+did. Fuzzing found the version of this that did not: a snapshot whose version
+vector promises a history far longer than the records describing it — no replica
+sends one, but a decoder cannot tell — and `OpsSince` sat there naming every
+number in it.
+
+### Loading is a trust boundary, with one check the text has and this cannot
+
+`Load` insists that every operation the version vector promises is accounted for
+exactly once. `LoadMap` cannot: the superseded ones are accounted for by nothing,
+which is the whole point of the section above. What it does insist on is that no
+record claims an operation the vector does not promise, that no operation is
+claimed by two records, that keys ascend strictly — the encoding is canonical, so
+there is only one order, and a key given twice would leave which record applies
+up to decoding order — and that a record's clock is at least its own sequence
+number. What is left over is the superseded set, which `OpsSince` derives from
+exactly that difference rather than storing it.
+
 ## Awareness
 
 Cursors and selections are not part of the document. They are never persisted,

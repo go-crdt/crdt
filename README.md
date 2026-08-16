@@ -22,7 +22,7 @@ Zero dependencies.
 
 | Package | Purpose |
 |---|---|
-| `crdt` | the replicated text document (`Doc`) and a replicated sequence of values (`List`) — operations, version vectors, snapshots |
+| `crdt` | the replicated text document (`Doc`), a replicated sequence of values (`List`) and a replicated map (`Map`) — operations, version vectors, snapshots |
 | `crdt/awareness` | ephemeral presence — who is here and where their cursor is |
 
 ## Using it
@@ -69,6 +69,26 @@ It is a separate type rather than a generic one, deliberately: a document holds
 hundreds of thousands of characters and earns run-length storage and an index
 over runs, while a list holds tens or hundreds of values, where a slice is both
 faster and obviously correct.
+
+## A map, for the cells beside it
+
+Not everything beside a document is a sequence. A spreadsheet is a map of cells,
+a table of settings is a map of settings: written and cleared, never woven in
+between their neighbours. `Map` merges those by last writer wins per key, under
+the same `(clock, site)` order the text uses, over values the caller encodes:
+
+```go
+sheet := crdt.NewMap(site)
+op, _ := sheet.Set("B7", []byte("42"))  // send op to every peer
+value, ok := sheet.Get("B7")            // a copy; writing to it changes nothing
+op, _ = sheet.Delete("B7")
+sheet.Keys()                            // sorted, so every replica agrees
+```
+
+A deleted key keeps its clock. Dropping it would let an older write arriving
+afterwards bring the key back on the replica that heard it late and not on the
+one that heard it early, permanently — the classic mistake in a last-writer-wins
+map, and the thing here most worth reading [docs/design.md](docs/design.md) for.
 
 ## Keeping a view in step
 
