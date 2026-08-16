@@ -97,6 +97,26 @@ integration rule can replace the current one without disturbing anything that
 imports it. Version 0.1 ships RGA because it is the variant whose correctness can
 be demonstrated rather than argued.
 
+## Anchors, and authorship
+
+An editor needs somewhere stable to hang a comment. An offset is not that: the
+moment anyone edits above it, it points somewhere else. What does not move is the
+identity of the character itself, which every character already carries and which
+nothing ever changes — so [Doc.Anchor] hands it out and [Doc.Position] converts
+back, climbing the index rather than walking the document.
+
+A deleted character still reports a position, the offset the text closed up to.
+That is deliberate: a comment on a deleted sentence belongs where the sentence
+was, not nowhere, and [Doc.Visible] is how a caller tells the two apart. The end
+of the document anchors to the zero ID, the one place insertions at the end do
+not move.
+
+Authorship falls out of the same fact. The site is part of every character's
+identity, so [Doc.AuthorRuns] splits the visible text by who wrote it in one
+pass, joining stretches by the same replica so that the answer describes the text
+rather than how this replica happens to have split its blocks — two replicas
+holding the same document return the same runs.
+
 ## Snapshots
 
 A snapshot is every character in document order, alive or tombstoned, plus the
