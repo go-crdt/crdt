@@ -127,7 +127,9 @@ are checked against node's, not against ours.
 
 ## Status
 
-Version 0.5: the sequence CRDT, the wire and snapshot formats, and awareness.
+Version 0.8: the sequence CRDT, the wire and snapshot formats, awareness, and the
+surface an editor needs — reported changes, anchors, authorship, and UTF-16
+addressing.
 Pure Go, CGO=0, **100% statement coverage** on both packages, race-clean, six-arch
 CI, and the full suite green under `js/wasm`.
 
