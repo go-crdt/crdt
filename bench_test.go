@@ -63,6 +63,51 @@ func BenchmarkApplyRemote(b *testing.B) {
 	}
 }
 
+// A cursor that jumps — a second cursor, a replace-all, a patch dropped into
+// the middle of a document, a peer's operation arriving between two keystrokes —
+// asks for a position the mark cannot help with. The document here is built one
+// character at a time at positions that jump, so it holds as many runs as
+// characters and every walk it forces is the length of the document.
+func BenchmarkScatteredInsert(b *testing.B) {
+	d := New(1)
+	for i := range benchSize {
+		if _, err := d.Insert((i*7919)%(i+1), "x"); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ResetTimer()
+	for i := range b.N {
+		if _, err := d.Insert((i*7919)%d.Len(), "y"); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// A peer whose operations all name one origin. Integration walks forward from
+// the origin over every character that sorts after the new one, so operations
+// arranged to sort in front of everything already there make that walk the
+// length of the document, every time. Nothing stops a peer sending this, and a
+// server integrates what its peers send.
+func BenchmarkSameOriginFlood(b *testing.B) {
+	const n = 5_000
+	ops := make([]Op, n)
+	for i := range ops {
+		ops[i] = Op{
+			Kind:  OpInsert,
+			ID:    ID{Site: SiteID(i + 2), Seq: 1},
+			Clock: uint64(n - i),
+			Char:  'x',
+		}
+	}
+	b.ResetTimer()
+	for range b.N {
+		if err := New(1).Apply(ops...); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/n, "ns/op-applied")
+}
+
 func BenchmarkString(b *testing.B) {
 	d, _ := filled(b, benchSize)
 	b.ResetTimer()

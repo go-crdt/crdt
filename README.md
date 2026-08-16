@@ -66,7 +66,8 @@ missed := server.OpsSince(client.Version())  // catch up
 - **Intent.** A run of characters typed one after another is never chopped up by
   someone else's concurrent insertion.
 - **Nothing is trusted.** Every decoder is fuzzed; a snapshot that no replica
-  could have produced is rejected rather than loaded.
+  could have produced is rejected rather than loaded; and operations arranged to
+  make integration walk the whole document cost a descent of an index instead.
 
 ## Status
 
@@ -75,9 +76,9 @@ Pure Go, CGO=0, **100% statement coverage** on both packages, race-clean, six-ar
 CI, and the full suite green under `js/wasm`.
 
 A real editing history — 259 778 edits from the trace text CRDTs are commonly
-measured on — replays in **24.4 ms** and matches the recorded text exactly; the
+measured on — replays in **18.4 ms** and matches the recorded text exactly; the
 same history delivered back to front, nothing applicable until the last
-operation, settles in 0.24 s, and the document encodes to 620 KB. See [docs/performance.md](docs/performance.md).
+operation, settles in 0.25 s, and the document encodes to 620 KB. See [docs/performance.md](docs/performance.md).
 
 See [docs/design.md](docs/design.md) for how it works and why, and
 [docs/performance.md](docs/performance.md) for what it costs and what changes

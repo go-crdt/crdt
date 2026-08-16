@@ -12,10 +12,10 @@ Apple M4 Max, Go 1.26.4, `darwin/arm64`:
 
 | | Result |
 |---|---|
-| replay the whole history locally | **24.4 ms** — 94 ns/edit |
-| apply the same history as a peer's operations | **55.9 ms** — 215 ns/operation |
-| deliver it **back to front**, nothing applicable until the last operation | **0.24 s** |
-| memory held afterwards | **3.9 MiB** — 22.7 bytes per character including tombstones |
+| replay the whole history locally | **18.4 ms** — 71 ns/edit |
+| apply the same history as a peer's operations | **52.9 ms** — 204 ns/operation |
+| deliver it **back to front**, nothing applicable until the last operation | **0.25 s** |
+| memory held afterwards | **4.3 MiB** — 24.6 bytes per character including tombstones |
 | the document encoded | **620 KB** — 5.9 bytes per visible character |
 
 Reproduce it, and check the result against the recorded final text:
@@ -62,6 +62,12 @@ is the fastest text CRDT anyone has published and it stays that way here. The
 honest reading of this table is that we are in its range — same order of
 magnitude, same trace, same machine — and ahead of everything else measured.
 
+Our row is 0.4.0. The index over runs described below arrived after this table
+was measured and takes the replay to 18.4 ms, on the Go benchmark that put 0.4.0
+at 23.4 ms in the same session — level with diamond-types on this trace, by a
+measurement that agrees with this one to within 3%. The table stands as it was
+taken; the other implementations have not been re-run.
+
 ### Document size, where we do badly
 
 Encoding the replayed document:
@@ -100,7 +106,8 @@ there is no figure for them here rather than a bad one.
 
 Per *visible* character, because that is the only count the two agree on: the
 document ends with 104 852 characters, and we additionally hold 77 463
-tombstones, which is where the 22.7 B/char quoted earlier comes from. Yjs's
+tombstones, which is where the per-stored-character figure at the top of this
+page comes from. Yjs's
 default `gc: true` discards deleted content, so the `gc: false` row is the
 closer comparison — and we are below both.
 
@@ -144,15 +151,23 @@ CRDT_TRACE=…/automerge-paper.json.gz node --expose-gc bench.js yjs --runs 10
 
 On a document of 10 000 characters:
 
-| Benchmark | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 |
-|---|---|---|---|---|
-| `InsertAtEnd` | 231 ns | 65 ns | 34.8 ns | **32.9 ns** |
-| `ApplyRemote` (10 000 operations) | 823 µs | 441 µs | 302 µs | **279 µs** |
-| `Load` | 1.48 ms | 1.02 ms | 830 µs | **756 µs** |
-| `String` | 34.7 µs | 31.0 µs | 27.4 µs | **23.7 µs** |
-| memory, one run | 107.7 B/char | 73.1 | 4.19 | **4.20** |
+| Benchmark | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 | 0.5.0 |
+|---|---|---|---|---|---|
+| `InsertAtEnd` | 231 ns | 65 ns | 34.8 ns | 32.9 ns | **33.7 ns** |
+| `ApplyRemote` (10 000 operations) | 823 µs | 441 µs | 302 µs | 279 µs | **295 µs** |
+| `Load` | 1.48 ms | 1.02 ms | 830 µs | 756 µs | **613 µs** |
+| `String` | 34.7 µs | 31.0 µs | 27.4 µs | 23.7 µs | **23.6 µs** |
+| memory, one run | 107.7 B/char | 73.1 | 4.19 | 4.20 | **4.19** |
+| `ScatteredInsert` | | | | 12.3 µs | **0.37 µs** |
+| `SameOriginFlood` (5000 operations) | | | | 27.3 ms | **1.07 ms** |
 
-`go test -run '^$' -bench . -benchmem`.
+`go test -run '^$' -bench . -benchmem`. The last two arrived with 0.5.0; their
+0.4.0 column is the same benchmark run against the release before it.
+
+The 0.5.0 column holds two changes and a busy machine, so it was taken beside the
+commit before it in the same session, which read 32.9 ns, 291 µs, 607 µs, 24.0 µs
+and 4.19 B/char. `Load` is the run-length snapshot format; what the index costs
+here is under a nanosecond of `InsertAtEnd` and 4 µs of `ApplyRemote`.
 
 ## What changed, and why
 
@@ -268,36 +283,95 @@ replacing one character's deletion when two replicas delete it at once cuts
 another. Writing them joined hides that. The randomised convergence suite found
 this immediately, by comparing encoded state rather than text.
 
+### An index over the runs
+
+The list answers "what follows this" in a step and everything else by walking,
+which the mark makes cheap only while the next position is near the last one. Two
+things it is not cheap for, and the second is not a matter of taste:
+
+- a position far from the last edit — a second cursor, a replace-all, a patch
+  dropped into the middle, or simply a peer's operation arriving between two
+  keystrokes and clearing the mark — walks every run in between;
+- integration walks forward from the origin over everything that sorts after the
+  new character, so a peer naming one origin over and over makes the walk the
+  length of the document. `collab`'s server integrates what its peers send, and
+  peers need not be honest.
+
+The blocks are now the nodes of an AVL tree in document order as well as links in
+the list, each carrying two summaries of its subtree: the visible characters it
+holds, which turns a position into a descent, and the block of it that sorts
+lowest, which turns that integration walk into one too. Measured back to back
+against the release before it, on the same machine in the same session:
+
+| | 0.4.0 | 0.5.0 | |
+|---|---|---|---|
+| the real trace, replayed | 23.4 ms | **18.4 ms** | −21% |
+| 2000 inserts at scattered positions in a 12 000-run document | 12.3 µs each | **0.37 µs** | 33× |
+| 5000 operations at one origin | 27.3 ms | **1.07 ms** | 26× |
+| 20 000 operations at one origin | 370 ms | **4.6 ms** | 80× |
+| the real trace, applied as a peer's operations | 50.9 ms | 52.9 ms | +4% |
+| memory held on the real trace | 22.66 B/char | 24.56 B/char | +8% |
+| `InsertAtStart` | 93.2 ns | 140 ns | +50% |
+
+The flood is the one to read twice. Its cost per operation was 2.8 µs at 2500
+operations, 5.6 at 5000, 10.2 at 10 000 and 18.5 at 20 000 — doubling with the
+document, which is the quadratic stated below. It is now 193 ns, 214, 231 and
+231: flat, because a subtree whose lowest-sorting block still sorts after the new
+character holds nothing to stop on and is stepped over whole.
+
+The trace got faster rather than slower because real editing is not as local as
+the mark assumes: a fifth of the replay was walking.
+
+Both walks keep their heads. Each starts along the list and turns to the tree
+only after sixteen runs, which is about what a descent costs, so typing pays
+nothing for the index and never sees it.
+
+Three numbers went the wrong way, and all three are the same number. The index
+costs 32 bytes a run — three pointers, a count and a height, which takes a block
+header from Go's 112-byte size class to its 144-byte one — and on the trace that
+is 338 KiB. `InsertAtStart` inserts one character per run at one end, so it pays
+a walk to the root of the tree per character and nothing else amortises it; it is
+the index's worst case by construction. Applying a whole history allocates
+everything from nothing, and a profile of it is dominated by the allocator rather
+than by anything in `tree.go` — the 4% is that 8% of memory, arriving as
+collector work.
+
+A B-tree holding runs in its leaves, as diamond-types does, would pay for itself
+here: no per-run node, a depth of four rather than seventeen, and iteration from
+the leaves. It costs the pointer identity of a block, which the mark, the
+per-site index and every walk in `text.go` are written in terms of. That is the
+next thing to measure, not something to guess at.
+
 ## Where the memory goes now
 
 Measured on the real trace: 10 824 blocks holding 182 315 characters, of which
-77 463 are tombstones, in 3.9 MiB.
+77 463 are tombstones, in 4.3 MiB.
 
 | | |
 |---|---|
-| block headers | ~1050 KiB |
+| block headers | ~1390 KiB |
 | text | 712 KiB |
 | deletion records | ~1180 KiB |
 
-The remaining lever is the block headers, at 104 bytes each. An order-statistic
-tree over the sequence would replace both the linked list and the per-site slice
-index, make a cold positional lookup logarithmic rather than linear in runs, and
-remove the adversarial quadratic described below — worth measuring before
-committing to.
+The remaining lever is still the block headers, now 144 bytes each.
 
 ## Complexity
 
 | Operation | Cost |
 |---|---|
 | `Insert` or `Delete` near the last edit | O(distance in characters), which is what locality makes small |
-| `Insert` or `Delete` cold | O(runs), not O(characters) |
-| `Apply` an insertion | O(runs scanned from the origin) |
+| `Insert` or `Delete` cold | O(log runs) |
+| `Apply` an insertion | O(log runs) |
 | `Apply` a deletion | O(log runs of the target's site), then O(records in the run) |
 | an operation arriving before its dependencies | O(1) to park, O(1) to wake |
 | `String`, `Snapshot`, `OpsSince` | O(characters, alive and tombstoned) |
 
-The integration scan is bounded by the number of runs inserted concurrently at
-the same position, which is small in practice and adversarial in theory: a peer
-sending operations that all name the same origin can make it quadratic. The
-answer there is an order-statistic tree over the sequence, which would also make
-a cold positional lookup logarithmic rather than linear in runs.
+Both logarithms are the tree in `tree.go`, reached after sixteen runs of walking
+the list. Nothing an untrusted peer sends can make either of them worse: the tree
+is an AVL tree, balanced by height rather than by priorities a peer could
+compute, and a peer that could choose the priorities could choose a list.
+
+Adding a run to the tree costs a walk to its root, which typing amortises over a
+whole run of characters — the change a keystroke makes is held against the block
+and carried up when the tree is next read — but which one character per run does
+not.

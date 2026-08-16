@@ -346,7 +346,10 @@ func (d *Doc) adopt(c character, l *ledger) error {
 	if c.delID.IsRoot() {
 		d.visible++
 	} else {
+		// place counted the character as visible, as it is when it arrives; the
+		// snapshot says it was deleted before this replica ever saw it.
 		b.markDeleted(i, c.delID)
+		d.addVis(b, -1)
 	}
 	if c.clock > d.clock {
 		d.clock = c.clock
