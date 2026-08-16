@@ -3,17 +3,18 @@
 Measured, not estimated. Apple M4 Max, Go 1.26.4, `darwin/arm64`, on a document
 of 10 000 characters:
 
-| Benchmark | Result |
-|---|---|
-| `InsertAtEnd` | 231 ns/op |
-| `InsertAtStart` | 315 ns/op |
-| `ApplyRemote` (10 000 operations) | 823 µs |
-| `String` | 34.7 µs |
-| `Snapshot` | 94.5 µs, **11.0 bytes/char** |
-| `Load` | 1.48 ms |
-| memory | **107.7 bytes/char** |
+| Benchmark | Result | Was |
+|---|---|---|
+| `InsertAtEnd` | **64.8 ns/op** | 231 ns |
+| `InsertAtStart` | **58.0 ns/op** | 315 ns |
+| `ApplyRemote` (10 000 operations) | **441 µs** | 823 µs |
+| `String` | 31.0 µs | 34.7 µs |
+| `Snapshot` | 75.2 µs, **11.0 bytes/char** | 94.5 µs |
+| `Load` | **1.02 ms** | 1.48 ms |
+| memory | **73.1 bytes/char** | 107.7 |
 
-Reproduce with `go test -run '^$' -bench . -benchmem`.
+Reproduce with `go test -run '^$' -bench . -benchmem`. The "was" column is the
+0.1.0 release, for the two changes described below.
 
 ## The position mark
 
@@ -31,29 +32,46 @@ runs every edit twice, once with the mark and once with it cleared, and requires
 the same document both times; removing the invalidation makes the convergence
 suite fail immediately.
 
-## What 107.7 bytes per character means
+## Indexing characters by sequence number rather than by identity
 
-A character costs a 64-byte list item plus its entry in the identity map. A 1 MB
-source file would therefore need roughly 100 MB, which is the number that decides
+Integration has to find a character from the identity an operation names. The
+obvious structure is `map[ID]*item`, and it was measured costing about as much
+again as the character it points at — a 16-byte key and an 8-byte value carry
+roughly 48 bytes of map overhead against a 64-byte character.
+
+It is not needed. A site's sequence numbers start at one and have no gaps, and
+`Apply` refuses an operation until its predecessor has landed, so **position in a
+slice is the sequence number**: `chars[site][n]` is the character made by that
+site's operation `n+1`, or nil where that operation was a deletion and made none.
+Lookup stays O(1) and the per-character overhead falls to one pointer.
+
+**107.7 → 73.1 bytes/char, and the write path got faster too** — inserting at the
+end went from 231 ns to 65 ns, because a map insert per character was a larger
+cost than the list work around it. Applying a peer's operations nearly halved.
+
+## What 73 bytes per character means
+
+A character costs a 64-byte list entry plus a pointer in its site's index. A 1 MB
+source file therefore needs roughly 73 MB, which is still the number that decides
 the next piece of work.
 
-The answer for RGA text is **not** tombstone garbage collection. A tombstone
-cannot simply be dropped: a concurrent insertion may still name it as its origin,
-and removing it means rewriting those origins on every replica identically, plus
-keeping a mapping for operations still in flight that were made before the
-collection. Yjs sidesteps all of that by keeping the identity and dropping only
-the content — which wins nothing here, because the content of a character-level
-item is four bytes of a sixty-four byte struct.
+The answer is **not** tombstone garbage collection. A tombstone cannot simply be
+dropped: a concurrent insertion may still name it as its origin, and removing it
+means rewriting those origins on every replica identically, plus keeping a mapping
+for operations still in flight that were made before the collection. Yjs sidesteps
+all of that by keeping the identity and dropping only the content — which wins
+nothing here, because the content of a character-level entry is four bytes of a
+sixty-four byte struct.
 
-The answer is **run-length blocks**: one item per *run* of characters typed
+The answer is **run-length blocks**: one entry per *run* of characters typed
 consecutively by one site, split only where a concurrent insertion or deletion
-actually lands. Typing produces long runs, so the item count falls by orders of
-magnitude on real documents, and tombstones collapse with them. It is how Yjs and
-`ygo` are built, and it is version 0.2 — behind the same `Doc` API, with the same
-convergence suite as the gate.
-
-`ApplyRemote` and `Load` are dominated by the same per-character allocation and
-will follow the item count down.
+actually lands. Within such a run the identities, Lamport clocks and origins all
+follow from the first character's, so a thousand-character run costs one entry and
+its text rather than a thousand entries. Typing produces long runs, so the entry
+count falls by orders of magnitude on real documents, and tombstones collapse with
+them. It is how Yjs and `ygo` are built, and the sequence-number index above is
+the structure it needs — a run is a contiguous range of one site's sequence
+numbers, which is exactly what that index addresses.
 
 ## Complexity
 

@@ -439,6 +439,45 @@ func TestRemoteOperationClearsTheMark(t *testing.T) {
 	}
 }
 
+// Characters are indexed by the sequence number of the operation that made
+// them, and a deletion makes none — it leaves a hole. An operation naming that
+// hole refers to a character that does not exist and must never be integrated,
+// however plausible its identity looks.
+func TestADeletionsIdentityNamesNoCharacter(t *testing.T) {
+	source := New(1)
+	insert(t, source, 0, "a")
+	deletion := remove(t, source, 0, 1)
+	if got, want := deletion[0].ID, (ID{Site: 1, Seq: 2}); got != want {
+		t.Fatalf("fixture is wrong: the deletion is %v, want %v", got, want)
+	}
+
+	for _, tt := range []struct {
+		name string
+		op   Op
+	}{
+		{"an insertion after it", Op{
+			Kind: OpInsert, ID: ID{Site: 2, Seq: 1}, Clock: 9,
+			Origin: deletion[0].ID, Char: 'x',
+		}},
+		{"a deletion of it", Op{
+			Kind: OpDelete, ID: ID{Site: 2, Seq: 1}, Clock: 9,
+			Target: deletion[0].ID,
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := New(3)
+			apply(t, d, source.OpsSince(nil))
+			apply(t, d, []Op{tt.op})
+			if got := d.Pending(); got != 1 {
+				t.Fatalf("Pending() = %d, want 1: the operation was integrated", got)
+			}
+			if got, want := d.String(), source.String(); got != want {
+				t.Fatalf("String() = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestStringBuildsFromVisibleCharactersOnly(t *testing.T) {
 	d := New(1)
 	insert(t, d, 0, strings.Repeat("x", 10))

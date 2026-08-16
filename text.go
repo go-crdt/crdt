@@ -41,8 +41,19 @@ type Doc struct {
 	clock uint64 // Lamport clock: at least as high as any clock seen
 
 	head *item // sentinel for the root ID; head.next is the first character
-	byID map[ID]*item
 	vv   VersionVector
+
+	// chars indexes characters by the operation that created them: chars[site][n]
+	// is the character made by that site's operation number n+1, or nil where
+	// that operation was a deletion and made none.
+	//
+	// A map keyed by ID would be the obvious structure and costs about as much
+	// again as the character it points at. It is not needed: a site's sequence
+	// numbers start at one and have no gaps, and [Doc.Apply] refuses an operation
+	// until its predecessor has landed, so position in a slice *is* the sequence
+	// number. Lookup stays O(1) and the per-character overhead drops to one
+	// pointer.
+	chars map[SiteID][]*item
 
 	// pending holds operations whose dependencies have not arrived.
 	pending []Op
@@ -66,13 +77,33 @@ type Doc struct {
 // New returns an empty document that issues operations as site. Every replica
 // editing a document concurrently must pass a distinct site; see [SiteID].
 func New(site SiteID) *Doc {
-	head := &item{}
 	return &Doc{
-		site: site,
-		head: head,
-		byID: map[ID]*item{{}: head},
-		vv:   VersionVector{},
+		site:  site,
+		head:  &item{},
+		vv:    VersionVector{},
+		chars: map[SiteID][]*item{},
 	}
+}
+
+// lookup returns the character an operation created. The root ID names the
+// sentinel before the first character, which every document has.
+func (d *Doc) lookup(id ID) (*item, bool) {
+	if id.IsRoot() {
+		return d.head, true
+	}
+	made := d.chars[id.Site]
+	if id.Seq > uint64(len(made)) {
+		return nil, false
+	}
+	it := made[id.Seq-1]
+	return it, it != nil
+}
+
+// record files the character an operation created, or nil for a deletion, which
+// creates none. Operations from a site arrive in order and none is skipped, so
+// this is always an append.
+func (d *Doc) record(id ID, it *item) {
+	d.chars[id.Site] = append(d.chars[id.Site], it)
 }
 
 // Site returns the replica identity this document issues operations as.
@@ -160,7 +191,7 @@ func (d *Doc) Insert(pos int, text string) ([]Op, error) {
 		op := Op{Kind: OpInsert, ID: id, Clock: clock, Origin: left.id, Char: r}
 		d.integrate(op)
 		ops = append(ops, op)
-		left = d.byID[id]
+		left, _ = d.lookup(id)
 	}
 	d.mark, d.markIdx = left, pos+len(ops)-1
 	return ops, nil
@@ -231,10 +262,10 @@ func (d *Doc) ready(op Op) bool {
 		return false
 	}
 	if op.Kind == OpInsert {
-		_, ok := d.byID[op.Origin]
+		_, ok := d.lookup(op.Origin)
 		return ok
 	}
-	_, ok := d.byID[op.Target]
+	_, ok := d.lookup(op.Target)
 	return ok
 }
 
@@ -273,10 +304,13 @@ func (d *Doc) integrate(op Op) {
 	}
 	d.vv[op.ID.Site] = op.ID.Seq
 	if op.Kind == OpDelete {
+		// A deletion makes no character, but it does consume a sequence number,
+		// and the index is addressed by sequence number.
+		d.record(op.ID, nil)
 		d.tombstone(op)
 		return
 	}
-	origin := d.byID[op.Origin]
+	origin, _ := d.lookup(op.Origin)
 	// Walk past the characters that sort after the new one. Every character
 	// inserted after origin by a replica that had already seen origin carries a
 	// higher Lamport clock than origin, and so does everything inserted after
@@ -288,7 +322,7 @@ func (d *Doc) integrate(op Op) {
 	}
 	it := &item{id: op.ID, origin: origin, clock: op.Clock, ch: op.Char, next: prev.next}
 	prev.next = it
-	d.byID[op.ID] = it
+	d.record(op.ID, it)
 	d.visible++
 	d.total++
 }
@@ -300,7 +334,7 @@ func (d *Doc) integrate(op Op) {
 // every replica, whatever order the two arrive in — and the other is remembered
 // separately so it can still be replayed to peers.
 func (d *Doc) tombstone(op Op) {
-	target := d.byID[op.Target]
+	target, _ := d.lookup(op.Target)
 	switch {
 	case target.alive():
 		target.delID = op.ID
