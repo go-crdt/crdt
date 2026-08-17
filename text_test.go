@@ -582,3 +582,99 @@ func TestStringBuildsFromVisibleCharactersOnly(t *testing.T) {
 		t.Fatalf("Tombstones() = %d, want %d", got, want)
 	}
 }
+
+// Several operations waiting on the same one, which is the case the chunk a
+// parked operation is cut from has to survive.
+//
+// Each parked operation gets a one-element slice into a shared chunk, so a
+// second operation filed under the same identity appends to a slice whose
+// capacity is one — which copies it out rather than writing into the next
+// operation's element. If that capacity were wrong, the neighbour would be
+// silently replaced and the document would converge on the wrong text, or on
+// nothing at all.
+//
+// Three operations end up under one identity here: site 1's second character
+// waits on its own predecessor, and sites 2 and 3 both insert after that same
+// first character, which has not arrived. Then it arrives, and all three wake.
+func TestParkingSeveralOperationsUnderOneIdentity(t *testing.T) {
+	one := New(1)
+	first, err := one.Insert(0, "A")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := one.Insert(1, "B")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two replicas that have seen only the first character, each inserting
+	// after it, so both of their operations name it as their origin.
+	two, three := New(2), New(3)
+	apply(t, two, first)
+	apply(t, three, first)
+	fromTwo, err := two.Insert(1, "X")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromThree, err := three.Insert(1, "Y")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A fifth site, whose *second* operation is delivered without its first, so
+	// it parks under an identity of its own rather than joining the group.
+	//
+	// That is what makes this test load-bearing. An append that overruns its
+	// one-element slice writes into the chunk's next slot without the chunk
+	// knowing, and the chunk hands that same slot to the next operation filed
+	// under a *different* identity — quietly replacing an operation that is
+	// still waiting. Only an operation parked under another key afterwards can
+	// reveal it, and every operation above shares one key.
+	five := New(6)
+	apply(t, five, first)
+	fifthFirst, err := five.Insert(1, "Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fifthSecond, err := five.Insert(2, "W")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Everything that depends on the first character, before it.
+	late := New(4)
+	apply(t, late, second)
+	apply(t, late, fromTwo)
+	apply(t, late, fromThree)
+	apply(t, late, fifthSecond) // parks under its own predecessor, not the group
+	if got := late.String(); got != "" {
+		t.Fatalf("nothing should have integrated yet, but the document reads %q", got)
+	}
+	if got, want := late.parked, 4; got != want {
+		t.Fatalf("parked = %d, want %d — three under one identity and one under another", got, want)
+	}
+
+	apply(t, late, first)
+	apply(t, late, fifthFirst)
+	if got := late.parked; got != 0 {
+		t.Fatalf("Parked() = %d after the identity they waited on arrived, want 0", got)
+	}
+
+	// The order the three settle in is the CRDT's business; agreeing on it is
+	// the point. A replica given the same operations in a sensible order must
+	// read the same thing.
+	ordered := New(5)
+	apply(t, ordered, first)
+	apply(t, ordered, second)
+	apply(t, ordered, fromTwo)
+	apply(t, ordered, fromThree)
+	apply(t, ordered, fifthFirst)
+	apply(t, ordered, fifthSecond)
+	if late.String() != ordered.String() {
+		t.Fatalf("delivery order changed the document: %q against %q", late.String(), ordered.String())
+	}
+	if len([]rune(late.String())) != 6 {
+		t.Fatalf("the document lost a character: %q", late.String())
+	}
+	t.Logf("four parked under two identities, woken together: %q", late.String())
+}
