@@ -79,7 +79,8 @@ Encoding the replayed document:
 | yjs 13.6.32 (V2 encoding) | 160 KB |
 | loro-crdt 1.14.1 | 251 KB |
 | yjs 13.6.32 (V1 encoding) | 311 KB |
-| **go-crdt/crdt 0.14.0** | **527 KB** |
+| **go-crdt/crdt 0.15.0** | **478 KB** |
+| *go-crdt/crdt 0.14.0* | *527 KB* |
 | *go-crdt/crdt 0.5.0* | *620 KB* |
 | *go-crdt/crdt 0.4.0, when this was measured* | *2 663 KB* |
 
@@ -123,9 +124,33 @@ so the step is usually one byte. Measured before it was built, on this trace:
 | **a step from the previous deletion (version 3)** | **55 828** |
 | a step from the run's own sequence | 117 771 |
 
-which is what took the document from 620 KB to 527 KB. The remaining gap is
-still real: the text is now 35% of the file and nobody here compresses it, and
-the identities, origins and clocks are another 116 KB between them.
+which is what took the document from 620 KB to 527 KB.
+
+### Then the same question, of what was left
+
+With the deletions halved, the three fields under them were 116 KB between
+them, and the same measurement answered the same way:
+
+| Field | In full | As a step | |
+|---|---|---|---|
+| run identities | 42 444 | **31 273** | a step from the last run by that site |
+| origins | 42 382 | **25 484** | a step from the last origin with that site |
+| clocks | 31 620 | **10 824** | the distance above the run's own sequence |
+
+The clocks are the interesting one: 10 824 bytes is one byte per run, and it is
+not a coincidence. A clock can never fall below its own sequence number — a
+site's clock advances at least once per operation it issues — so the distance
+between them is small, unsigned, and needs no sign bit. Writing it that way also
+means a snapshot can no longer express a clock the loader would have had to
+refuse: the invariant moved out of a check and into the format.
+
+Version 4 writes all three. 527 KB to 478 KB, and 620 KB to 478 KB since the
+runs were introduced — a 23% cut in two steps, both of them measured first.
+
+What is left is mostly the text: 182 KB of it, 38% of the file, written plainly
+because this package has no dependencies and a compressor is a dependency. The
+deletions are still 43%, but three quarters of that is now the offsets and spans
+themselves rather than the identities attached to them.
 
 ### Memory
 

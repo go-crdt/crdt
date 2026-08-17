@@ -9,12 +9,16 @@ import (
 // so a decoder rejects foreign or future bytes instead of misreading them.
 var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 
-// snapshotVersion 3 writes a deletion's sequence number as a signed step from
-// the previous deletion by the same site; version 2 wrote it in full; version 1
-// wrote one record per character. All three are readable; version 1's note
+// snapshotVersion 4 writes a run's header as steps too: its own sequence number
+// and its origin's from the last the same site used, and its clock as the
+// distance above its own sequence, which it can never fall below. Version 3
+// writes a deletion's sequence number as a signed step from the previous
+// deletion by the same site; version 2 wrote it in full; version 1 wrote one
+// record per character. All four are readable; version 1's note
 // still read, so a document stored by an older build still opens.
 const (
-	snapshotVersion   = 3
+	snapshotVersion   = 4
+	snapshotVersionV3 = 3
 	snapshotVersionV2 = 2
 	snapshotVersionV1 = 1
 )
@@ -60,12 +64,26 @@ func (d *Doc) Snapshot() []byte {
 	// pay a full-width jump when the writer changes. Measured: 148 385 bytes
 	// to 55 828 on the automerge-paper trace.
 	lastDelSeq := map[SiteID]uint64{}
+	// The run header goes the same way, and for the same reason: a run's own
+	// sequence number and its origin's both climb, so the step is small where
+	// the number is large. Measured on the automerge-paper trace: identities
+	// 42 444 bytes to 31 273, origins 42 382 to 25 484.
+	lastRunSeq := map[SiteID]uint64{}
+	lastOriginSeq := map[SiteID]uint64{}
 	for _, r := range runs {
 		out = binary.AppendUvarint(out, uint64(r.id.Site))
-		out = binary.AppendUvarint(out, r.id.Seq)
-		out = binary.AppendUvarint(out, r.clock)
+		out = binary.AppendUvarint(out, zigzag(int64(r.id.Seq)-int64(lastRunSeq[r.id.Site])))
+		lastRunSeq[r.id.Site] = r.id.Seq
+		// The clock as the distance above this run's own sequence number, which
+		// it can never fall below: a site's clock advances at least once per
+		// operation it issues, so after n operations it is at least n. The
+		// difference needs no sign, and a snapshot can no longer express a
+		// clock the loader would have had to refuse. 31 620 bytes to 10 824,
+		// which is one byte per run.
+		out = binary.AppendUvarint(out, r.clock-r.id.Seq)
 		out = binary.AppendUvarint(out, uint64(r.origin.Site))
-		out = binary.AppendUvarint(out, r.origin.Seq)
+		out = binary.AppendUvarint(out, zigzag(int64(r.origin.Seq)-int64(lastOriginSeq[r.origin.Site])))
+		lastOriginSeq[r.origin.Site] = r.origin.Seq
 		out = binary.AppendUvarint(out, uint64(len(r.text)))
 		for _, ch := range r.text {
 			out = binary.AppendUvarint(out, uint64(ch))
@@ -169,7 +187,8 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
+	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV3 &&
+		v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
 		return nil, ErrMalformed
 	}
 	version := v[0]
@@ -211,12 +230,18 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	// the same way. Per site, so that a document with several authors does not
 	// pay a full-width jump every time the writer changes.
 	lastDelSeq := map[SiteID]uint64{}
+	// The run header goes the same way, and for the same reason: a run's own
+	// sequence number and its origin's both climb, so the step is small where
+	// the number is large. Measured on the automerge-paper trace: identities
+	// 42 444 bytes to 31 273, origins 42 382 to 25 484.
+	lastRunSeq := map[SiteID]uint64{}
+	lastOriginSeq := map[SiteID]uint64{}
 	for range count {
 		var err error
 		if version == snapshotVersionV1 {
 			err = d.readCharacter(r, ledger)
 		} else {
-			err = d.readRun(r, ledger, version, lastDelSeq)
+			err = d.readRun(r, ledger, version, lastDelSeq, lastRunSeq, lastOriginSeq)
 		}
 		if err != nil {
 			return nil, err
@@ -271,13 +296,33 @@ func (d *Doc) readCharacter(r *reader, l *ledger) error {
 // readRun decodes one version 2 entry and adopts its characters one by one, so
 // that a run gets exactly the checks a character-at-a-time snapshot got: the
 // shorter encoding buys space, not trust.
-func (d *Doc) readRun(r *reader, l *ledger, version byte, lastDelSeq map[SiteID]uint64) error {
-	id, ok1 := r.id()
+func (d *Doc) readRun(r *reader, l *ledger, version byte, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
+	id, ok1 := r.steppedID(version, lastRunSeq)
 	clock, ok2 := r.uvarint()
-	origin, ok3 := r.id()
+	origin, ok3 := r.steppedID(version, lastOriginSeq)
 	length, ok4 := r.uvarint()
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return ErrMalformed
+	}
+	if version >= snapshotVersion {
+		// The clock arrives as the distance above this run's own sequence
+		// number, so it is added back here and held to the ceiling below like
+		// any other clock.
+		//
+		// Nothing is checked before the addition, and it is worth writing down
+		// why, because a guard here looks prudent. The addition can overflow,
+		// but an overflow cannot pass: it means distance + sequence ≥ 2^64, so
+		// the sum lands at distance + sequence − 2^64, which is below the
+		// sequence unless the distance is itself 2^64 or more — and it cannot
+		// be, because it arrived in sixty-four bits. Every overflow therefore
+		// produces a clock below its own sequence number, which is refused.
+		//
+		// Nor is there a second encoding to worry about: for a given sequence
+		// and clock the distance between them is one number, so the canonicity
+		// the padded-varint refusal protects is not at stake. I wrote the guard
+		// first, then tried to write the test that needed it, and the test could
+		// not be written.
+		clock += id.Seq
 	}
 	// A run of no characters says nothing and would let a snapshot claim any
 	// number of them; each character costs at least a byte still to be read.
@@ -472,6 +517,28 @@ func uvarint(buf []byte) (uint64, int) {
 	return v, used
 }
 
+// steppedID reads an identity whose sequence number version 4 writes as a signed
+// step from the last one that site used in the same position — a run's own, or a
+// run's origin. Each position keeps its own running value, which is why the map
+// is a parameter rather than a field.
+//
+// The root origin is site 0, sequence 0, and it is common; a step of zero from a
+// running value of zero is one byte, which is what it was before.
+func (r *reader) steppedID(version byte, last map[SiteID]uint64) (ID, bool) {
+	if version < snapshotVersion {
+		return r.id()
+	}
+	site, ok1 := r.uvarint()
+	step, ok2 := r.uvarint()
+	if !ok1 || !ok2 {
+		return ID{}, false
+	}
+	at := SiteID(site)
+	seq := uint64(int64(last[at]) + unzigzag(step))
+	last[at] = seq
+	return ID{Site: at, Seq: seq}, true
+}
+
 // delID reads a deletion's identity, which version 3 writes as a signed step
 // from the last sequence number that site deleted with.
 //
@@ -488,7 +555,7 @@ func uvarint(buf []byte) (uint64, int) {
 // The running value is left poisoned on a bad step, which costs nothing:
 // decoding stops at the first refusal.
 func (r *reader) delID(version byte, last map[SiteID]uint64) (ID, bool) {
-	if version < snapshotVersion {
+	if version < snapshotVersionV3 {
 		return r.id()
 	}
 	site, ok1 := r.uvarint()
