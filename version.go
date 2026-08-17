@@ -107,7 +107,7 @@ func (v VersionVector) MarshalBinary() ([]byte, error) {
 // twice, a sequence number of zero, and trailing bytes are all rejected: each
 // would leave what the vector means dependent on decoding order.
 func (v *VersionVector) UnmarshalBinary(data []byte) error {
-	count, used := binary.Uvarint(data)
+	count, used := uvarint(data)
 	if used <= 0 {
 		return ErrMalformed
 	}
@@ -119,13 +119,16 @@ func (v *VersionVector) UnmarshalBinary(data []byte) error {
 	}
 	out := make(VersionVector, count)
 	for range count {
-		site, used := binary.Uvarint(rest)
+		site, used := uvarint(rest)
 		if used <= 0 {
 			return ErrMalformed
 		}
 		rest = rest[used:]
-		seq, used := binary.Uvarint(rest)
-		if used <= 0 || seq == 0 {
+		// A sequence number above the clock ceiling names an operation no replica
+		// could have issued — the refusal every snapshot loader here already
+		// makes, and this decoder did not. See [MaxClock].
+		seq, used := uvarint(rest)
+		if used <= 0 || seq == 0 || seq > MaxClock {
 			return ErrMalformed
 		}
 		rest = rest[used:]

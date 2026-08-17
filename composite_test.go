@@ -667,44 +667,55 @@ func TestCompositeVersionRejects(t *testing.T) {
 	}
 }
 
-// The fuzzer found this one, and it is the boundary of what "canonical" means
-// here. binary.Uvarint accepts an overlong varint, so a peer may write a zero in
-// two bytes and this decoder cannot tell. Every decoder in this package reads
-// its varints through the same reader and has the same hole, and nothing else in
-// the encoding is ambiguous — so what is guaranteed is that what this package
-// encodes reloads to itself byte for byte, and that what it accepts is
-// normalised into that form.
-func TestCompositeVersionNormalisesARedundantVarint(t *testing.T) {
+// The fuzzer found this one, and it was the boundary of what "canonical" meant
+// here: binary.Uvarint accepts an overlong varint, so a peer could write a zero
+// in two bytes and no decoder in this package could tell. Two byte-different
+// snapshots then described one state, which is exactly what the encoding
+// promises cannot happen. The varint layer now refuses it, so the promise holds
+// all the way down rather than down to the last seven bits.
+func TestARedundantVarintIsRefused(t *testing.T) {
 	// No sites, no parts: the empty version, with the part count written long.
 	redundant := []byte{0x00, 0x80, 0x00}
 	var v CompositeVersion
-	if err := v.UnmarshalBinary(redundant); err != nil {
-		t.Fatalf("UnmarshalBinary: %v", err)
+	if err := v.UnmarshalBinary(redundant); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("UnmarshalBinary(%x) = %v, want ErrMalformed", redundant, err)
+	}
+	// The control: the same value written minimally is accepted, so what was
+	// refused is the redundancy and not the value.
+	minimal := []byte{0x00, 0x00}
+	if err := v.UnmarshalBinary(minimal); err != nil {
+		t.Fatalf("UnmarshalBinary(%x) = %v, want it accepted", minimal, err)
 	}
 	if !v.Equal(nil) {
 		t.Fatalf("decoded to %v, want the empty version", v)
 	}
-	encoded, err := v.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
+}
+
+// Nothing this package encodes may be refused by that rule, which is the half of
+// it that a test of rejections alone would not catch. A varint is minimal when
+// its last byte is non-zero, and binary.AppendUvarint only writes a trailing
+// zero for the value zero itself, which is one byte long.
+func TestEveryValueThisPackageWritesIsMinimal(t *testing.T) {
+	values := []uint64{0, 1, 127, 128, 129, 255, 256, 16383, 16384, 1 << 20, MaxClock, 1<<64 - 1}
+	for _, want := range values {
+		buf := binary.AppendUvarint(nil, want)
+		got, used := uvarint(buf)
+		if used != len(buf) || got != want {
+			t.Errorf("uvarint(%x) = (%d, %d), want (%d, %d)", buf, got, used, want, len(buf))
+		}
+		// And the same value written one byte longer is refused.
+		long := append(buf[:len(buf):len(buf)], 0x00)
+		long[len(long)-2] |= 0x80
+		if _, used := uvarint(long); used != 0 {
+			t.Errorf("uvarint(%x) accepted an overlong encoding of %d", long, want)
+		}
 	}
-	if bytes.Equal(encoded, redundant) {
-		t.Fatal("the control failed: the two encodings are the same bytes")
+	// A truncated varint is still refused, which is the case that existed before.
+	if _, used := uvarint([]byte{0x80}); used != 0 {
+		t.Error("a truncated varint was accepted")
 	}
-	if want := []byte{0x00, 0x00}; !bytes.Equal(encoded, want) {
-		t.Fatalf("re-encoded to %x, want %x", encoded, want)
-	}
-	// And the normalised form is a fixed point, which is the property that holds.
-	var again CompositeVersion
-	if err := again.UnmarshalBinary(encoded); err != nil {
-		t.Fatal(err)
-	}
-	twice, err := again.MarshalBinary()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(twice, encoded) {
-		t.Fatal("re-encoding what MarshalBinary produced is not a fixed point")
+	if _, used := uvarint(nil); used != 0 {
+		t.Error("an empty buffer was accepted")
 	}
 }
 

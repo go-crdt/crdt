@@ -407,12 +407,38 @@ func (r *reader) bytes(n int) ([]byte, bool) {
 }
 
 func (r *reader) uvarint() (uint64, bool) {
-	v, used := binary.Uvarint(r.buf)
+	v, used := uvarint(r.buf)
 	if used <= 0 {
 		return 0, false
 	}
 	r.buf = r.buf[used:]
 	return v, true
+}
+
+// uvarint decodes an unsigned varint and refuses an encoding longer than the
+// value needs, which [binary.Uvarint] on its own accepts.
+//
+// Every encoding in this package is canonical: the same state is the same bytes.
+// That is what lets the test suite compare snapshots rather than values, which
+// is the stronger claim, and what lets a caller store or compare them. The claim
+// is only as good as the layer underneath it, and without this check it was not
+// true of anything arriving from outside — a peer could write 1 as {0x81, 0x00}
+// and hand over a snapshot that decodes to a document already held and yet does
+// not match its bytes.
+//
+// A varint's last byte carries the value's highest bits, so a zero there says
+// those bits are all zero and the encoding is longer than the value needs.
+// [binary.AppendUvarint] never emits that, except for zero itself, which is one
+// byte — so nothing this package writes can be refused here.
+func uvarint(buf []byte) (uint64, int) {
+	v, used := binary.Uvarint(buf)
+	if used <= 0 {
+		return 0, 0
+	}
+	if used > 1 && buf[used-1] == 0 {
+		return 0, 0
+	}
+	return v, used
 }
 
 func (r *reader) id() (ID, bool) {
