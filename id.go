@@ -66,15 +66,40 @@ func DeriveSiteID(b []byte) SiteID {
 	return SiteID(h)
 }
 
-// before reports whether an operation with Lamport timestamp aClock from site
-// aSite sorts before one with bClock/bSite in the RGA total order: ascending
-// Lamport timestamp, ties broken by ascending site.
+// before reports whether the operation identified by a, with Lamport timestamp
+// aClock, sorts before the one identified by b in the RGA total order:
+// ascending timestamp, then ascending site, then ascending sequence number.
 //
-// The order is total because a site never issues two operations with the same
-// timestamp, so a tie implies two distinct sites.
-func before(aClock uint64, aSite SiteID, bClock uint64, bSite SiteID) bool {
+// The last of those three looks redundant and is not. A site never issues two
+// operations with the same timestamp — its clock advances at least once per
+// operation — so for anything this package mints the sequence number is never
+// reached, and the order is exactly what it always was. But that is a claim
+// about a site's whole history, and an arriving operation is one operation: no
+// receiver can check it, because nothing in an operation carries the rest of
+// them. A peer could therefore hand over two operations from one site sharing a
+// timestamp, and (clock, site) then failed to be an order at all — two distinct
+// operations compared equal in both directions.
+//
+// What that cost was not a wrong ordering but an unreadable document. Both walks
+// that place a character use this comparison, and where it is ambiguous they
+// need not agree: integration put such a pair one way round, the scan [Load]
+// re-derives put it the other, and the snapshot was then refused as one no
+// replica could have produced. A server that accepted the batch, broadcast it
+// and persisted it could not afterwards open its own file — a peer's bytes
+// deciding whether a document survives a restart. [List] had it by the same
+// route. [Map] did not, and for a reason worth keeping in mind: a site's
+// operations are integrated in sequence order whatever order they arrive in, so
+// its ties always resolved the same way on every replica.
+//
+// The sequence number closes it because (site, seq) is unique by construction,
+// so the three together are a strict total order on operations, derived from
+// what every operation already carries.
+func before(aClock uint64, a ID, bClock uint64, b ID) bool {
 	if aClock != bClock {
 		return aClock < bClock
 	}
-	return aSite < bSite
+	if a.Site != b.Site {
+		return a.Site < b.Site
+	}
+	return a.Seq < b.Seq
 }

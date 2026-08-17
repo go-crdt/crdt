@@ -74,26 +74,71 @@ func TestDeriveSiteID(t *testing.T) {
 	}
 }
 
-func TestBeforeOrdersByClockThenSite(t *testing.T) {
+func TestBeforeIsAStrictTotalOrder(t *testing.T) {
 	tests := []struct {
 		name           string
 		aClock, bClock uint64
-		aSite, bSite   SiteID
+		a, b           ID
 		want           bool
 	}{
-		{"lower clock sorts first", 1, 2, 9, 1, true},
-		{"higher clock does not", 2, 1, 1, 9, false},
-		{"site breaks a tie", 5, 5, 1, 2, true},
-		{"site breaks a tie the other way", 5, 5, 2, 1, false},
-		{"identical is not before", 5, 5, 1, 1, false},
+		{"lower clock sorts first", 1, 2, ID{Site: 9, Seq: 1}, ID{Site: 1, Seq: 1}, true},
+		{"higher clock does not", 2, 1, ID{Site: 1, Seq: 1}, ID{Site: 9, Seq: 1}, false},
+		{"site breaks a tie", 5, 5, ID{Site: 1, Seq: 7}, ID{Site: 2, Seq: 1}, true},
+		{"site breaks a tie the other way", 5, 5, ID{Site: 2, Seq: 1}, ID{Site: 1, Seq: 7}, false},
+		{"identical is not before", 5, 5, ID{Site: 1, Seq: 1}, ID{Site: 1, Seq: 1}, false},
+		// Only a peer's bytes reach these two: a site's clock advances at least
+		// once per operation, so nothing this package mints ever ties here.
+		{"the sequence number breaks what site cannot", 5, 5, ID{Site: 1, Seq: 1}, ID{Site: 1, Seq: 2}, true},
+		{"and the other way", 5, 5, ID{Site: 1, Seq: 2}, ID{Site: 1, Seq: 1}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := before(tt.aClock, tt.aSite, tt.bClock, tt.bSite); got != tt.want {
-				t.Errorf("before(%d, %d, %d, %d) = %v, want %v",
-					tt.aClock, tt.aSite, tt.bClock, tt.bSite, got, tt.want)
+			if got := before(tt.aClock, tt.a, tt.bClock, tt.b); got != tt.want {
+				t.Errorf("before(%d, %v, %d, %v) = %v, want %v",
+					tt.aClock, tt.a, tt.bClock, tt.b, got, tt.want)
 			}
 		})
+	}
+}
+
+// The property the ordering has to have, rather than a handful of cases: over
+// every pair drawn from a set that includes the ties only a peer can produce,
+// exactly one of a<b, b<a and a==b holds, and the order is transitive. An
+// ordering that fails this is not merely wrong somewhere — it makes the two
+// walks that place a character free to disagree, and a document that cannot be
+// reloaded is what that looked like.
+func TestBeforeIsTrichotomousAndTransitive(t *testing.T) {
+	type stamp struct {
+		clock uint64
+		id    ID
+	}
+	var all []stamp
+	for _, clock := range []uint64{4, 5} {
+		for _, site := range []SiteID{1, 2} {
+			for _, seq := range []uint64{1, 2} {
+				all = append(all, stamp{clock, ID{Site: site, Seq: seq}})
+			}
+		}
+	}
+	same := func(x, y stamp) bool { return x.clock == y.clock && x.id == y.id }
+	for _, a := range all {
+		for _, b := range all {
+			ab := before(a.clock, a.id, b.clock, b.id)
+			ba := before(b.clock, b.id, a.clock, a.id)
+			switch {
+			case same(a, b):
+				if ab || ba {
+					t.Errorf("%v and %v are the same operation but compare ordered", a, b)
+				}
+			case ab == ba:
+				t.Errorf("%v and %v are distinct but neither sorts first (or both do)", a, b)
+			}
+			for _, c := range all {
+				if ab && before(b.clock, b.id, c.clock, c.id) && !before(a.clock, a.id, c.clock, c.id) {
+					t.Errorf("not transitive: %v < %v < %v but not %v < %v", a, b, c, a, c)
+				}
+			}
+		}
 	}
 }
 

@@ -72,6 +72,50 @@ Keeping `Seq` contiguous has a second effect worth naming: `Apply` will not
 integrate an operation until its predecessor from the same site has landed, so
 delivery is causally ordered per site whatever the transport does.
 
+### The ordering has three keys, and the third is not decoration
+
+Operations sort by ascending Lamport timestamp, then ascending site, then
+ascending sequence number. The first two are the RGA rule everyone writes down.
+The third was missing, and the justification for leaving it out was written in
+the code: *a site never issues two operations with the same timestamp, so a tie
+implies two distinct sites.*
+
+That is true of every operation this package mints — a site's clock advances at
+least once per operation. But it is a claim about a site's **whole history**, and
+an arriving operation is one operation: nothing in it carries the rest, so no
+receiver can check it, and nothing else can either. A peer could therefore hand
+over two operations from one site sharing a timestamp, and `(clock, site)` was
+then not an order at all — two distinct operations compared equal in both
+directions.
+
+What that cost was not a wrong ordering but **an unreadable document**. Both
+walks that place a character use this comparison, and where it is ambiguous they
+need not agree: integration put such a pair one way round, the scan `Load`
+re-derives put it the other, and the snapshot was refused as one no replica could
+have produced. Three operations were enough. A server that accepted the batch,
+broadcast it, and persisted it when the last participant left could not
+afterwards open its own file — a peer's bytes deciding whether a document
+survives a restart.
+
+The sequence number closes it because `(site, seq)` is unique by construction, so
+the three keys are a strict total order on operations, derived from what every
+operation already carries. `List` had the defect by the same route. `Map` did
+not, for a reason worth keeping in mind: a site's operations integrate in
+sequence order whatever order they arrive in, so its ties already resolved the
+same way everywhere. What changes there is only which one wins — the later
+sequence number now does, where an operation that tied simply lost.
+
+Nothing an honest replica produces reaches the third key, so no existing document
+changes its ordering: no format change and no migration.
+
+Adding a key did cost, and not where it looked like it would. The comparison
+itself is unchanged on the path that matters, since it takes a clock tie to reach
+the new part — but building the compared character's identity eagerly, in order
+to pass it in, cost **+17.9% on `InsertAtEnd`** and +3.0% on `ApplyRemote`
+(benchstat, p ≤ 0.03). The walk's innermost comparison now derives that sequence
+number only if it gets that far, which puts every benchmark back inside the
+noise.
+
 ### The clock has a ceiling
 
 A Lamport clock is raised past every clock a replica is told about, so the number
