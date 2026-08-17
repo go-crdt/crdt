@@ -342,7 +342,13 @@ func (l *List) integrate(op ListOp) {
 		at++
 	}
 
-	fresh := &element{id: op.ID, clock: op.Clock, origin: op.Origin, value: op.Value}
+	// The value is copied because the operation belongs to whoever handed it
+	// over: it may have been decoded into a buffer a transport reuses, or built
+	// and passed straight to Apply. An element aliasing it would change under
+	// the list without a single operation having been applied — and the list
+	// would then disagree with every replica that received the same operation.
+	// [Map] copies at the same point, for the same reason.
+	fresh := &element{id: op.ID, clock: op.Clock, origin: op.Origin, value: cloneBytes(op.Value)}
 	l.elements = append(l.elements, nil)
 	copy(l.elements[at+1:], l.elements[at:])
 	l.elements[at] = fresh
@@ -626,12 +632,14 @@ func (l *List) adopt(r *reader, ldg *ledger) error {
 		return ErrMalformed
 	}
 
+	// The value is a window on the caller's snapshot; integrate copies what it
+	// keeps, so there is nothing to copy here.
 	l.integrate(ListOp{
 		Kind:   OpInsert,
 		ID:     id,
 		Clock:  clock,
 		Origin: origin,
-		Value:  append([]byte(nil), value...),
+		Value:  value,
 	})
 	if l.byID[id] != len(l.elements)-1 {
 		return ErrMalformed

@@ -188,7 +188,7 @@ func decodeOp(data []byte) (Op, []byte, error) {
 	rest := data[1:]
 	var fields [5]uint64
 	for i := range fields {
-		v, used := binary.Uvarint(rest)
+		v, used := uvarint(rest)
 		if used <= 0 {
 			return Op{}, nil, ErrMalformed
 		}
@@ -199,7 +199,7 @@ func decodeOp(data []byte) (Op, []byte, error) {
 	op.Clock = fields[2]
 	if op.Kind == OpInsert {
 		op.Origin = ID{Site: SiteID(fields[3]), Seq: fields[4]}
-		v, used := binary.Uvarint(rest)
+		v, used := uvarint(rest)
 		if used <= 0 || v > utf8.MaxRune {
 			return Op{}, nil, ErrMalformed
 		}
@@ -232,7 +232,7 @@ func AppendOps(dst []byte, ops []Op) ([]byte, error) {
 
 // ParseOps decodes a batch written by AppendOps.
 func ParseOps(data []byte) ([]Op, error) {
-	count, used := binary.Uvarint(data)
+	count, used := uvarint(data)
 	if used <= 0 {
 		return nil, ErrMalformed
 	}

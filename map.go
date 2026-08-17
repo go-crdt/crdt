@@ -216,7 +216,7 @@ func AppendMapOps(dst []byte, ops []MapOp) ([]byte, error) {
 
 // ParseMapOps decodes a batch written by AppendMapOps.
 func ParseMapOps(data []byte) ([]MapOp, error) {
-	count, used := binary.Uvarint(data)
+	count, used := uvarint(data)
 	if used <= 0 {
 		return nil, ErrMalformed
 	}

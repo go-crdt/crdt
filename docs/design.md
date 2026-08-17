@@ -200,6 +200,38 @@ a real way to make a document unable to reproduce itself:
 - A site listed twice in the version vector, a concurrent deletion aimed at the
   root sentinel, and a concurrent deletion of a character still visible.
 
+### Canonical goes all the way down, or it is not canonical
+
+Every encoding here is canonical — the same state is the same bytes — and that
+is a claim about *arriving* bytes as much as about produced ones. It was not,
+until a fuzzer wrote a `1` as `{0x81, 0x00}`. `binary.Uvarint` accepts a varint
+longer than its value needs, so a peer could hand over a snapshot that decoded
+to a document already held and yet did not match its bytes: two encodings, one
+state, which is exactly what the promise says cannot happen.
+
+Every decoder in the package inherited that from one shared reader, so all four
+formats had it. A varint's last byte carries the value's highest bits, so a zero
+there says the encoding is longer than the value needs, and
+`binary.AppendUvarint` never writes one except for zero itself, which is a
+single byte. Refusing it therefore cannot reject anything this package writes —
+which is asserted over the boundary values rather than assumed, because a rule
+that only rejects is half tested.
+
+### What a replica keeps, it keeps a copy of
+
+An operation handed to `Apply` belongs to whoever handed it over: it may have
+been decoded into a buffer a transport reuses for the next message. An operation
+handed *back* by an edit belongs to the caller too, who broadcasts it and may
+hold it. And a snapshot passed to a loader is the caller's to reuse or
+overwrite the moment the call returns.
+
+So nothing a replica keeps may alias any of the three. `List` did, on two of
+them — `Apply` stored the caller's slice, and the operations `Insert` returned
+shared their bytes with the elements just inserted — and the consequence is not
+repairable by anything downstream: the value changes with no operation having
+been applied, so the replica silently disagrees with every peer that received
+the same operation, and no later operation says what it should have been.
+
 ## Counting in UTF-16
 
 The document counts characters. CodeMirror, the DOM, the Language Server
