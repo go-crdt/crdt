@@ -575,6 +575,166 @@ func (b PartOps) validate() error {
 	return nil
 }
 
+// appendTo encodes the batch onto dst: the part's kind, its length-prefixed
+// name, then a count and the operations of the one kind that part can hold.
+//
+// The operations are counted rather than wrapped in a byte length. Each one
+// delimits itself, so a length would be a second statement of where the batch
+// ends, and two statements of one fact are two things a decoder has to reconcile.
+//
+// Only the field matching the kind is written, and it is the kind that decides
+// which decoder reads them back, so this encoding cannot express the batch with
+// two populated slices that [PartOps.validate] refuses — there is nowhere to put
+// the second one. The kind came through validate, so there is no fourth case to
+// answer for.
+func (b PartOps) appendTo(dst []byte) []byte {
+	dst = append(dst, byte(b.Part.Kind))
+	dst = appendKey(dst, b.Part.Name)
+	switch b.Part.Kind {
+	case PartText:
+		dst = binary.AppendUvarint(dst, uint64(len(b.Text)))
+		for _, op := range b.Text {
+			dst = op.appendTo(dst)
+		}
+	case PartList:
+		dst = binary.AppendUvarint(dst, uint64(len(b.List)))
+		for _, op := range b.List {
+			dst = op.appendTo(dst)
+		}
+	default:
+		dst = binary.AppendUvarint(dst, uint64(len(b.Map)))
+		for _, op := range b.Map {
+			dst = op.appendTo(dst)
+		}
+	}
+	return dst
+}
+
+// AppendPartOps encodes batches of operations onto dst — the form a transport
+// sends, and what [Composite.OpsSince] returns handed over whole. The batches
+// are length-prefixed, and so are the operations inside each of them, so
+// ParsePartOps can reject a truncated message instead of silently returning the
+// batches that happened to survive.
+//
+// Every batch is validated before a byte is written, so what this produces is
+// what [Composite.Apply] accepts, and what it refuses it refuses with the error
+// Apply would have given: a batch that cannot be sent is a batch that could not
+// have been applied either.
+//
+// Unlike a snapshot, this is a message rather than a state, and the canonical
+// claim it makes is the one a message can make: re-encoding what was decoded
+// gives back the same bytes. It does not claim that one set of operations has
+// one encoding — batches may repeat a part or arrive in any order, because
+// [Composite.Apply] accepts them that way and applying an operation twice
+// changes nothing.
+func AppendPartOps(dst []byte, batches []PartOps) ([]byte, error) {
+	for _, b := range batches {
+		if err := b.validate(); err != nil {
+			return nil, err
+		}
+	}
+	dst = binary.AppendUvarint(dst, uint64(len(batches)))
+	for _, b := range batches {
+		dst = b.appendTo(dst)
+	}
+	return dst, nil
+}
+
+// ParsePartOps decodes batches written by AppendPartOps.
+//
+// There is deliberately no MarshalBinary on [PartOps] to go with the ones [Op],
+// [ListOp] and [MapOp] carry. Those three are operations: indivisible, the unit
+// a replica exchanges, and a caller may reasonably want one on its own in a
+// field. A PartOps is not an operation but the envelope addressing a batch of
+// them to a part, and the unit that crosses a wire is the whole set of them —
+// which is what [Composite.OpsSince] returns and what [Composite.Apply] takes.
+// Encoding one alone would advertise a message neither end of this package ever
+// produces or consumes, and it would be a fourth format to keep canonical,
+// fuzzed and held to its coverage for no caller. A caller that really has one
+// batch writes AppendPartOps(nil, batches[:1]).
+func ParsePartOps(data []byte) ([]PartOps, error) {
+	count, used := uvarint(data)
+	if used <= 0 {
+		return nil, ErrMalformed
+	}
+	rest := data[used:]
+	// A batch is at least four bytes — a kind, a name of at least one byte with
+	// its length, and a count — so a count larger than the remaining bytes allow
+	// is a corrupt header. Refuse it before allocating for it.
+	if count > uint64(len(rest)) {
+		return nil, ErrMalformed
+	}
+	batches := make([]PartOps, 0, count)
+	for range count {
+		b, tail, err := decodePartOps(rest)
+		if err != nil {
+			return nil, err
+		}
+		batches = append(batches, b)
+		rest = tail
+	}
+	if len(rest) != 0 {
+		return nil, ErrMalformed
+	}
+	return batches, nil
+}
+
+// decodePartOps reads one batch and returns the bytes after it.
+//
+// A part that could not name anything is refused as [PartOps.validate] refuses
+// it, rather than as malformed bytes: the bytes were read, and what they say is
+// a batch nothing could apply.
+func decodePartOps(data []byte) (PartOps, []byte, error) {
+	if len(data) == 0 {
+		return PartOps{}, nil, ErrMalformed
+	}
+	r := &reader{buf: data[1:]}
+	name, ok := r.sized()
+	if !ok {
+		return PartOps{}, nil, ErrMalformed
+	}
+	b := PartOps{Part: Part{Kind: PartKind(data[0]), Name: string(name)}}
+	if !b.Part.valid() {
+		return PartOps{}, nil, ErrInvalidPart
+	}
+	count, ok := r.uvarint()
+	// An operation is at least four bytes whichever kind it is.
+	if !ok || count > uint64(len(r.buf)) {
+		return PartOps{}, nil, ErrMalformed
+	}
+	var err error
+	switch b.Part.Kind {
+	case PartText:
+		b.Text, err = decodeBatch(r, count, decodeOp)
+	case PartList:
+		b.List, err = decodeBatch(r, count, decodeListOp)
+	default:
+		b.Map, err = decodeBatch(r, count, decodeMapOp)
+	}
+	if err != nil {
+		return PartOps{}, nil, err
+	}
+	return b, r.buf, nil
+}
+
+// decodeBatch reads count operations of one kind, advancing the reader past
+// them. The three kinds differ only in which decoder reads an operation, so
+// they share this rather than repeating it, and each decoder validates what it
+// returns — the clock ceiling included — so nothing a batch carries is weaker
+// than what the same operation would be held to arriving alone.
+func decodeBatch[T any](r *reader, count uint64, decode func([]byte) (T, []byte, error)) ([]T, error) {
+	ops := make([]T, 0, count)
+	for range count {
+		op, tail, err := decode(r.buf)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+		r.buf = tail
+	}
+	return ops, nil
+}
+
 // Apply integrates batches of operations from peers, creating any part they name
 // and do not find. Duplicates are ignored and an operation arriving before what
 // it depends on waits, exactly as it does in the part standing alone.

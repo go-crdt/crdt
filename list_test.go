@@ -180,7 +180,238 @@ func TestListRejectsMalformedOperations(t *testing.T) {
 			if l.Len() != 0 {
 				t.Fatal("a rejected operation changed the list")
 			}
+			// Nothing that cannot be applied may be written either: an encoder
+			// producing these would put bytes on the wire whose only possible fate
+			// is to be refused at the far end.
+			if _, err := tt.op.MarshalBinary(); !errors.Is(err, ErrInvalidOp) {
+				t.Errorf("MarshalBinary = %v, want ErrInvalidOp", err)
+			}
+			if _, err := AppendListOps(nil, []ListOp{tt.op}); !errors.Is(err, ErrInvalidOp) {
+				t.Errorf("AppendListOps = %v, want ErrInvalidOp", err)
+			}
 		})
+	}
+	// And a bad operation anywhere in a batch stops the whole batch, before a
+	// byte of the good ones is written.
+	ops := []ListOp{{Kind: OpInsert, ID: valid, Clock: 1, Value: []byte("x")}, {}}
+	if _, err := AppendListOps([]byte("prefix"), ops); !errors.Is(err, ErrInvalidOp) {
+		t.Fatalf("AppendListOps of a batch with one bad operation = %v, want ErrInvalidOp", err)
+	}
+}
+
+// The wire format. A list part's operations travel inside a [Composite] over
+// gRPC, so this encoding is a boundary in both directions: what it writes has to
+// be applicable at the far end, and what it reads comes from a peer.
+
+func validListInsert() ListOp {
+	return ListOp{
+		Kind: OpInsert, ID: ID{Site: 3, Seq: 2}, Clock: 9,
+		Origin: ID{Site: 1, Seq: 1}, Value: []byte("value"),
+	}
+}
+
+func validListDelete() ListOp {
+	return ListOp{Kind: OpDelete, ID: ID{Site: 2, Seq: 4}, Clock: 12, Target: ID{Site: 1, Seq: 1}}
+}
+
+func sameListOp(a, b ListOp) bool {
+	return a.Kind == b.Kind && a.ID == b.ID && a.Clock == b.Clock &&
+		a.Origin == b.Origin && a.Target == b.Target && bytes.Equal(a.Value, b.Value)
+}
+
+// listOpBytes assembles operation bytes field by field — a byte written raw, a
+// uint64 as a varint, a string as its bytes — so the malformed cases below are
+// built exactly rather than by corrupting good bytes and hoping.
+func listOpBytes(parts ...any) []byte {
+	var out []byte
+	for _, part := range parts {
+		switch v := part.(type) {
+		case byte:
+			out = append(out, v)
+		case uint64:
+			out = binary.AppendUvarint(out, v)
+		case string:
+			out = append(out, v...)
+		}
+	}
+	return out
+}
+
+func TestListOpRoundTrip(t *testing.T) {
+	ops := []ListOp{
+		validListInsert(),
+		validListDelete(),
+		// An insertion at the start, whose origin is the root.
+		{Kind: OpInsert, ID: ID{Site: 1, Seq: 1}, Clock: 1, Value: []byte("first")},
+		// A value that is not text: an element is opaque bytes, and unlike a map
+		// key nothing here reads it.
+		{Kind: OpInsert, ID: ID{Site: 1, Seq: 1}, Clock: 1, Value: []byte{0xff, 0x00, 0xfe}},
+		// The boundary values, which are what the hand-built rejections below need
+		// a control against: the largest site there is, and the clock at its
+		// ceiling.
+		{
+			Kind: OpInsert, ID: ID{Site: 1<<64 - 1, Seq: MaxClock}, Clock: MaxClock,
+			Value: []byte("v"),
+		},
+		{Kind: OpDelete, ID: ID{Site: 1, Seq: MaxClock}, Clock: MaxClock, Target: ID{Site: 1, Seq: 1}},
+	}
+	for _, op := range ops {
+		encoded, err := op.MarshalBinary()
+		if err != nil {
+			t.Fatalf("MarshalBinary(%+v): %v", op, err)
+		}
+		var got ListOp
+		if err := got.UnmarshalBinary(encoded); err != nil {
+			t.Fatalf("UnmarshalBinary(%+v): %v", op, err)
+		}
+		if !sameListOp(got, op) {
+			t.Fatalf("round trip gave %+v, want %+v", got, op)
+		}
+		if err := got.UnmarshalBinary(append(encoded, 0)); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("trailing bytes: %v, want ErrMalformed", err)
+		}
+	}
+
+	// A batch is written onto whatever is already there and read back from an
+	// offset, so neither end assumes it owns the buffer.
+	batch, err := AppendListOps([]byte("prefix"), ops)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(batch[:6]); got != "prefix" {
+		t.Fatalf("AppendListOps overwrote the destination: %q", got)
+	}
+	whole := batch[6:]
+	parsed, err := ParseListOps(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed) != len(ops) {
+		t.Fatalf("ParseListOps returned %d operations, want %d", len(parsed), len(ops))
+	}
+	for i := range parsed {
+		if !sameListOp(parsed[i], ops[i]) {
+			t.Fatalf("operation %d came back as %+v, want %+v", i, parsed[i], ops[i])
+		}
+	}
+	// The canonical property: encoding what was decoded gives back the same
+	// bytes. Anything else would let two byte-different messages say one thing.
+	again, err := AppendListOps(nil, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again, whole) {
+		t.Fatal("re-encoding a decoded batch did not reproduce it")
+	}
+	if _, err := ParseListOps(append(whole, 0)); !errors.Is(err, ErrMalformed) {
+		t.Fatal("trailing bytes after a batch were accepted")
+	}
+	// Truncation anywhere is refused rather than yielding the operations that
+	// happened to survive, which is what the count in front is for.
+	for n := range len(whole) {
+		if _, err := ParseListOps(whole[:n]); err == nil {
+			t.Fatalf("ParseListOps(%d of %d bytes) succeeded, want an error", n, len(whole))
+		}
+	}
+}
+
+// The control a rejection test does not give: the smallest batches that must be
+// accepted. Without it a decoder that refused everything would pass every test
+// above.
+func TestParseListOpsAcceptsTheSmallestBatches(t *testing.T) {
+	empty, err := AppendListOps(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(empty, []byte{0}) {
+		t.Fatalf("the empty batch encoded to %x, want a single zero", empty)
+	}
+	if parsed, err := ParseListOps(empty); err != nil || len(parsed) != 0 {
+		t.Fatalf("ParseListOps of an empty batch = %v, %v; want no operations", parsed, err)
+	}
+	// One insertion of one byte at the start of a list, by site 1's first
+	// operation: every field at the smallest value it may hold.
+	smallest := listOpBytes(
+		byte(1), byte(OpInsert), uint64(1), uint64(1), uint64(1), uint64(0), uint64(0), uint64(1), "v")
+	parsed, err := ParseListOps(smallest)
+	if err != nil {
+		t.Fatalf("ParseListOps(%x) = %v, want it accepted", smallest, err)
+	}
+	want := ListOp{Kind: OpInsert, ID: ID{Site: 1, Seq: 1}, Clock: 1, Value: []byte("v")}
+	if len(parsed) != 1 || !sameListOp(parsed[0], want) {
+		t.Fatalf("ParseListOps(%x) = %+v, want %+v", smallest, parsed, want)
+	}
+	// And the smallest removal, which is the shorter of the two shapes.
+	smallest = listOpBytes(
+		byte(1), byte(OpDelete), uint64(1), uint64(2), uint64(2), uint64(1), uint64(1))
+	parsed, err = ParseListOps(smallest)
+	if err != nil {
+		t.Fatalf("ParseListOps(%x) = %v, want it accepted", smallest, err)
+	}
+	want = ListOp{Kind: OpDelete, ID: ID{Site: 1, Seq: 2}, Clock: 2, Target: ID{Site: 1, Seq: 1}}
+	if len(parsed) != 1 || !sameListOp(parsed[0], want) {
+		t.Fatalf("ParseListOps(%x) = %+v, want %+v", smallest, parsed, want)
+	}
+}
+
+func TestListOpDecoderRejects(t *testing.T) {
+	insert := func(parts ...any) []byte {
+		return append([]byte{byte(OpInsert)}, listOpBytes(parts...)...)
+	}
+	for name, data := range map[string][]byte{
+		"empty":        {},
+		"unknown kind": {9, 1, 1, 1},
+		// The kind alone, then each field in turn cut off.
+		"truncated identity":        {byte(OpInsert)},
+		"truncated sequence number": insert(uint64(1)),
+		"truncated clock":           insert(uint64(1), uint64(1)),
+		"truncated origin":          insert(uint64(1), uint64(1), uint64(1)),
+		"truncated value length":    insert(uint64(1), uint64(1), uint64(1), uint64(0), uint64(0)),
+		"a value longer than the message": insert(
+			uint64(1), uint64(1), uint64(1), uint64(0), uint64(0), uint64(9), "v"),
+		"truncated target": {byte(OpDelete), 1, 1, 1},
+		// Read in full, and describing an operation no replica could have issued.
+		"a value of no bytes": insert(uint64(1), uint64(1), uint64(1), uint64(0), uint64(0), uint64(0)),
+		"the root identity": insert(
+			uint64(0), uint64(0), uint64(1), uint64(0), uint64(0), uint64(1), "v"),
+		"a clock below its own sequence number": insert(
+			uint64(1), uint64(5), uint64(4), uint64(0), uint64(0), uint64(1), "v"),
+		"a clock above the ceiling": insert(
+			uint64(1), uint64(1), uint64(MaxClock+1), uint64(0), uint64(0), uint64(1), "v"),
+		"a sequence number above the ceiling": insert(
+			uint64(1), uint64(MaxClock+1), uint64(MaxClock+1), uint64(0), uint64(0), uint64(1), "v"),
+		"a malformed origin": insert(
+			uint64(1), uint64(1), uint64(1), uint64(2), uint64(0), uint64(1), "v"),
+		"a removal of the root":             {byte(OpDelete), 1, 1, 1, 0, 0},
+		"a removal with a malformed target": {byte(OpDelete), 1, 1, 1, 2, 0},
+		// A varint longer than its value needs. Nothing here writes one, so a
+		// message carrying one is not a message this package produced.
+		"a padded site": {byte(OpInsert), 0x81, 0x00, 1, 1, 0, 0, 1, 'v'},
+	} {
+		var op ListOp
+		if err := op.UnmarshalBinary(data); err == nil {
+			t.Errorf("%s: decoded to %+v", name, op)
+		}
+		if _, err := ParseListOps(append([]byte{1}, data...)); err == nil {
+			t.Errorf("%s: ParseListOps accepted it", name)
+		}
+	}
+	// The control for the padded varint: the same value written minimally is
+	// accepted, so what was refused is the redundancy and not the value.
+	minimal := []byte{byte(OpInsert), 1, 1, 1, 0, 0, 1, 'v'}
+	var op ListOp
+	if err := op.UnmarshalBinary(minimal); err != nil {
+		t.Fatalf("UnmarshalBinary(%x) = %v, want it accepted", minimal, err)
+	}
+
+	for name, data := range map[string][]byte{
+		"no count":               {},
+		"count beyond the batch": {9},
+		"a padded count":         {0x80, 0x00},
+	} {
+		if _, err := ParseListOps(data); !errors.Is(err, ErrMalformed) {
+			t.Errorf("%s: %v, want ErrMalformed", name, err)
+		}
 	}
 }
 
