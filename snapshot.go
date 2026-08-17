@@ -9,10 +9,13 @@ import (
 // so a decoder rejects foreign or future bytes instead of misreading them.
 var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 
-// snapshotVersion 2 writes runs; version 1 wrote one record per character and is
+// snapshotVersion 3 writes a deletion's sequence number as a signed step from
+// the previous deletion by the same site; version 2 wrote it in full; version 1
+// wrote one record per character. All three are readable; version 1's note
 // still read, so a document stored by an older build still opens.
 const (
-	snapshotVersion   = 2
+	snapshotVersion   = 3
+	snapshotVersionV2 = 2
 	snapshotVersionV1 = 1
 )
 
@@ -49,6 +52,14 @@ func (d *Doc) Snapshot() []byte {
 
 	runs := d.runs()
 	out = binary.AppendUvarint(out, uint64(len(runs)))
+	// Deletion sequence numbers are written as a step from the last one this
+	// site deleted with. They were nearly a quarter of a real document — 148 KB
+	// of a 620 KB snapshot, at three bytes each because they are absolute — and
+	// a step is usually one byte, because a person deleting text works through
+	// it rather than jumping about. Per site, so several authors do not each
+	// pay a full-width jump when the writer changes. Measured: 148 385 bytes
+	// to 55 828 on the automerge-paper trace.
+	lastDelSeq := map[SiteID]uint64{}
 	for _, r := range runs {
 		out = binary.AppendUvarint(out, uint64(r.id.Site))
 		out = binary.AppendUvarint(out, r.id.Seq)
@@ -67,7 +78,8 @@ func (d *Doc) Snapshot() []byte {
 			out = binary.AppendUvarint(out, uint64(del.from-at))
 			out = binary.AppendUvarint(out, uint64(del.to-del.from))
 			out = binary.AppendUvarint(out, uint64(del.id.Site))
-			out = binary.AppendUvarint(out, del.id.Seq)
+			out = binary.AppendUvarint(out, zigzag(int64(del.id.Seq)-int64(lastDelSeq[del.id.Site])))
+			lastDelSeq[del.id.Site] = del.id.Seq
 			at = del.to
 		}
 	}
@@ -86,6 +98,20 @@ func (d *Doc) Snapshot() []byte {
 		out = binary.AppendUvarint(out, target.Seq)
 	}
 	return out
+}
+
+// zigzag maps a signed step onto an unsigned one so that a small step backwards
+// costs as little as a small step forwards. A deletion's sequence number is
+// written against the last one its site used, and a person deleting text moves
+// both ways through it.
+func zigzag(v int64) uint64 {
+	return uint64(v<<1) ^ uint64(v>>63)
+}
+
+// unzigzag is its inverse. A step is only ever read back, never trusted: what it
+// resolves to is checked against the version vector like any other identity.
+func unzigzag(v uint64) int64 {
+	return int64(v>>1) ^ -int64(v&1)
 }
 
 // A run is a stretch of characters one site typed consecutively, as the snapshot
@@ -143,7 +169,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV1) {
+	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
 		return nil, ErrMalformed
 	}
 	version := v[0]
@@ -180,12 +206,17 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	if !ok || count > uint64(len(r.buf)) {
 		return nil, ErrMalformed
 	}
+	// The step a version 3 deletion is written against: the last sequence number
+	// this site deleted with, carried across runs because the encoder carries it
+	// the same way. Per site, so that a document with several authors does not
+	// pay a full-width jump every time the writer changes.
+	lastDelSeq := map[SiteID]uint64{}
 	for range count {
 		var err error
 		if version == snapshotVersionV1 {
 			err = d.readCharacter(r, ledger)
 		} else {
-			err = d.readRun(r, ledger)
+			err = d.readRun(r, ledger, version, lastDelSeq)
 		}
 		if err != nil {
 			return nil, err
@@ -240,7 +271,7 @@ func (d *Doc) readCharacter(r *reader, l *ledger) error {
 // readRun decodes one version 2 entry and adopts its characters one by one, so
 // that a run gets exactly the checks a character-at-a-time snapshot got: the
 // shorter encoding buys space, not trust.
-func (d *Doc) readRun(r *reader, l *ledger) error {
+func (d *Doc) readRun(r *reader, l *ledger, version byte, lastDelSeq map[SiteID]uint64) error {
 	id, ok1 := r.id()
 	clock, ok2 := r.uvarint()
 	origin, ok3 := r.id()
@@ -275,7 +306,7 @@ func (d *Doc) readRun(r *reader, l *ledger) error {
 	for range nDels {
 		gap, ok1 := r.uvarint()
 		span, ok2 := r.uvarint()
-		delID, ok3 := r.id()
+		delID, ok3 := r.delID(version, lastDelSeq)
 		if !ok1 || !ok2 || !ok3 || span == 0 || gap > length ||
 			!delID.wellFormed() || delID.IsRoot() {
 			return ErrMalformed
@@ -439,6 +470,36 @@ func uvarint(buf []byte) (uint64, int) {
 		return 0, 0
 	}
 	return v, used
+}
+
+// delID reads a deletion's identity, which version 3 writes as a signed step
+// from the last sequence number that site deleted with.
+//
+// A step is signed, so it can land where no operation is: at zero, or below it,
+// or past the clock ceiling. Nothing extra is checked here for that, and the
+// reason is worth writing down because the opposite looks prudent. A landing of
+// zero is refused by the identity check the caller already makes; any other bad
+// landing produces an identity the version vector never promised, and a snapshot
+// that does not account for exactly the operations its version vector claims is
+// refused whole. Adding a range check here as well caught nothing the tests
+// could distinguish — removing it left every rejection still rejected — so it
+// would have been a line that looked like a safeguard and was not.
+//
+// The running value is left poisoned on a bad step, which costs nothing:
+// decoding stops at the first refusal.
+func (r *reader) delID(version byte, last map[SiteID]uint64) (ID, bool) {
+	if version < snapshotVersion {
+		return r.id()
+	}
+	site, ok1 := r.uvarint()
+	step, ok2 := r.uvarint()
+	if !ok1 || !ok2 {
+		return ID{}, false
+	}
+	at := SiteID(site)
+	seq := uint64(int64(last[at]) + unzigzag(step))
+	last[at] = seq
+	return ID{Site: at, Seq: seq}, true
 }
 
 func (r *reader) id() (ID, bool) {

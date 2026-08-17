@@ -79,17 +79,53 @@ Encoding the replayed document:
 | yjs 13.6.32 (V2 encoding) | 160 KB |
 | loro-crdt 1.14.1 | 251 KB |
 | yjs 13.6.32 (V1 encoding) | 311 KB |
-| **go-crdt/crdt 0.5.0** | **620 KB** |
+| **go-crdt/crdt 0.14.0** | **527 KB** |
+| *go-crdt/crdt 0.5.0* | *620 KB* |
 | *go-crdt/crdt 0.4.0, when this was measured* | *2 663 KB* |
 
 This is what the comparison was for. At 0.4.0 ours was between eight and
 twenty-four times larger than anyone else's, because `Snapshot` wrote one record
 per character while everyone else writes runs. Version 2 of the format writes
-runs too, which took it to 620 KB — but diamond-types still encodes the same
-document in 109 KB, so the gap is now a factor of six rather than twenty-four,
-and it is still a gap. What remains is that the others also compress the text
-itself; ours is 182 KB of characters written plainly, which already exceeds their
-whole document.
+runs too, which took it to 620 KB.
+
+### What the gap actually was
+
+This page used to say the rest was the text: "ours is 182 KB of characters
+written plainly, which already exceeds their whole document." That was true and
+it was not the answer. If the text is 182 KB of 620, something else is 438 KB,
+and 438 KB is four times diamond-types' entire document — so compressing the
+text would have left most of the gap standing.
+
+`TestSnapshotBudget` accounts for every byte `Snapshot` writes, by the field
+that wrote it. On the same document, under version 2:
+
+| Field | Bytes | Share |
+|---|---|---|
+| deletions | 299 244 | 48.3% |
+| the text | 182 315 | 29.4% |
+| run identities | 42 444 | 6.8% |
+| origins | 42 382 | 6.8% |
+| clocks | 31 620 | 5.1% |
+| run and field lengths | 21 857 | 3.5% |
+
+The deletions were the largest thing in the file, larger than the text, and on
+their own nearly three times diamond-types' whole document. Half of that — 148 KB
+— was one field: the sequence number of the operation that did the deleting,
+written in full at three bytes each, 50 276 times.
+
+Version 3 writes it as a signed step from the last sequence number that site
+deleted with. A person deleting text works through it rather than jumping about,
+so the step is usually one byte. Measured before it was built, on this trace:
+
+| That field, written as | Bytes |
+|---|---|
+| the number itself (version 2) | 148 385 |
+| **a step from the previous deletion (version 3)** | **55 828** |
+| a step from the run's own sequence | 117 771 |
+
+which is what took the document from 620 KB to 527 KB. The remaining gap is
+still real: the text is now 35% of the file and nobody here compresses it, and
+the identities, origins and clocks are another 116 KB between them.
 
 ### Memory
 
