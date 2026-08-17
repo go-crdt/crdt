@@ -282,6 +282,27 @@ type Doc struct {
 	pending map[ID][]Op
 	parked  int
 
+	// parkSlab is where a parked operation's one-element slice comes from.
+	//
+	// Filing an operation under what it waits for is an append to a nil slice,
+	// which allocates: on a real history delivered back to front — the shape
+	// that parks the most — that is 259 777 heap objects, two thirds of
+	// everything the benchmark allocates.
+	//
+	// Every one of those slices holds exactly one operation, and structurally
+	// most always will: an operation's first answer to "what am I waiting for"
+	// is its own predecessor from the same site, and only one operation in the
+	// world has a given predecessor. So they are cut from a chunk instead, with
+	// a capacity of one so that the rare second waiter copies itself out rather
+	// than trampling its neighbour.
+	//
+	// The chunk is what is allocated, once per parkChunk operations. Widening
+	// the map's own value to hold the first operation inline was tried first
+	// and measured 16.5% slower with 69% more bytes: it removed 81% of the
+	// allocations and made every map bucket four times larger, which the
+	// growth and rehashing paid for several times over.
+	parkSlab []Op
+
 	// dupDeletes records the losing operations when two replicas concurrently
 	// delete the same character. Only one of them can be the character's
 	// recorded deletion, and the other still has to be repeatable to peers that
@@ -666,13 +687,36 @@ func (d *Doc) admit(op Op) {
 	}
 }
 
+// parkChunk is how many parked operations one allocation serves.
+//
+// A chunk stays alive while any operation cut from it is still parked, so the
+// cost to bound is a straggler holding a whole chunk for itself: 512 operations
+// is 36 KiB. Smaller chunks bound it better and buy less — 64 and 128 both
+// measured -11.9% against the -17.7% this gets — and a parked operation is
+// transient by nature, waiting for something a peer is already sending. 512 is
+// where the curve flattens.
+const parkChunk = 512
+
 // park files an operation under the one it is waiting for.
 func (d *Doc) park(op Op) {
 	if d.pending == nil {
 		d.pending = map[ID][]Op{}
 	}
 	waitingFor := d.blockedOn(op)
-	d.pending[waitingFor] = append(d.pending[waitingFor], op)
+	if held := d.pending[waitingFor]; held != nil {
+		// A second waiter is rare, and appending to a slice whose capacity is
+		// one copies it out of the chunk, which is what keeps the chunk's other
+		// entries theirs.
+		d.pending[waitingFor] = append(held, op)
+		d.parked++
+		return
+	}
+	if len(d.parkSlab) == cap(d.parkSlab) {
+		d.parkSlab = make([]Op, 0, parkChunk)
+	}
+	n := len(d.parkSlab)
+	d.parkSlab = append(d.parkSlab, op)
+	d.pending[waitingFor] = d.parkSlab[n : n+1 : n+1]
 	d.parked++
 }
 
