@@ -199,7 +199,7 @@ are checked against node's, not against ours.
 
 ## Status
 
-Version 0.11: the text, list and map CRDTs, a composite document that holds them
+Version 0.13: the text, list and map CRDTs, a composite document that holds them
 as named parts, the wire and snapshot formats, awareness, and the surface an
 editor needs — reported changes, anchors, authorship, and UTF-16 addressing.
 Pure Go, CGO=0, **100% statement coverage** on both packages, race-clean, six-arch

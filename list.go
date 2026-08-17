@@ -369,15 +369,48 @@ func (l *List) Delete(pos, count int) ([]ListOp, error) {
 //
 // A malformed operation is rejected and nothing in the batch is applied.
 func (l *List) Apply(ops ...ListOp) error {
+	_, err := l.applyWith(false, ops)
+	return err
+}
+
+// ApplyChanges is [List.Apply], and also reports whether the list is not what it
+// was. An operation already applied, or one still waiting for the operation its
+// site issued before it, changes nothing and reports false; when a waiting one
+// lands, that call reports true.
+//
+// It reports that something changed rather than what, which is a deliberate
+// stop. Naming the positions would be a second protocol to keep correct, and the
+// consumers this was written for read the whole list back when they are told —
+// a list here holds tens or hundreds of values, not the hundreds of thousands a
+// document holds, which is the same reason a list is a slice and a document is
+// not. A caller that needs the positions can be given them without breaking
+// anyone; none has needed them yet.
+func (l *List) ApplyChanges(ops ...ListOp) (bool, error) {
+	return l.applyWith(true, ops)
+}
+
+func (l *List) applyWith(watching bool, ops []ListOp) (bool, error) {
 	for _, op := range ops {
 		if err := op.validate(); err != nil {
-			return err
+			return false, err
 		}
 	}
+	if !watching {
+		for _, op := range ops {
+			l.admit(op)
+		}
+		return false, nil
+	}
+	// An operation that integrated advanced its site's sequence number, and one
+	// that did not integrate did not — so the vector says what happened without
+	// the integration path having to carry a flag through it. The copy it needs
+	// is taken only when somebody is watching: Apply is the hot path and pays
+	// nothing for a comparison it will not make.
+	before := l.vv.Clone()
 	for _, op := range ops {
 		l.admit(op)
 	}
-	return nil
+	return !before.Equal(l.vv), nil
 }
 
 // admit integrates an operation, or files it under whatever it waits for, and
