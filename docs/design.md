@@ -308,6 +308,13 @@ and the discipline — convergence demonstrated against randomised delivery *and
 against every permutation of small histories, replicas compared on encoded state
 rather than on what they show, every decoder fuzzed.
 
+The wire format is shared in the same way. `ListOp` carries `MarshalBinary` and
+`UnmarshalBinary` as `Op` and `MapOp` do, and `AppendListOps`/`ParseListOps` are
+`AppendOps`/`ParseOps` with a length-prefixed value where the text writes a rune.
+What differs is the one thing the type differs by: a decoded value is copied,
+because a list element is bytes rather than a rune and the buffer it was decoded
+into belongs to a transport that reuses it.
+
 ## A replicated map
 
 Not everything beside a document is a sequence. A spreadsheet is a map of cells:
@@ -456,6 +463,46 @@ version with the identities repeated, a third less. What is left is mostly the
 names themselves, and interning those would mean a version could not be read
 without the snapshot that defines them, which is not a trade worth making for a
 message this size.
+
+### Operations on the wire
+
+A version says where a peer is; `AppendPartOps` and `ParsePartOps` carry what it
+is missing. They mirror `AppendOps` and `AppendMapOps` — validate everything
+before writing a byte, count the batches and count the operations in each, refuse
+trailing bytes and refuse a count larger than the remaining bytes could hold —
+and they are what a gRPC service puts in a field: `Composite.OpsSince` returns
+`[]PartOps`, this hands it over whole, and `Composite.Apply` takes it back.
+
+The kind byte in front of a batch is what makes the encoding unable to express
+the batch `PartOps.validate` refuses. Exactly one of `Text`, `List` and `Map` may
+be populated, and the kind decides which decoder reads the operations back, so
+there is nowhere to put a second slice rather than a rule saying there must not
+be one.
+
+Measured on the same document as the table above — same machine, `BenchmarkAppendPartOps`:
+
+| | batches | operations | bytes | per operation |
+|---|---|---|---|---|
+| text | 1 | 2 002 | 55 663 | 27.8 |
+| lists | 3 | 306 | 10 017 | 32.7 |
+| maps | 300 | 3 000 | 92 100 | 30.7 |
+| **whole history** | **304** | **5 308** | **157 782** | **29.7** |
+
+Encoding it costs 102 µs and decoding it 255 µs. A map batch is 307 bytes, of
+which 46 are the envelope — the kind, the 44-character part name and its length.
+That is the shape a consumer with one map part per comment pays, and the reason a
+batch names its part once rather than once per operation: written per operation
+instead, those 44 characters would be most of the message.
+
+What the table also says is where the bytes go, and it is not the content. An
+operation carries its site as a whole `SiteID`, and its origin or target carries
+another, so a text insertion spends about twenty of its twenty-eight bytes
+restating two identities `DeriveSiteID` hashed into the full uint64 range. The
+version encoding already solved this for itself with a site table, and the same
+table would take roughly a third off this message. It is not done here because
+these four functions mirror `AppendOps` and `AppendMapOps` deliberately — the same
+shape, the same guarantees, one thing to learn — and interning sites would apply
+to those two as well or to none. It is a format change, worth its own decision.
 
 ### Loading is a trust boundary, three times over
 

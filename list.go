@@ -68,6 +68,132 @@ func (o ListOp) validate() error {
 	return nil
 }
 
+// appendTo encodes the operation onto dst: a kind byte, then unsigned varints,
+// then the length-prefixed value an insertion carries. A deletion names its
+// target where an insertion names its origin, so the two are the same length up
+// to the value.
+func (o ListOp) appendTo(dst []byte) []byte {
+	dst = append(dst, byte(o.Kind))
+	dst = binary.AppendUvarint(dst, uint64(o.ID.Site))
+	dst = binary.AppendUvarint(dst, o.ID.Seq)
+	dst = binary.AppendUvarint(dst, o.Clock)
+	if o.Kind == OpInsert {
+		dst = binary.AppendUvarint(dst, uint64(o.Origin.Site))
+		dst = binary.AppendUvarint(dst, o.Origin.Seq)
+		return appendSized(dst, o.Value)
+	}
+	dst = binary.AppendUvarint(dst, uint64(o.Target.Site))
+	return binary.AppendUvarint(dst, o.Target.Seq)
+}
+
+// MarshalBinary encodes the operation. It reports ErrInvalidOp rather than
+// producing bytes that would be rejected on arrival.
+func (o ListOp) MarshalBinary() ([]byte, error) {
+	if err := o.validate(); err != nil {
+		return nil, err
+	}
+	return o.appendTo(nil), nil
+}
+
+// UnmarshalBinary decodes an operation written by MarshalBinary. Trailing bytes
+// are an error: an operation is decoded from exactly its own encoding.
+func (o *ListOp) UnmarshalBinary(data []byte) error {
+	op, rest, err := decodeListOp(data)
+	if err != nil {
+		return err
+	}
+	if len(rest) != 0 {
+		return ErrMalformed
+	}
+	*o = op
+	return nil
+}
+
+// decodeListOp reads one operation and returns the bytes after it.
+func decodeListOp(data []byte) (ListOp, []byte, error) {
+	if len(data) == 0 {
+		return ListOp{}, nil, ErrMalformed
+	}
+	op := ListOp{Kind: OpKind(data[0])}
+	if op.Kind != OpInsert && op.Kind != OpDelete {
+		return ListOp{}, nil, ErrInvalidOp
+	}
+	r := &reader{buf: data[1:]}
+	id, okID := r.id()
+	clock, okClock := r.uvarint()
+	if !okID || !okClock {
+		return ListOp{}, nil, ErrMalformed
+	}
+	op.ID, op.Clock = id, clock
+	if op.Kind == OpInsert {
+		origin, okOrigin := r.id()
+		value, okValue := r.sized()
+		if !okOrigin || !okValue {
+			return ListOp{}, nil, ErrMalformed
+		}
+		// The decoded value must not alias the buffer it came from: that buffer
+		// is the caller's, and a transport commonly reuses it for the next
+		// message. [Map] copies at the same point, for the same reason.
+		op.Origin, op.Value = origin, cloneBytes(value)
+	} else {
+		target, ok := r.id()
+		if !ok {
+			return ListOp{}, nil, ErrMalformed
+		}
+		op.Target = target
+	}
+	// Everything the encoding cannot rule out is ruled out here — the clock
+	// ceiling among it, through wellFormedStamp — so no decoded operation
+	// reaches a caller that [List.Apply] would refuse.
+	if err := op.validate(); err != nil {
+		return ListOp{}, nil, err
+	}
+	return op, r.buf, nil
+}
+
+// AppendListOps encodes a batch of operations onto dst — the form a transport
+// sends. The batch is length-prefixed, so ParseListOps can reject a truncated
+// message instead of silently returning the operations that happened to survive.
+func AppendListOps(dst []byte, ops []ListOp) ([]byte, error) {
+	for _, op := range ops {
+		if err := op.validate(); err != nil {
+			return nil, err
+		}
+	}
+	dst = binary.AppendUvarint(dst, uint64(len(ops)))
+	for _, op := range ops {
+		dst = op.appendTo(dst)
+	}
+	return dst, nil
+}
+
+// ParseListOps decodes a batch written by AppendListOps.
+func ParseListOps(data []byte) ([]ListOp, error) {
+	count, used := uvarint(data)
+	if used <= 0 {
+		return nil, ErrMalformed
+	}
+	rest := data[used:]
+	// An operation is at least six bytes, so a count larger than the remaining
+	// bytes allow is a corrupt header — refuse it before allocating for it.
+	if count > uint64(len(rest)) {
+		return nil, ErrMalformed
+	}
+	ops := make([]ListOp, 0, count)
+	for range count {
+		op, tail, err := decodeListOp(rest)
+		if err != nil {
+			return nil, err
+		}
+		ops = append(ops, op)
+		rest = tail
+	}
+	if len(rest) != 0 {
+		return nil, ErrMalformed
+	}
+	return ops, nil
+}
+
 // An element is one value of the sequence, present or removed. Elements are
 // never dropped: a concurrent insertion may still name a removed element as its
 // origin.

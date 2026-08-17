@@ -572,11 +572,11 @@ func TestCompositeVersionSkipsWhatPromisesNothing(t *testing.T) {
 	}
 }
 
-// encodeCompositeVersion assembles version bytes from parts: a uint64 is a
-// varint, a string is length-prefixed, a byte slice is raw. It builds the
-// malformed cases exactly rather than by corrupting a good encoding and hoping
-// the corruption lands where it is needed.
-func encodeCompositeVersion(parts ...any) []byte {
+// encodeFields assembles the bytes of a version or of a batch of operations,
+// field by field: a uint64 is a varint, a string is length-prefixed, a byte
+// slice is raw. It builds the malformed cases exactly rather than by corrupting
+// a good encoding and hoping the corruption lands where it is needed.
+func encodeFields(parts ...any) []byte {
 	var out []byte
 	for _, part := range parts {
 		switch v := part.(type) {
@@ -596,7 +596,7 @@ func encodeCompositeVersion(parts ...any) []byte {
 func TestCompositeVersionRejects(t *testing.T) {
 	// One site, then whatever the case supplies.
 	header := func(rest ...any) []byte {
-		return encodeCompositeVersion(append([]any{uint64(1), uint64(5)}, rest...)...)
+		return encodeFields(append([]any{uint64(1), uint64(5)}, rest...)...)
 	}
 	// One site, one map part called "a", then its entries.
 	part := func(rest ...any) []byte {
@@ -604,18 +604,18 @@ func TestCompositeVersionRejects(t *testing.T) {
 	}
 	for name, data := range map[string][]byte{
 		"empty":                    {},
-		"a site count and no site": encodeCompositeVersion(uint64(1)),
+		"a site count and no site": encodeFields(uint64(1)),
 		// A varint whose continuation bit promises a byte that is not there. The
 		// count of sites is within the bytes remaining, so only the varint itself
 		// can refuse this.
-		"a truncated site": append(encodeCompositeVersion(uint64(2), uint64(5)), 0x80),
+		"a truncated site": append(encodeFields(uint64(2), uint64(5)), 0x80),
 		// Two parts, and the first consumes every byte there was room for.
-		"a part count the parts do not fill": encodeCompositeVersion(uint64(1), uint64(5),
+		"a part count the parts do not fill": encodeFields(uint64(1), uint64(5),
 			uint64(2), []byte{byte(PartMap)}, "a", uint64(1), uint64(0), uint64(1)),
-		"more sites than bytes":     encodeCompositeVersion(uint64(9), uint64(1)),
-		"sites out of order":        encodeCompositeVersion(uint64(2), uint64(5), uint64(4), uint64(0)),
-		"the same site twice":       encodeCompositeVersion(uint64(2), uint64(5), uint64(5), uint64(0)),
-		"no part count":             encodeCompositeVersion(uint64(1), uint64(5)),
+		"more sites than bytes":     encodeFields(uint64(9), uint64(1)),
+		"sites out of order":        encodeFields(uint64(2), uint64(5), uint64(4), uint64(0)),
+		"the same site twice":       encodeFields(uint64(2), uint64(5), uint64(5), uint64(0)),
+		"no part count":             encodeFields(uint64(1), uint64(5)),
 		"more parts than bytes":     header(uint64(9)),
 		"a part with no kind":       header(uint64(1)),
 		"a part of no kind":         header(uint64(1), []byte{0}, "a", uint64(1), uint64(0), uint64(1)),
@@ -636,9 +636,9 @@ func TestCompositeVersionRejects(t *testing.T) {
 		"a site index past the table":    part(uint64(1), uint64(1), uint64(1)),
 		"a sequence number of zero":      part(uint64(1), uint64(0), uint64(0)),
 		"a sequence above the ceiling":   part(uint64(1), uint64(0), uint64(MaxClock+1)),
-		"a site named twice in one part": encodeCompositeVersion(uint64(2), uint64(5), uint64(6), uint64(1), []byte{byte(PartMap)}, "a", uint64(2), uint64(0), uint64(1), uint64(0), uint64(2)),
-		"entries out of order":           encodeCompositeVersion(uint64(2), uint64(5), uint64(6), uint64(1), []byte{byte(PartMap)}, "a", uint64(2), uint64(1), uint64(1), uint64(0), uint64(2)),
-		"a site no part names":           encodeCompositeVersion(uint64(2), uint64(5), uint64(6), uint64(1), []byte{byte(PartMap)}, "a", uint64(1), uint64(0), uint64(1)),
+		"a site named twice in one part": encodeFields(uint64(2), uint64(5), uint64(6), uint64(1), []byte{byte(PartMap)}, "a", uint64(2), uint64(0), uint64(1), uint64(0), uint64(2)),
+		"entries out of order":           encodeFields(uint64(2), uint64(5), uint64(6), uint64(1), []byte{byte(PartMap)}, "a", uint64(2), uint64(1), uint64(1), uint64(0), uint64(2)),
+		"a site no part names":           encodeFields(uint64(2), uint64(5), uint64(6), uint64(1), []byte{byte(PartMap)}, "a", uint64(1), uint64(0), uint64(1)),
 		"trailing bytes":                 append(part(uint64(1), uint64(0), uint64(1)), 0),
 	} {
 		var v CompositeVersion
@@ -659,7 +659,7 @@ func TestCompositeVersionRejects(t *testing.T) {
 	}
 	// And the version of a document with no parts at all, which is two zeroes.
 	var none CompositeVersion
-	if err := none.UnmarshalBinary(encodeCompositeVersion(uint64(0), uint64(0))); err != nil {
+	if err := none.UnmarshalBinary(encodeFields(uint64(0), uint64(0))); err != nil {
 		t.Fatalf("the empty version was refused: %v", err)
 	}
 	if !none.Equal(nil) {
@@ -769,6 +769,12 @@ func TestPartOpsRejectsFieldsThatDoNotBelong(t *testing.T) {
 		if err := NewComposite(1).Apply(b); !errors.Is(err, ErrInvalidOp) {
 			t.Fatalf("%s: Apply = %v, want ErrInvalidOp", name, err)
 		}
+		// The encoding has nowhere to put a slice that does not match the kind, so
+		// what it must not do is drop one silently: a batch built the wrong way
+		// round is refused rather than sent as an empty one.
+		if _, err := AppendPartOps(nil, []PartOps{b}); !errors.Is(err, ErrInvalidOp) {
+			t.Fatalf("%s: AppendPartOps = %v, want ErrInvalidOp", name, err)
+		}
 	}
 	// A malformed operation of the right kind is refused by the part's own
 	// validator, which is the one that has always decided this.
@@ -780,14 +786,267 @@ func TestPartOpsRejectsFieldsThatDoNotBelong(t *testing.T) {
 		if err := NewComposite(1).Apply(b); !errors.Is(err, ErrInvalidOp) {
 			t.Fatalf("a malformed %s operation: Apply = %v, want ErrInvalidOp", name, err)
 		}
+		if _, err := AppendPartOps(nil, []PartOps{b}); !errors.Is(err, ErrInvalidOp) {
+			t.Fatalf("a malformed %s operation: AppendPartOps = %v, want ErrInvalidOp", name, err)
+		}
 	}
 	// An empty batch is valid and does nothing; OpsSince never sends one, but a
 	// caller filtering its own may well.
 	c := NewComposite(1)
-	if err := c.Apply(PartOps{Part: Part{Kind: PartMap, Name: "x"}}); err != nil {
+	empty := PartOps{Part: Part{Kind: PartMap, Name: "x"}}
+	if err := c.Apply(empty); err != nil {
 		t.Fatalf("an empty batch: Apply = %v", err)
 	}
 	assertParts(t, c)
+	if _, err := AppendPartOps(nil, []PartOps{empty}); err != nil {
+		t.Fatalf("an empty batch: AppendPartOps = %v", err)
+	}
+}
+
+// The wire format for batches. This is what a gRPC service carries: what
+// [Composite.OpsSince] returns, handed over whole and applied at the far end.
+
+// samePartOps compares two batches the way the fuzzer and the round trips need
+// it, treating a nil slice and an empty one as the one thing they encode to.
+func samePartOps(a, b PartOps) bool {
+	if a.Part != b.Part || len(a.Text) != len(b.Text) ||
+		len(a.List) != len(b.List) || len(a.Map) != len(b.Map) {
+		return false
+	}
+	for i := range a.Text {
+		if a.Text[i] != b.Text[i] {
+			return false
+		}
+	}
+	for i := range a.List {
+		if !sameListOp(a.List[i], b.List[i]) {
+			return false
+		}
+	}
+	for i := range a.Map {
+		if !sameMapOp(a.Map[i], b.Map[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func TestPartOpsRoundTrip(t *testing.T) {
+	c := filledComposite(t, 1)
+	batches := c.OpsSince(nil)
+	if len(batches) != 4 {
+		t.Fatalf("OpsSince gave %d batches, want 4", len(batches))
+	}
+	// Plus an empty batch and a name that is neither ASCII nor short, since a
+	// name is arbitrary UTF-8 and is what most of a batch's bytes are.
+	batches = append(batches, PartOps{Part: Part{Kind: PartText, Name: "fichier:é日\U0001F600.tex"}})
+
+	encoded, err := AppendPartOps([]byte("prefix"), batches)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(encoded[:6]); got != "prefix" {
+		t.Fatalf("AppendPartOps overwrote the destination: %q", got)
+	}
+	whole := encoded[6:]
+	parsed, err := ParsePartOps(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(parsed) != len(batches) {
+		t.Fatalf("ParsePartOps returned %d batches, want %d", len(parsed), len(batches))
+	}
+	for i := range parsed {
+		if !samePartOps(parsed[i], batches[i]) {
+			t.Fatalf("batch %d came back as %+v, want %+v", i, parsed[i], batches[i])
+		}
+	}
+	// The canonical property: encoding what was decoded gives back the same
+	// bytes, so two byte-different messages cannot say one thing.
+	again, err := AppendPartOps(nil, parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again, whole) {
+		t.Fatal("re-encoding a decoded message did not reproduce it")
+	}
+	if _, err := ParsePartOps(append(whole, 0)); !errors.Is(err, ErrMalformed) {
+		t.Fatal("trailing bytes after a message were accepted")
+	}
+	// Truncation anywhere is refused rather than yielding the batches that
+	// happened to survive, which is what the counts in front are for.
+	for n := range len(whole) {
+		if _, err := ParsePartOps(whole[:n]); err == nil {
+			t.Fatalf("ParsePartOps(%d of %d bytes) succeeded, want an error", n, len(whole))
+		}
+	}
+}
+
+// The point of the whole thing: a composite's history crosses a wire and
+// rebuilds the document at the far end, byte for byte.
+func TestPartOpsCarryAWholeCompositeOverTheWire(t *testing.T) {
+	ada := filledComposite(t, 1)
+	message, err := AppendPartOps(nil, ada.OpsSince(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, err := ParsePartOps(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The transport reuses its buffer for the next message the moment this one
+	// is decoded, so what was decoded must not be a window on it.
+	for i := range message {
+		message[i] = 0xff
+	}
+	grace := NewComposite(2)
+	if err := grace.Apply(batches...); err != nil {
+		t.Fatal(err)
+	}
+	if grace.Pending() != 0 {
+		t.Fatalf("%d operations never became applicable", grace.Pending())
+	}
+	if !bytes.Equal(grace.Snapshot(), ada.Snapshot()) {
+		t.Fatal("a composite carried over the wire did not reproduce itself")
+	}
+	// And the peer now holds everything, so there is nothing left to send it.
+	if got := ada.OpsSince(grace.Version()); got != nil {
+		t.Fatalf("the peer is still missing %v", got)
+	}
+	// The other direction: a reply carrying one part's operations.
+	if _, err := mapPart(t, grace, "cells").Set("C1", []byte("c")); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := AppendPartOps(nil, grace.OpsSince(ada.Version()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, err = ParsePartOps(reply)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(batches) != 1 || batches[0].Part != (Part{Kind: PartMap, Name: "cells"}) {
+		t.Fatalf("the reply carried %v", batches)
+	}
+	if err := ada.Apply(batches...); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(ada.Snapshot(), grace.Snapshot()) {
+		t.Fatal("the reply did not converge the two replicas")
+	}
+}
+
+// The control a rejection test does not give: the smallest messages that must
+// be accepted. Without it a decoder that refused everything would pass every
+// rejection below.
+func TestParsePartOpsAcceptsTheSmallestMessages(t *testing.T) {
+	none, err := AppendPartOps(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(none, []byte{0}) {
+		t.Fatalf("a message of no batches encoded to %x, want a single zero", none)
+	}
+	if parsed, err := ParsePartOps(none); err != nil || len(parsed) != 0 {
+		t.Fatalf("ParsePartOps of an empty message = %v, %v; want no batches", parsed, err)
+	}
+	// One batch, of the shortest name there is, carrying nothing: four bytes,
+	// which is the bound the count in front is checked against.
+	for _, kind := range []PartKind{PartText, PartList, PartMap} {
+		smallest := encodeFields(uint64(1), []byte{byte(kind)}, "a", uint64(0))
+		if len(smallest) != 5 {
+			t.Fatalf("the smallest message is %d bytes, not 5: %x", len(smallest), smallest)
+		}
+		parsed, err := ParsePartOps(smallest)
+		if err != nil {
+			t.Fatalf("ParsePartOps(%x) = %v, want it accepted", smallest, err)
+		}
+		want := PartOps{Part: Part{Kind: kind, Name: "a"}}
+		if len(parsed) != 1 || !samePartOps(parsed[0], want) {
+			t.Fatalf("ParsePartOps(%x) = %+v, want %+v", smallest, parsed, want)
+		}
+	}
+	// And one batch of one operation of each kind, which is where the three
+	// nested decoders are reached at all.
+	for name, message := range map[string][]byte{
+		"text": encodeFields(uint64(1), []byte{byte(PartText)}, "a", uint64(1),
+			[]byte{byte(OpInsert)}, uint64(1), uint64(1), uint64(1), uint64(0), uint64(0), uint64('x')),
+		"list": encodeFields(uint64(1), []byte{byte(PartList)}, "a", uint64(1),
+			[]byte{byte(OpInsert)}, uint64(1), uint64(1), uint64(1), uint64(0), uint64(0), "v"),
+		"map": encodeFields(uint64(1), []byte{byte(PartMap)}, "a", uint64(1),
+			[]byte{byte(MapSet)}, uint64(1), uint64(1), uint64(1), "k", uint64(0)),
+	} {
+		parsed, err := ParsePartOps(message)
+		if err != nil {
+			t.Fatalf("%s: ParsePartOps(%x) = %v, want it accepted", name, message, err)
+		}
+		// It re-encodes to itself, and a fresh composite applies it.
+		again, err := AppendPartOps(nil, parsed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(again, message) {
+			t.Fatalf("%s: re-encoding gave %x, want %x", name, again, message)
+		}
+		c := NewComposite(9)
+		if err := c.Apply(parsed...); err != nil {
+			t.Fatalf("%s: Apply = %v", name, err)
+		}
+		assertParts(t, c, parsed[0].Part)
+	}
+}
+
+func TestParsePartOpsRejects(t *testing.T) {
+	// One batch, then whatever the case supplies.
+	one := func(rest ...any) []byte {
+		return encodeFields(append([]any{uint64(1)}, rest...)...)
+	}
+	kind := func(k PartKind) []byte { return []byte{byte(k)} }
+	for name, message := range map[string][]byte{
+		"empty":                   {},
+		"a count and no batch":    {1},
+		"more batches than bytes": {9, byte(PartMap), 1, 'a', 0},
+		"a padded count":          {0x80, 0x00},
+		"a truncated name":        one(kind(PartMap), uint64(3), []byte("a")),
+		"a name longer than what is left": one(kind(PartMap),
+			uint64(1<<20), []byte("a"), uint64(0)),
+		"a nameless part":            one(kind(PartMap), "", uint64(0)),
+		"a name that is not text":    one(kind(PartMap), "\xff", uint64(0)),
+		"a part of an unknown kind":  one(kind(9), "a", uint64(0)),
+		"no operation count":         one(kind(PartMap), "a"),
+		"more operations than bytes": one(kind(PartMap), "a", uint64(9), []byte{byte(MapSet)}),
+		"a padded operation count":   one(kind(PartMap), "a", []byte{0x80, 0x00}),
+		// One decoder per kind: a batch that promises an operation and then
+		// truncates it must be refused whichever kind it named.
+		"a truncated text operation": one(kind(PartText), "a", uint64(1), []byte{byte(OpInsert), 1}),
+		"a truncated list operation": one(kind(PartList), "a", uint64(1), []byte{byte(OpInsert), 1}),
+		"a truncated map operation":  one(kind(PartMap), "a", uint64(1), []byte{byte(MapSet), 1}),
+		// And an operation read in full that no replica could have issued.
+		"a text operation above the clock ceiling": one(kind(PartText), "a", uint64(1),
+			[]byte{byte(OpInsert)}, uint64(1), uint64(1), uint64(MaxClock+1), uint64(0), uint64(0), uint64('x')),
+		"a list operation above the clock ceiling": one(kind(PartList), "a", uint64(1),
+			[]byte{byte(OpInsert)}, uint64(1), uint64(1), uint64(MaxClock+1), uint64(0), uint64(0), "v"),
+		"a map operation above the clock ceiling": one(kind(PartMap), "a", uint64(1),
+			[]byte{byte(MapSet)}, uint64(1), uint64(1), uint64(MaxClock+1), "k", uint64(0)),
+		// Trailing bytes, and a second batch the message does not hold: a count
+		// larger than the batches present is refused rather than yielding those
+		// that survived.
+		"trailing bytes":            encodeFields(uint64(1), kind(PartMap), "a", uint64(0), []byte{0}),
+		"a batch that is not there": encodeFields(uint64(2), kind(PartMap), "a", uint64(0)),
+	} {
+		if got, err := ParsePartOps(message); err == nil {
+			t.Errorf("%s: decoded to %+v", name, got)
+		}
+	}
+	// A part nothing could name is refused as PartOps.validate refuses it, and
+	// truncated bytes as malformed, so a caller can tell a corrupt message from
+	// one that arrived intact and says something impossible.
+	if _, err := ParsePartOps(one(kind(9), "a", uint64(0))); !errors.Is(err, ErrInvalidPart) {
+		t.Errorf("a part of an unknown kind = %v, want ErrInvalidPart", err)
+	}
+	if _, err := ParsePartOps(one(kind(PartMap), "a")); !errors.Is(err, ErrMalformed) {
+		t.Errorf("a batch with no operation count = %v, want ErrMalformed", err)
+	}
 }
 
 func TestCompositeOpsSinceSkipsWhatThePeerHolds(t *testing.T) {
@@ -1414,6 +1673,73 @@ func compositeCorpus(t *testing.T) (snapshot, version []byte) {
 		t.Fatal(err)
 	}
 	return c.Snapshot(), encoded
+}
+
+// A message of batches is what a peer sends after a join, so its decoder reads
+// bytes nobody here wrote — and it is the one decoder that reaches all three of
+// the operation decoders, by a path the others do not take.
+func FuzzParsePartOps(f *testing.F) {
+	c := filledComposite(&testing.T{}, 1)
+	message, err := AppendPartOps(nil, c.OpsSince(nil))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(message)
+	f.Add([]byte{0})
+	f.Add([]byte{1, byte(PartMap), 1, 'a', 0})
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		batches, err := ParsePartOps(data)
+		if err != nil {
+			return
+		}
+		// Every freedom the format has is spent: the varints are minimal, the
+		// counts are exact and trailing bytes are refused, so an accepted message
+		// is the only encoding of what it says, and re-encoding must give back the
+		// bytes themselves rather than merely something that decodes the same way.
+		encoded, err := AppendPartOps(nil, batches)
+		if err != nil {
+			t.Fatalf("re-encoding accepted batches failed: %v", err)
+		}
+		if !bytes.Equal(encoded, data) {
+			t.Fatalf("re-encoding gave %x, want the accepted bytes %x", encoded, data)
+		}
+		for _, b := range batches {
+			// A batch carries the one kind its part can hold. The kind byte decides
+			// which decoder reads the operations, so this cannot be violated by
+			// construction — which is a claim worth asserting rather than trusting.
+			counts := map[PartKind]int{PartText: len(b.Text), PartList: len(b.List), PartMap: len(b.Map)}
+			for kind, n := range counts {
+				if kind != b.Part.Kind && n != 0 {
+					t.Fatalf("a %v batch carries %d %v operations", b.Part.Kind, n, kind)
+				}
+			}
+		}
+		// Whatever it accepts, a composite must apply, and replaying it must
+		// change nothing.
+		into := NewComposite(99)
+		if err := into.Apply(batches...); err != nil {
+			t.Fatalf("applying accepted batches was rejected: %v", err)
+		}
+		before := into.Snapshot()
+		if err := into.Apply(batches...); err != nil {
+			t.Fatalf("replaying accepted batches was rejected: %v", err)
+		}
+		if !bytes.Equal(into.Snapshot(), before) {
+			t.Fatal("replaying an accepted message changed the document")
+		}
+		// What is deliberately not asserted here is that the snapshot the applied
+		// batches produce reloads — a server persisting what it was sent needs
+		// that, and it does not hold today. Two operations from one site carrying
+		// the same Lamport clock leave `before` with nothing to order them by, so
+		// Doc and List integrate them in arrival order and Load re-derives a
+		// different one; three hand-built operations reproduce it with no encoding
+		// involved. No replica issues that pair — a site's clock rises once per
+		// operation — but nothing on arrival refuses it, and it is a property of
+		// the merge order rather than of this format. Asserting it here would fail
+		// on something this decoder did not cause and cannot fix.
+	})
 }
 
 // A composite snapshot is what a server sends a joining client and what it

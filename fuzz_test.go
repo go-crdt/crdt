@@ -232,17 +232,72 @@ func FuzzUTF16Offsets(f *testing.F) {
 	})
 }
 
+// listCorpus returns a small real session's operations and its snapshot, to seed
+// the list fuzzers with input shaped like the real thing.
+func listCorpus(t *testing.T) (ops []byte, snapshot []byte) {
+	t.Helper()
+	a, b := NewList(1), NewList(2)
+	edits := put(t, a, 0, "one", "two", "three")
+	send(t, b, edits)
+	edits = append(edits, drop(t, a, 1, 1)...)
+	edits = append(edits, put(t, b, 0, "zero")...)
+	send(t, a, edits[len(edits)-1:])
+	encoded, err := AppendListOps(nil, a.OpsSince(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded, a.Snapshot()
+}
+
+// A batch of list operations arrives from a peer, so its decoder is a trust
+// boundary like every other in this package.
+func FuzzParseListOps(f *testing.F) {
+	ops, _ := listCorpus(&testing.T{})
+	f.Add(ops)
+	f.Add([]byte{})
+	f.Add([]byte{1})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		parsed, err := ParseListOps(data)
+		if err != nil {
+			return
+		}
+		// Every freedom the format has is spent: the varints are minimal, the
+		// count is exact and trailing bytes are refused, so an accepted message is
+		// the only encoding of what it says. Re-encoding must therefore give back
+		// the bytes themselves, not merely something that decodes the same way —
+		// which is the property a caller comparing two peers by their bytes needs.
+		encoded, err := AppendListOps(nil, parsed)
+		if err != nil {
+			t.Fatalf("re-encoding accepted operations failed: %v", err)
+		}
+		if !bytes.Equal(encoded, data) {
+			t.Fatalf("re-encoding gave %x, want the accepted bytes %x", encoded, data)
+		}
+		// Whatever it accepts, the list must stay coherent, and replaying an
+		// accepted batch must change nothing.
+		l := NewList(99)
+		if err := l.Apply(parsed...); err != nil {
+			t.Fatalf("applying accepted operations was rejected: %v", err)
+		}
+		if got, want := l.Len()+l.Tombstones(), len(l.elements); got != want {
+			t.Fatalf("Len()+Tombstones() = %d, but the list holds %d elements", got, want)
+		}
+		before := l.Snapshot()
+		if err := l.Apply(parsed...); err != nil {
+			t.Fatalf("replaying an accepted batch was rejected: %v", err)
+		}
+		if !bytes.Equal(l.Snapshot(), before) {
+			t.Fatal("replaying an accepted batch changed the list")
+		}
+	})
+}
+
 // A list snapshot arrives from a server, so its decoder is a trust boundary like
 // every other in this package.
 func FuzzLoadList(f *testing.F) {
-	l := NewList(1)
-	if _, err := l.Insert(0, []byte("one"), []byte("two"), []byte("three")); err != nil {
-		f.Fatal(err)
-	}
-	if _, err := l.Delete(1, 1); err != nil {
-		f.Fatal(err)
-	}
-	f.Add(l.Snapshot())
+	_, snapshot := listCorpus(&testing.T{})
+	f.Add(snapshot)
 	f.Add([]byte("crdl\x01"))
 	f.Add([]byte{})
 

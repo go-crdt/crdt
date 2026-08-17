@@ -89,6 +89,76 @@ func TestAnIssuedOperationDoesNotAliasWhatTheReplicaKeeps(t *testing.T) {
 	}
 }
 
+// A decoder is the far side of the same rule, and the place the aliasing would
+// come from: what it returns is handed straight to Apply, so if it is a window
+// on the message it read, the buffer a transport reuses for the next message is
+// what the replica is holding. Every batch decoder in the package is asserted
+// here together, the map's included as the control — it has copied since it was
+// written, so a failure in the two new ones cannot be blamed on the harness.
+func TestDecodingDoesNotAliasTheMessage(t *testing.T) {
+	mapOps := []MapOp{{Kind: MapSet, ID: ID{Site: 1, Seq: 1}, Clock: 1, Key: "k", Value: []byte("hello")}}
+	listOps := []ListOp{{Kind: OpInsert, ID: ID{Site: 1, Seq: 1}, Clock: 1, Value: []byte("hello")}}
+
+	message, err := AppendMapOps(nil, mapOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedMap, err := ParseMapOps(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scribble(message)
+	if got := parsedMap[0].Value; !bytes.Equal(got, []byte("hello")) {
+		t.Errorf("ParseMapOps returned a window on its input: %q", got)
+	}
+
+	message, err = AppendListOps(nil, listOps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsedList, err := ParseListOps(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scribble(message)
+	if got := parsedList[0].Value; !bytes.Equal(got, []byte("hello")) {
+		t.Errorf("ParseListOps returned a window on its input: %q", got)
+	}
+
+	// And the same again through the envelope, which is three decoders reached
+	// by one call and so three chances to get it wrong.
+	message, err = AppendPartOps(nil, []PartOps{
+		{Part: Part{Kind: PartList, Name: "chat"}, List: listOps},
+		{Part: Part{Kind: PartMap, Name: "cells"}, Map: mapOps},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batches, err := ParsePartOps(message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scribble(message)
+	if got := batches[0].List[0].Value; !bytes.Equal(got, []byte("hello")) {
+		t.Errorf("ParsePartOps returned a window on its input: %q", got)
+	}
+	if got := batches[1].Map[0].Value; !bytes.Equal(got, []byte("hello")) {
+		t.Errorf("ParsePartOps returned a window on its input: %q", got)
+	}
+	// The name is a string, so it was copied by conversion — asserted rather
+	// than assumed, since a decoder that kept it as bytes would not be.
+	if got := batches[0].Part.Name; got != "chat" {
+		t.Errorf("the part name changed with the message: %q", got)
+	}
+}
+
+// scribble stands in for a transport reusing its buffer for the next message.
+func scribble(buf []byte) {
+	for i := range buf {
+		buf[i] = 0xff
+	}
+}
+
 // And what a loader keeps must not be a window on the snapshot it was given,
 // which the caller may reuse or write to the moment the call returns.
 func TestLoadingDoesNotAliasTheSnapshot(t *testing.T) {

@@ -40,6 +40,14 @@ func applyMap(t *testing.T, m *Map, ops ...MapOp) {
 	}
 }
 
+// sameMapOp compares two operations. A MapOp is not comparable — it carries a
+// value — so the round trips and the fuzzers ask here rather than each spelling
+// the six fields out.
+func sameMapOp(a, b MapOp) bool {
+	return a.Kind == b.Kind && a.ID == b.ID && a.Clock == b.Clock &&
+		a.Key == b.Key && a.Span == b.Span && bytes.Equal(a.Value, b.Value)
+}
+
 // value reports what Get returns, as a string, and fails if the key is absent.
 func value(t *testing.T, m *Map, key string) string {
 	t.Helper()
@@ -1252,9 +1260,7 @@ func FuzzParseMapOps(f *testing.F) {
 			t.Fatalf("round trip changed the batch size: %d, want %d", len(again), len(parsed))
 		}
 		for i := range again {
-			if again[i].Kind != parsed[i].Kind || again[i].ID != parsed[i].ID ||
-				again[i].Clock != parsed[i].Clock || again[i].Key != parsed[i].Key ||
-				!bytes.Equal(again[i].Value, parsed[i].Value) || again[i].Span != parsed[i].Span {
+			if !sameMapOp(again[i], parsed[i]) {
 				t.Fatalf("round trip changed operation %d: %+v, want %+v", i, again[i], parsed[i])
 			}
 		}

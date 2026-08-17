@@ -381,3 +381,49 @@ func BenchmarkCompositeVersionMarshal(b *testing.B) {
 	b.StopTimer()
 	b.ReportMetric(float64(len(encoded)), "version-bytes")
 }
+
+// The whole history on the wire: what a joining client is sent, and the shape
+// the gRPC service carries. The reported bytes are the message, so that what a
+// join costs is a measurement rather than an estimate — and they are reported
+// per part kind as well, because the text part and the three hundred map parts
+// pay for entirely different things.
+func BenchmarkAppendPartOps(b *testing.B) {
+	c := loomShaped(b)
+	batches := c.OpsSince(nil)
+	message, err := AppendPartOps(nil, batches)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		if _, err := AppendPartOps(message[:0], batches); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+	b.ReportMetric(float64(len(message)), "message-bytes")
+	byKind := map[PartKind]int{}
+	for _, batch := range batches {
+		one, err := AppendPartOps(nil, []PartOps{batch})
+		if err != nil {
+			b.Fatal(err)
+		}
+		byKind[batch.Part.Kind] += len(one) - 1 // less the count in front
+	}
+	b.ReportMetric(float64(byKind[PartText]), "text-bytes")
+	b.ReportMetric(float64(byKind[PartList]), "list-bytes")
+	b.ReportMetric(float64(byKind[PartMap]), "map-bytes")
+}
+
+func BenchmarkParsePartOps(b *testing.B) {
+	message, err := AppendPartOps(nil, loomShaped(b).OpsSince(nil))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ResetTimer()
+	for range b.N {
+		if _, err := ParsePartOps(message); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
