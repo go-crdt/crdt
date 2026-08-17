@@ -462,7 +462,7 @@ func (l *List) integrate(op ListOp) {
 	}
 	for at < len(l.elements) {
 		e := l.elements[at]
-		if !before(op.Clock, op.ID.Site, e.clock, e.id.Site) {
+		if !before(op.Clock, op.ID, e.clock, e.id) {
 			break
 		}
 		at++

@@ -58,13 +58,13 @@ func heightOf(b *block) uint8 {
 }
 
 // sortsLower orders two blocks by their first characters.
-func sortsLower(a, b *block) bool { return before(a.clock, a.id.Site, b.clock, b.id.Site) }
+func sortsLower(a, b *block) bool { return before(a.clock, a.id, b.clock, b.id) }
 
 // sortsAfter reports whether b's first character sorts after a character with
 // this clock and site — the test the integration walk steps over runs by. Within
 // a run the clocks ascend, so the first character decides for the whole of it.
-func sortsAfter(b *block, clock uint64, site SiteID) bool {
-	return before(clock, site, b.clock, b.id.Site)
+func sortsAfter(b *block, clock uint64, id ID) bool {
+	return before(clock, id, b.clock, b.id)
 }
 
 // pullMin recomputes which block of b's subtree sorts lowest. A block's own key
@@ -277,10 +277,10 @@ func (d *Doc) seek(pos int) (*block, int) {
 }
 
 // lastOver returns the block the integration walk from at ends on: the last one
-// whose characters all sort after a character with this clock and site. The new
+// whose characters all sort after a character with this clock and identity. The new
 // character goes after it.
-func (d *Doc) lastOver(at *block, clock uint64, site SiteID) *block {
-	stop := d.stopBlock(at, clock, site)
+func (d *Doc) lastOver(at *block, clock uint64, id ID) *block {
+	stop := d.stopBlock(at, clock, id)
 	if stop == nil {
 		return d.lastBlock()
 	}
@@ -296,34 +296,34 @@ func (d *Doc) lastOver(at *block, clock uint64, site SiteID) *block {
 // block still sorts after the character holds nothing to stop on and is stepped
 // over whole, which is what makes this the height of the tree rather than the
 // length of the document.
-func (d *Doc) stopBlock(at *block, clock uint64, site SiteID) *block {
-	if r := at.right; r != nil && !sortsAfter(r.subMin, clock, site) {
-		return descendStop(r, clock, site)
+func (d *Doc) stopBlock(at *block, clock uint64, id ID) *block {
+	if r := at.right; r != nil && !sortsAfter(r.subMin, clock, id) {
+		return descendStop(r, clock, id)
 	}
 	for n := at; n.up != nil; n = n.up {
 		p := n.up
 		if p.right == n {
 			continue // n is after p; p is behind the walk
 		}
-		if !sortsAfter(p, clock, site) {
+		if !sortsAfter(p, clock, id) {
 			return p
 		}
-		if r := p.right; r != nil && !sortsAfter(r.subMin, clock, site) {
-			return descendStop(r, clock, site)
+		if r := p.right; r != nil && !sortsAfter(r.subMin, clock, id) {
+			return descendStop(r, clock, id)
 		}
 	}
 	return nil
 }
 
 // descendStop returns the first block of t in document order that does not sort
-// after a character with this clock and site. The subtree is known to hold one.
-func descendStop(t *block, clock uint64, site SiteID) *block {
+// after a character with this clock and identity. The subtree is known to hold one.
+func descendStop(t *block, clock uint64, id ID) *block {
 	for {
-		if l := t.left; l != nil && !sortsAfter(l.subMin, clock, site) {
+		if l := t.left; l != nil && !sortsAfter(l.subMin, clock, id) {
 			t = l
 			continue
 		}
-		if !sortsAfter(t, clock, site) {
+		if !sortsAfter(t, clock, id) {
 			return t
 		}
 		t = t.right

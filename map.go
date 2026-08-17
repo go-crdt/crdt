@@ -509,7 +509,7 @@ func (m *Map) integrate(op MapOp) {
 		return
 	}
 	old, held := m.records[op.Key]
-	if held && !before(old.clock, old.id.Site, op.Clock, op.ID.Site) {
+	if held && !before(old.clock, old.id, op.Clock, op.ID) {
 		// The operation lost. Its value is dropped and the key keeps the write
 		// that beat it — which is what stops an older set resurrecting a key
 		// somebody has since deleted.

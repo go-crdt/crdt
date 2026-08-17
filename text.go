@@ -725,6 +725,24 @@ func (d *Doc) integrate(op Op) (*block, int) {
 	return b, i
 }
 
+// beforeChar is [before] against character i of at, which is the comparison the
+// integration walk makes most.
+//
+// It exists so that the character's identity is not built unless the comparison
+// reaches it. Only a tie on both clock and site does, and nothing an honest
+// replica produces ties on the clock at all — so on the path a person typing
+// takes, this is the two comparisons it always was.
+func beforeChar(clock uint64, id ID, at *block, i int) bool {
+	c := at.clockAt(i)
+	if clock != c {
+		return clock < c
+	}
+	if id.Site != at.id.Site {
+		return id.Site < at.id.Site
+	}
+	return id.Seq < at.id.Seq+uint64(i)
+}
+
 // place puts one character into the sequence and returns where it landed.
 //
 // Integration walks forward from the origin past everything that sorts after the
@@ -737,21 +755,21 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	i++
 	for budget := scanBudget; ; {
 		if i < len(at.text) {
-			if !before(clock, id.Site, at.clockAt(i), at.id.Site) {
+			if !beforeChar(clock, id, at, i) {
 				break // the character here sorts first; the new one goes before it
 			}
 			i = len(at.text) // the rest of this run sorts after; step over it
 			continue
 		}
 		next := at.next
-		if next == nil || !before(clock, id.Site, next.clock, next.id.Site) {
+		if next == nil || !before(clock, id, next.clock, next.id) {
 			break
 		}
 		if budget == 0 {
 			// The run of characters sorting after this one is longer than a
 			// descent, and a peer sending operations that all name one origin
 			// makes it as long as the document. The index finds its end.
-			at = d.lastOver(at, clock, id.Site)
+			at = d.lastOver(at, clock, id)
 			i = len(at.text)
 			break
 		}
