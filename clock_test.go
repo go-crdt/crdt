@@ -198,10 +198,15 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 		s = uv(s, vvSeq) // at this sequence number
 		s = uv(s, 1)     // one run
 		s = uv(s, 1)     // its site
-		s = uv(s, vvSeq) // its sequence number
-		s = uv(s, clock) // its clock
+		// Version 4 writes the sequence number as a step from the last one this
+		// site used — nothing yet, so from zero — and the clock as the distance
+		// above that sequence number. A clock below its sequence is not
+		// expressible, which is the point of writing it this way; the case that
+		// used to say so is a wrapped distance now, refused against the ceiling.
+		s = uv(s, zigzag(int64(vvSeq)))
+		s = uv(s, clock-vvSeq)
 		s = uv(s, 0)
-		s = uv(s, 0) // origin = root
+		s = uv(s, 0) // origin = root, a step of zero from zero
 		s = uv(s, 1) // one character
 		s = uv(s, 'a')
 		s = uv(s, 0) // no deletions

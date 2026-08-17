@@ -46,6 +46,21 @@ func TestSnapshotBudget(t *testing.T) {
 		// what version 2 did and what made this worth changing.
 		seqIfAbsolute int
 		lastDelSeq    = map[SiteID]uint64{}
+
+		// The next three fields down, and what they would cost written as steps
+		// rather than in full. Same question the deletions answered, asked of
+		// what is now above them.
+		idAsStep     int // what version 3 spent: the sequence number in full
+		clockAsStep  int // the clock in full
+		clockFromSeq int // unused now; kept so the arithmetic below still reads
+		originAsStep int // the origin's sequence number in full
+
+		lastRunSeq    = map[SiteID]uint64{}
+		lastOriginSeq = map[SiteID]uint64{}
+		lastClock     uint64
+
+		lastRunSeq2    = map[SiteID]uint64{}
+		lastOriginSeq2 = map[SiteID]uint64{}
 	)
 
 	uvarint := func(v uint64) int {
@@ -62,9 +77,17 @@ func TestSnapshotBudget(t *testing.T) {
 	runs := d.runs()
 	runCount += uvarint(uint64(len(runs)))
 	for _, r := range runs {
-		ids += uvarint(uint64(r.id.Site)) + uvarint(r.id.Seq)
-		clocks += uvarint(r.clock)
-		origins += uvarint(uint64(r.origin.Site)) + uvarint(r.origin.Seq)
+		ids += uvarint(uint64(r.id.Site)) + uvarint(zigzag(int64(r.id.Seq)-int64(lastRunSeq2[r.id.Site])))
+		lastRunSeq2[r.id.Site] = r.id.Seq
+		clocks += uvarint(r.clock - r.id.Seq)
+		origins += uvarint(uint64(r.origin.Site)) + uvarint(zigzag(int64(r.origin.Seq)-int64(lastOriginSeq2[r.origin.Site])))
+		lastOriginSeq2[r.origin.Site] = r.origin.Seq
+
+		idAsStep += uvarint(uint64(r.id.Site)) + uvarint(r.id.Seq)
+		clockAsStep += uvarint(r.clock)
+		originAsStep += uvarint(uint64(r.origin.Site)) + uvarint(r.origin.Seq)
+		_, _, _ = lastRunSeq, lastOriginSeq, lastClock
+		_ = clockFromSeq
 		runCount += uvarint(uint64(len(r.text)))
 		for _, ch := range r.text {
 			text += uvarint(uint64(ch))
@@ -134,4 +157,8 @@ func TestSnapshotBudget(t *testing.T) {
 		delGaps, delLens, delSites, delSeqs)
 	t.Logf("  the sequence numbers cost %d bytes as steps; written in full, as version 2 did, they would be %d (%+d)",
 		delSeqs, seqIfAbsolute, delSeqs-seqIfAbsolute)
+	t.Logf("the run header, and what version 3 spent on the same fields:")
+	t.Logf("  run identities  %6d, written in full %6d (%+d)", ids, idAsStep, ids-idAsStep)
+	t.Logf("  origins         %6d, written in full %6d (%+d)", origins, originAsStep, origins-originAsStep)
+	t.Logf("  clocks          %6d, written in full %6d (%+d)", clocks, clockAsStep, clocks-clockAsStep)
 }

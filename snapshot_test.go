@@ -344,6 +344,8 @@ func (b runBuilder) build() []byte {
 		version = snapshotVersion
 	}
 	lastDel := map[SiteID]uint64{}
+	lastRun := map[SiteID]uint64{}
+	lastOrigin := map[SiteID]uint64{}
 	out = append(out, version)
 	out = binary.AppendUvarint(out, uint64(len(b.sites)))
 	for _, s := range b.sites {
@@ -356,8 +358,27 @@ func (b runBuilder) build() []byte {
 	}
 	out = binary.AppendUvarint(out, uint64(n))
 	for _, r := range b.runs {
-		for _, v := range []uint64{r.site, r.seq, r.clock, r.originSite, r.originSeq} {
-			out = binary.AppendUvarint(out, v)
+		// A case names the run's sequence, clock and origin outright, because
+		// that is what a reader of the test wants to see. Version 4 writes the
+		// two sequence numbers as steps and the clock as the distance above the
+		// run's own sequence, so the conversion happens here.
+		//
+		// A case that asks for a clock below the sequence — which no honest
+		// replica can produce — still encodes: the subtraction wraps, and the
+		// enormous distance is refused against the ceiling instead of against
+		// the sequence. The case still fails to load, which is what it asserts.
+		if version >= snapshotVersion {
+			out = binary.AppendUvarint(out, r.site)
+			out = binary.AppendUvarint(out, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
+			lastRun[SiteID(r.site)] = r.seq
+			out = binary.AppendUvarint(out, r.clock-r.seq)
+			out = binary.AppendUvarint(out, r.originSite)
+			out = binary.AppendUvarint(out, zigzag(int64(r.originSeq)-int64(lastOrigin[SiteID(r.originSite)])))
+			lastOrigin[SiteID(r.originSite)] = r.originSeq
+		} else {
+			for _, v := range []uint64{r.site, r.seq, r.clock, r.originSite, r.originSeq} {
+				out = binary.AppendUvarint(out, v)
+			}
 		}
 		length := r.length
 		if length == 0 {
@@ -380,7 +401,7 @@ func (b runBuilder) build() []byte {
 			out = binary.AppendUvarint(out, d[0])
 			out = binary.AppendUvarint(out, d[1])
 			out = binary.AppendUvarint(out, d[2])
-			if version >= snapshotVersion {
+			if version >= snapshotVersionV3 {
 				site := SiteID(d[2])
 				out = binary.AppendUvarint(out, zigzag(int64(d[3])-int64(lastDel[site])))
 				lastDel[site] = d[3]
@@ -536,7 +557,62 @@ func TestLoadReadsASnapshotWrittenByVersionOne(t *testing.T) {
 	if len(fresh) >= len(raw) {
 		t.Fatalf("re-encoding did not shrink it: %d bytes against %d", len(fresh), len(raw))
 	}
-	t.Logf("the same document: %d bytes in version 1, %d in version 2", len(raw), len(fresh))
+	t.Logf("the same document: %d bytes in version %d, %d in version %d", len(raw), raw[4], len(fresh), fresh[4])
+}
+
+// A document stored by a build that wrote version 3 has to open. Version 4
+// changed the run header: its own sequence number and its origin's are steps
+// now, and its clock is the distance above its own sequence.
+//
+// The fixture was produced by the build that still wrote version 3, and carries
+// the same awkward parts as the version 2 one. Two versions back and one version
+// back both have to read, which is the property a chain of format changes has to
+// keep and the one it is easiest to lose.
+func TestLoadReadsASnapshotWrittenByVersionThree(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/v3-snapshot.base64")
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		t.Fatalf("decoding the fixture: %v", err)
+	}
+	if got, want := raw[4], byte(snapshotVersionV3); got != want {
+		t.Fatalf("the fixture claims format version %d, want %d", got, want)
+	}
+
+	d, err := Load(9, raw)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	const want = "written.14.0 — héllo界 🌍 and more plus"
+	if got := d.String(); got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+	if got, wantN := d.Tombstones(), 5; got != wantN {
+		t.Fatalf("Tombstones() = %d, want %d", got, wantN)
+	}
+
+	peer := New(8)
+	apply(t, peer, d.OpsSince(nil))
+	if got := peer.String(); got != want {
+		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
+	}
+	fresh := d.Snapshot()
+	if fresh[4] != snapshotVersion {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersion)
+	}
+	again, err := Load(7, fresh)
+	if err != nil {
+		t.Fatalf("reloading the re-encoded snapshot: %v", err)
+	}
+	if got := again.String(); got != want {
+		t.Fatalf("the re-encoded snapshot reads %q, want %q", got, want)
+	}
+	if got, wantN := again.Tombstones(), 5; got != wantN {
+		t.Fatalf("the re-encoded snapshot has %d tombstones, want %d", got, wantN)
+	}
+	t.Logf("the same document: %d bytes in version %d, %d in version %d", len(raw), raw[4], len(fresh), fresh[4])
 }
 
 // A document stored by a build that wrote version 2 has to open. Version 3
@@ -598,7 +674,7 @@ func TestLoadReadsASnapshotWrittenByVersionTwo(t *testing.T) {
 	if got, wantN := again.Tombstones(), 5; got != wantN {
 		t.Fatalf("the re-encoded snapshot has %d tombstones, want %d", got, wantN)
 	}
-	t.Logf("the same document: %d bytes in version 2, %d in version 3", len(raw), len(fresh))
+	t.Logf("the same document: %d bytes in version %d, %d in version %d", len(raw), raw[4], len(fresh), fresh[4])
 }
 
 // Truncating a version 2 snapshot anywhere must fail rather than produce a
