@@ -299,6 +299,11 @@ type Map struct {
 	// live counts the records that are not tombstones, so Len answers without
 	// walking them.
 	live int
+
+	// touched, when not nil, gathers the keys whose value or presence a batch
+	// changed. It is set only for the duration of ApplyChanges, so Apply pays
+	// nothing for it.
+	touched map[string]struct{}
 }
 
 // A mapRecord is what a replica keeps for one key: the write that is winning,
@@ -420,15 +425,48 @@ func (m *Map) Version() VersionVector { return m.vv.Clone() }
 //
 // A malformed operation is rejected and nothing in the batch is applied.
 func (m *Map) Apply(ops ...MapOp) error {
+	_, err := m.applyWith(false, ops)
+	return err
+}
+
+// ApplyChanges is [Map.Apply], and also reports which keys it changed: those
+// whose value or presence is not what it was, in ascending order so that two
+// replicas given the same batch report the same thing.
+//
+// Only what actually happened is reported. An operation already applied, one
+// still waiting for the operation its site issued before it, and one that lost
+// to a write already held all change nothing and say nothing; when a waiting
+// one lands, its key is reported then.
+//
+// A key is named, not its new value. A caller reads what it wants of the key it
+// is told about, which is also what keeps this honest when a batch writes one
+// key twice: the key appears once, and reading it gives the winner.
+func (m *Map) ApplyChanges(ops ...MapOp) ([]string, error) {
+	return m.applyWith(true, ops)
+}
+
+func (m *Map) applyWith(watching bool, ops []MapOp) ([]string, error) {
 	for _, op := range ops {
 		if err := op.validate(); err != nil {
-			return err
+			return nil, err
 		}
+	}
+	if watching {
+		m.touched = map[string]struct{}{}
+		defer func() { m.touched = nil }()
 	}
 	for _, op := range ops {
 		m.admit(op)
 	}
-	return nil
+	if !watching || len(m.touched) == 0 {
+		return nil, nil
+	}
+	keys := make([]string, 0, len(m.touched))
+	for key := range m.touched {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
 // admit integrates an operation and then anything that was waiting for it,
@@ -524,6 +562,9 @@ func (m *Map) integrate(op MapOp) {
 		m.live++
 	}
 	m.records[op.Key] = fresh
+	if m.touched != nil {
+		m.touched[op.Key] = struct{}{}
+	}
 }
 
 // OpsSince returns the operations this replica holds that vv does not, ready to

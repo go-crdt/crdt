@@ -743,10 +743,59 @@ func decodeBatch[T any](r *reader, count uint64, decode func([]byte) (T, []byte,
 // included: a call that fails creates no part. That is why every batch is
 // checked before any is applied.
 func (c *Composite) Apply(batches ...PartOps) error {
+	_, err := c.applyWith(false, batches)
+	return err
+}
+
+// A PartChange is what one part did when a batch was applied. A part that did
+// nothing is not reported at all, so a PartChange existing is itself the news
+// that its part is not what it was — which for a list is the whole of the news.
+//
+// Which field carries it depends on the kind, and the three differ because what
+// a view has to do with them differs:
+//
+//   - PartText fills Text with the edits a view of the text has to make, in the
+//     order it has to make them. A text editor cannot re-read a document per
+//     keystroke and keep a cursor, so it needs the edits themselves.
+//   - PartMap fills Keys with the keys whose value or presence changed,
+//     ascending. A view reads back the keys it is told about.
+//   - PartList fills neither. A list here holds tens or hundreds of values and
+//     the views written against one read it back whole; naming positions would
+//     be a second protocol to keep correct for nobody. It can be added later
+//     without breaking a caller, which is why it is a field left empty rather
+//     than a kind left out.
+type PartChange struct {
+	// Part names the part that changed.
+	Part Part
+	// Text is the edits to make, in order. PartText only.
+	Text []Change
+	// Keys names the keys that changed, ascending. PartMap only.
+	Keys []string
+}
+
+// ApplyChanges is [Composite.Apply], and also reports what each part did, in the
+// canonical part order so that two replicas given the same batches report the
+// same thing.
+//
+// Only what actually happened is reported: an operation already applied, or one
+// still waiting for the operation its site issued before it, changes nothing and
+// says nothing; when a waiting one lands, the change is reported then. A batch
+// naming a part that ends up doing nothing produces no [PartChange].
+//
+// Finding where each text edit landed costs a walk up the index per operation,
+// which [Composite.Apply] does not pay. Use that one when nothing is watching.
+func (c *Composite) ApplyChanges(batches ...PartOps) ([]PartChange, error) {
+	return c.applyWith(true, batches)
+}
+
+func (c *Composite) applyWith(watching bool, batches []PartOps) ([]PartChange, error) {
 	for _, b := range batches {
 		if err := b.validate(); err != nil {
-			return err
+			return nil, err
 		}
+	}
+	if watching {
+		return c.applyWatching(batches)
 	}
 	for _, b := range batches {
 		// Each part validates with the same function that has just passed here, and
@@ -761,7 +810,79 @@ func (c *Composite) Apply(batches ...PartOps) error {
 			_ = c.mapPart(b.Part.Name).Apply(b.Map...)
 		}
 	}
-	return nil
+	return nil, nil
+}
+
+// applyWatching applies the batches and gathers what each part did.
+//
+// Batches are accumulated by part rather than reported one per batch, because a
+// caller may send two batches for one part and a view wants one account of it.
+// The errors below are dropped for the reason the ones above are: every batch
+// has just passed the validation each part's own Apply would repeat.
+func (c *Composite) applyWatching(batches []PartOps) ([]PartChange, error) {
+	byPart := map[Part]*PartChange{}
+	record := func(p Part) *PartChange {
+		if existing, ok := byPart[p]; ok {
+			return existing
+		}
+		fresh := &PartChange{Part: p}
+		byPart[p] = fresh
+		return fresh
+	}
+	for _, b := range batches {
+		switch b.Part.Kind {
+		case PartText:
+			changes, _ := c.text(b.Part.Name).ApplyChanges(b.Text...)
+			if len(changes) > 0 {
+				at := record(b.Part)
+				at.Text = append(at.Text, changes...)
+			}
+		case PartList:
+			if moved, _ := c.list(b.Part.Name).ApplyChanges(b.List...); moved {
+				record(b.Part)
+			}
+		default:
+			keys, _ := c.mapPart(b.Part.Name).ApplyChanges(b.Map...)
+			if len(keys) > 0 {
+				at := record(b.Part)
+				at.Keys = mergeKeys(at.Keys, keys)
+			}
+		}
+	}
+	if len(byPart) == 0 {
+		return nil, nil
+	}
+	out := make([]PartChange, 0, len(byPart))
+	for _, change := range byPart {
+		out = append(out, *change)
+	}
+	sort.Slice(out, func(i, j int) bool { return partLess(out[i].Part, out[j].Part) })
+	return out, nil
+}
+
+// mergeKeys unions two ascending key lists, keeping them ascending and without
+// repeats — what two batches for one map part have to add up to.
+func mergeKeys(a, b []string) []string {
+	if len(a) == 0 {
+		return b
+	}
+	out := make([]string, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i] < b[j]:
+			out = append(out, a[i])
+			i++
+		case b[j] < a[i]:
+			out = append(out, b[j])
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return append(append(out, a[i:]...), b[j:]...)
 }
 
 // OpsSince returns the operations this replica holds that v does not, batched by

@@ -190,6 +190,39 @@ overhead to a fifth over [Doc.Apply].
 Finding where each edit landed costs a walk up the index per operation, so
 [Doc.Apply] does not collect anything and does not pay.
 
+
+### And what the other two kinds need is not the same thing
+
+`Composite.ApplyChanges` reports one `PartChange` per part that actually moved,
+in the canonical part order. What each kind fills in is different, and the
+difference was settled by reading the consumer rather than by symmetry:
+
+| kind | reported | why |
+|---|---|---|
+| text | the edits, in order | an editor cannot re-read a document per keystroke and keep a cursor |
+| map | the keys that changed, ascending | the view reads back the keys it is told about |
+| list | nothing but the part | the views written against one read it back whole |
+
+The list is the interesting one, because reporting positions would have been the
+symmetric thing to do. A list here holds tens or hundreds of values, not the
+hundreds of thousands a document holds — the same fact that makes it a slice
+rather than a tree — and a view that re-reads it is not paying much. Naming
+positions would be a second protocol to keep correct, fuzzed and covered for a
+caller that does not exist. It is a field left empty rather than a kind left out,
+so it can be filled in later without breaking anyone.
+
+A key is named rather than its new value, which is also what keeps the report
+honest when one batch writes a key twice: the key appears once, and reading it
+gives the winner. Two batches for one part fold into one account of it — a view
+is told about a key once, however the operations were grouped.
+
+Only what happened is reported, everywhere: an operation already applied, one
+still waiting for the operation its site issued before it, and a write that lost
+to one already held all change nothing and say nothing. When a waiting one lands,
+that call reports it. Watching costs the walk up the index per text operation,
+and nothing at all for the parts nobody is watching — `Apply` takes a path that
+does not so much as copy a version vector.
+
 ## Anchors, and authorship
 
 An editor needs somewhere stable to hang a comment. An offset is not that: the
