@@ -400,8 +400,34 @@ collector work.
 A B-tree holding runs in its leaves, as diamond-types does, would pay for itself
 here: no per-run node, a depth of four rather than seventeen, and iteration from
 the leaves. It costs the pointer identity of a block, which the mark, the
-per-site index and every walk in `text.go` are written in terms of. That is the
-next thing to measure, not something to guess at.
+per-site index and every walk in `text.go` are written in terms of.
+
+#### The arithmetic, since it was measured rather than guessed at
+
+A block is **152 bytes**, and Go's size classes here are sixteen bytes apart, so
+it is allocated in the **160-byte class**: eight bytes of every block are paid
+for and unused. `TestBlockFitsItsSizeClass` pins this so it cannot drift.
+
+The tail is what decides it. `subMin` ends at 136; `subVis` and `subSup` fill the
+word to 144 exactly; `nsup` and `height` spill past it and cost a whole further
+word. Five bytes of summary buy sixteen bytes of allocation, on every block.
+
+Shaving that tail was looked at and rejected, which is worth recording so the
+next person does not look at it again:
+
+- `height` is an AVL height, computed from its children. It is structural, not a
+  priority that could be derived from the block's identity and dropped.
+- `nsup` could become a single bit — every use of it outside `split` is a test
+  against zero — but that alone leaves the block at 148 bytes, which is the same
+  size class. Nothing is saved.
+- Reaching 144 means capping `subVis` or `subSup` so that `height` can live in
+  the spare bits. A subtree's visible count is already `int32` for a stated
+  reason: two billion characters is eight gigabytes of text. Capping it lower
+  trades a bounded, honest limit for one that fails as silent corruption.
+
+So the block cannot lose a size class without giving something up, and what it
+would save is about 4% of what a real document holds. The B-tree removes the
+per-run node rather than shrinking it, which is a different order of answer.
 
 ### A second summary, for UTF-16 offsets
 
