@@ -269,6 +269,14 @@ type Doc struct {
 	dirtyVis int32
 	dirtySup int32
 
+	// shadow is a B-tree over the same runs, maintained beside the AVL index
+	// and asked the same questions, so that the two can be compared on a real
+	// editing history before either replaces the other. It is nil unless a
+	// test asks for it: substituting an index is the change that can corrupt a
+	// document silently, and running both first is the only way to find out
+	// that it would without shipping it.
+	shadow *btree
+
 	// bySite indexes each site's blocks by the sequence numbers they cover,
 	// ascending. Finding the character an operation names is a binary search
 	// over one site's blocks rather than a map lookup per character, which
@@ -347,6 +355,10 @@ func New(site SiteID) *Doc {
 		bySite: map[SiteID][]*block{},
 	}
 	d.startIndex()
+	if shadowIndex {
+		d.shadow = &btree{}
+		d.shadow.start(d.head)
+	}
 	return d
 }
 
@@ -415,6 +427,8 @@ func (d *Doc) split(b *block, i int) *block {
 	// one no longer holds; index puts them back under the new block.
 	d.addVis(b, -int32(right.visibleFrom(0)), -right.visibleSup())
 	d.index(b, right)
+	d.mirror(b, right)
+	d.mirrorVis(b)
 	return right
 }
 
@@ -837,6 +851,7 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 		at.text = append(at.text, ch)
 		at.nsup += supUnit(ch)
 		d.addVis(at, 1, supUnit(ch))
+		d.mirrorVis(at)
 		return at, len(at.text) - 1
 	}
 
@@ -850,6 +865,7 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	at.next = fresh
 	d.indexAdd(fresh)
 	d.index(at, fresh)
+	d.mirror(at, fresh)
 	return fresh, 0
 }
 
@@ -868,6 +884,7 @@ func (d *Doc) tombstone(op Op) {
 		d.recordDelete(b, i)
 		b.markDeleted(i, op.ID)
 		d.addVis(b, -1, -sup)
+		d.mirrorVis(b)
 		d.visible--
 		d.sup -= int(sup)
 	case idLess(op.ID, existing):

@@ -219,3 +219,55 @@ func (t *btree) seek(pos int) (*block, int) {
 	}
 	return r, r.visibleOffset(0, pos)
 }
+
+// shadowIndex turns on the second index, and is set by the test that compares
+// the two. It is a variable rather than a build tag so that the comparison runs
+// in the ordinary suite and on every architecture the fleet builds for.
+var shadowIndex = false
+
+// mirror keeps the shadow tree in step with an insertion into the AVL index.
+func (d *Doc) mirror(at, fresh *block) {
+	if d.shadow != nil {
+		d.shadow.insertAfter(at, fresh)
+	}
+}
+
+// mirrorVis keeps the shadow tree's summaries in step with a change to one run.
+func (d *Doc) mirrorVis(b *block) {
+	if d.shadow != nil {
+		d.shadow.resumUp(b.leaf)
+	}
+}
+
+// supBefore returns how many of the document's first pos visible characters are
+// supplementary — written as two UTF-16 code units rather than one.
+//
+// It is the same descent seek makes, taking the supplementary count of every
+// subtree it steps over whole, so turning a UTF-16 offset into a position costs
+// the depth of the tree rather than a walk of the document.
+func (t *btree) supBefore(pos int) int {
+	n := t.root
+	sup := 0
+	for !n.isLeaf() {
+		last := len(n.kids) - 1
+		for i, k := range n.kids {
+			if int32(pos) < k.vis || i == last {
+				n = k
+				break
+			}
+			pos -= int(k.vis)
+			sup += int(k.sup)
+		}
+	}
+	last := len(n.runs) - 1
+	r := n.runs[last]
+	for i, x := range n.runs {
+		if pos < int(runVisible(x)) || i == last {
+			r = x
+			break
+		}
+		pos -= int(runVisible(x))
+		sup += int(x.visibleSup())
+	}
+	return sup + int(r.supBefore(pos))
+}
