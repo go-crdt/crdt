@@ -296,6 +296,11 @@ type Map struct {
 	pending map[ID][]MapOp
 	parked  int
 
+	// parkSlab is where a parked operation's one-element slice comes from; see
+	// Doc.parkSlab, which explains why one allocation per parked operation was
+	// worth removing and why widening the map's value instead was not.
+	parkSlab []MapOp
+
 	// live counts the records that are not tombstones, so Len answers without
 	// walking them.
 	live int
@@ -502,7 +507,17 @@ func (m *Map) park(op MapOp) {
 		m.pending = map[ID][]MapOp{}
 	}
 	waitingFor := ID{Site: op.ID.Site, Seq: op.first() - 1}
-	m.pending[waitingFor] = append(m.pending[waitingFor], op)
+	if held := m.pending[waitingFor]; held != nil {
+		m.pending[waitingFor] = append(held, op)
+		m.parked++
+		return
+	}
+	if len(m.parkSlab) == cap(m.parkSlab) {
+		m.parkSlab = make([]MapOp, 0, parkChunk)
+	}
+	n := len(m.parkSlab)
+	m.parkSlab = append(m.parkSlab, op)
+	m.pending[waitingFor] = m.parkSlab[n : n+1 : n+1]
 	m.parked++
 }
 
