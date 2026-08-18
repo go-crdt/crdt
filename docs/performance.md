@@ -152,6 +152,94 @@ because this package has no dependencies and a compressor is a dependency. The
 deletions are still 43%, but three quarters of that is now the offsets and spans
 themselves rather than the identities attached to them.
 
+### The document size gap is an encoding, not a compressor
+
+At version 4 a real document encodes to 478 KB where diamond-types takes 109 KB,
+and this page used to put that down to the text being written plainly. It is not
+the text. Compressing the snapshot as it stands takes it to 148 KB — still a
+third bigger than their whole document — because the fields are interleaved: a
+compressor looking for repetition sees a run's identity beside its text beside
+its deletions.
+
+Written one field at a time, each column is a stream of similar numbers, and a
+compressor is very good at those. The same document, same fields, same step
+encodings, laid out in columns and compressed per column:
+
+| Column | Raw | Compressed |
+|---|---|---|
+| run sites | 10 824 | **13** |
+| clocks | 10 824 | **13** |
+| origin sites | 10 824 | **14** |
+| deletion counts | 10 850 | 3 978 |
+| run lengths | 11 005 | 6 732 |
+| origin sequences | 14 660 | 10 824 |
+| run sequences | 20 449 | 16 720 |
+| deletion fields | 206 687 | **18 181** |
+| the text | 182 315 | 40 228 |
+| **total** | **478 438** | **96 703** |
+
+Against diamond-types' 111 616 bytes that is **87%**. The deletion fields are the
+sharpest: 206 KB to 18, because a column of small gaps and spans repeats itself
+in a way the same numbers scattered between other fields do not.
+
+#### Which compressor, measured rather than assumed
+
+Every one of these is pure Go. Same columns, best setting of each:
+
+| | Total | |
+|---|---|---|
+| **brotli** (`andybalholm/brotli`, q11) | **96 703** | |
+| lzma (`ulikunitz/xz`) | 109 149 | +13% |
+| zstd (`klauspost/compress`) | 109 201 | +13% |
+| xz | 109 564 | +13% |
+| flate (standard library) | 112 211 | +16% |
+
+brotli wins on every column, including the small-varint streams where it would
+be least expected. Two settings were measured rather than guessed: the window
+must be at least 2^20 — at 2^16 it costs 2.4 KB, and past 2^20 nothing changes —
+and compressing **per column beats one stream**, 96 703 against 97 811, so the
+column boundaries are worth more than the redundancy across them.
+
+That is the one dependency worth taking: it buys 14% against the next best,
+where zstd's advantage was one column.
+
+#### And what it costs, which decides the setting
+
+brotli's top quality is very slow. The ladder, per column, on the same 478 KB:
+
+| Quality | Per column | vs diamond-types | Encode |
+|---|---|---|---|
+| q4 | 112 215 | 101% | 5 ms |
+| **q5** | **108 266** | **97%** | **7 ms** |
+| **q9** | **106 169** | **95%** | **14 ms** |
+| q10 | 98 686 | 88% | 167 ms |
+| q11 | 96 703 | 87% | 425 ms |
+
+Quality 5 is already ahead of them, at seven milliseconds. The cliff is between
+9 and 10: fourteen milliseconds becomes a hundred and sixty-seven, for seven
+kilobytes. So q9 is the setting to default to — ahead of diamond-types, and
+costing about what zstd costs — and q11 is for an archive that is written once.
+
+Decompression does not have this problem: 2 ms, 292 MB/s, and that is the side
+that runs whenever a document is opened.
+
+This is also the honest answer to whether one of our own compressors should be
+used instead. `go-compressions/deflate` accelerates match extension with SIMD,
+but DEFLATE's density is what it is — 112 KB here — so the SIMD buys time on a
+format that cannot reach the number. Where a SIMD brotli encoder would pay is
+exactly the q10 and q11 rows, and what it would buy there is the 167 or 425
+milliseconds rather than any bytes. q9 does not need it.
+
+#### What is not decided by this
+
+`Snapshot` says the same state is the same bytes, and every format change so far
+has kept that. A compressor's output is deterministic for a build and not
+promised across versions of the library, so compression belongs beside the
+format rather than inside it: the canonical form stays the columnar bytes, and
+whoever stores or sends them compresses. A plain whole-blob compression of the
+columnar layout gives 97 811 rather than 96 703, which is the price of keeping
+the boundary in the right place.
+
 ### Memory
 
 Only where it can be read honestly. Yjs is JavaScript, so `heapUsed` after a
