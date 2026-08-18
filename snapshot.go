@@ -9,7 +9,17 @@ import (
 // so a decoder rejects foreign or future bytes instead of misreading them.
 var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 
-// snapshotVersion 4 writes a run's header as steps too: its own sequence number
+// snapshotVersion 5 writes the runs in columns — every site, then every
+// sequence number, then every clock, and so on — rather than one run at a time.
+// It is the same fields in the same encodings; only the order changes, and it
+// changes because a compressor looking for repetition in version 4 sees a run's
+// identity beside its text beside its deletions. A column is a stream of
+// similar numbers, which is what a compressor is good at: the same document
+// goes from 148 KB compressed to 97, against diamond-types' 109. The measurement
+// and the choice of compressor are in docs/performance.md; nothing here
+// compresses, because Snapshot promises the same state is the same bytes and a
+// compressor is deterministic for a build rather than across versions of
+// itself. Version 4 writes a run's header as steps: its own sequence number
 // and its origin's from the last the same site used, and its clock as the
 // distance above its own sequence, which it can never fall below. Version 3
 // writes a deletion's sequence number as a signed step from the previous
@@ -17,7 +27,8 @@ var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 // record per character. All four are readable; version 1's note
 // still read, so a document stored by an older build still opens.
 const (
-	snapshotVersion   = 4
+	snapshotVersion   = 5
+	snapshotVersionV4 = 4
 	snapshotVersionV3 = 3
 	snapshotVersionV2 = 2
 	snapshotVersionV1 = 1
@@ -56,50 +67,60 @@ func (d *Doc) Snapshot() []byte {
 
 	runs := d.runs()
 	out = binary.AppendUvarint(out, uint64(len(runs)))
-	// Deletion sequence numbers are written as a step from the last one this
-	// site deleted with. They were nearly a quarter of a real document — 148 KB
-	// of a 620 KB snapshot, at three bytes each because they are absolute — and
-	// a step is usually one byte, because a person deleting text works through
-	// it rather than jumping about. Per site, so several authors do not each
-	// pay a full-width jump when the writer changes. Measured: 148 385 bytes
-	// to 55 828 on the automerge-paper trace.
+
+	// The columns. Same fields as version 4, same step encodings; what changes
+	// is that each is written all together instead of interleaved with the
+	// others, so that a compressor sees a stream of similar numbers rather than
+	// a run's identity beside its text beside its deletions.
+	//
+	// A step is still measured against the last value the same site used in the
+	// same position, which is unchanged by the reordering: the runs are walked
+	// in document order here exactly as they were.
+	var (
+		runSites  []byte // the site of each run
+		seqs      []byte // its sequence number, as a step
+		clocks    []byte // its clock, as the distance above that sequence number
+		oSites    []byte // its origin's site
+		oSeqs     []byte // its origin's sequence number, as a step
+		lengths   []byte // how many characters it holds
+		text      []byte // the characters themselves, every run's after the last
+		delCounts []byte // how many deleted stretches each run has
+		delFields []byte // those stretches: gap, span, site, sequence step
+	)
 	lastDelSeq := map[SiteID]uint64{}
-	// The run header goes the same way, and for the same reason: a run's own
-	// sequence number and its origin's both climb, so the step is small where
-	// the number is large. Measured on the automerge-paper trace: identities
-	// 42 444 bytes to 31 273, origins 42 382 to 25 484.
 	lastRunSeq := map[SiteID]uint64{}
 	lastOriginSeq := map[SiteID]uint64{}
 	for _, r := range runs {
-		out = binary.AppendUvarint(out, uint64(r.id.Site))
-		out = binary.AppendUvarint(out, zigzag(int64(r.id.Seq)-int64(lastRunSeq[r.id.Site])))
+		runSites = binary.AppendUvarint(runSites, uint64(r.id.Site))
+		seqs = binary.AppendUvarint(seqs, zigzag(int64(r.id.Seq)-int64(lastRunSeq[r.id.Site])))
 		lastRunSeq[r.id.Site] = r.id.Seq
-		// The clock as the distance above this run's own sequence number, which
-		// it can never fall below: a site's clock advances at least once per
-		// operation it issues, so after n operations it is at least n. The
-		// difference needs no sign, and a snapshot can no longer express a
-		// clock the loader would have had to refuse. 31 620 bytes to 10 824,
-		// which is one byte per run.
-		out = binary.AppendUvarint(out, r.clock-r.id.Seq)
-		out = binary.AppendUvarint(out, uint64(r.origin.Site))
-		out = binary.AppendUvarint(out, zigzag(int64(r.origin.Seq)-int64(lastOriginSeq[r.origin.Site])))
+		clocks = binary.AppendUvarint(clocks, r.clock-r.id.Seq)
+		oSites = binary.AppendUvarint(oSites, uint64(r.origin.Site))
+		oSeqs = binary.AppendUvarint(oSeqs, zigzag(int64(r.origin.Seq)-int64(lastOriginSeq[r.origin.Site])))
 		lastOriginSeq[r.origin.Site] = r.origin.Seq
-		out = binary.AppendUvarint(out, uint64(len(r.text)))
+		lengths = binary.AppendUvarint(lengths, uint64(len(r.text)))
 		for _, ch := range r.text {
-			out = binary.AppendUvarint(out, uint64(ch))
+			text = binary.AppendUvarint(text, uint64(ch))
 		}
-		out = binary.AppendUvarint(out, uint64(len(r.dels)))
+		delCounts = binary.AppendUvarint(delCounts, uint64(len(r.dels)))
 		at := uint32(0)
 		for _, del := range r.dels {
-			// Offsets ascend and never overlap, so each is written as the gap
-			// since the end of the one before it.
-			out = binary.AppendUvarint(out, uint64(del.from-at))
-			out = binary.AppendUvarint(out, uint64(del.to-del.from))
-			out = binary.AppendUvarint(out, uint64(del.id.Site))
-			out = binary.AppendUvarint(out, zigzag(int64(del.id.Seq)-int64(lastDelSeq[del.id.Site])))
+			delFields = binary.AppendUvarint(delFields, uint64(del.from-at))
+			delFields = binary.AppendUvarint(delFields, uint64(del.to-del.from))
+			delFields = binary.AppendUvarint(delFields, uint64(del.id.Site))
+			delFields = binary.AppendUvarint(delFields, zigzag(int64(del.id.Seq)-int64(lastDelSeq[del.id.Site])))
 			lastDelSeq[del.id.Site] = del.id.Seq
 			at = del.to
 		}
+	}
+
+	// Each column is length-prefixed, so a reader can take them apart without
+	// knowing what is in them — which is also what lets whoever stores this
+	// compress them one at a time, which measured better than compressing the
+	// whole thing at once.
+	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields} {
+		out = binary.AppendUvarint(out, uint64(len(col)))
+		out = append(out, col...)
 	}
 
 	dups := make([]ID, 0, len(d.dupDeletes))
@@ -187,8 +208,8 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV3 &&
-		v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
+	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV4 &&
+		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
 		return nil, ErrMalformed
 	}
 	version := v[0]
@@ -236,15 +257,36 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	// 42 444 bytes to 31 273, origins 42 382 to 25 484.
 	lastRunSeq := map[SiteID]uint64{}
 	lastOriginSeq := map[SiteID]uint64{}
+
+	// Where each field is read from. Version 5 gives every field a column of
+	// its own; every version before it interleaved them, which is the same
+	// thing with all nine readers pointing at the one stream — the fields go
+	// past in the same order either way, so there is one decoder rather than
+	// two, and the older format is exercised by every test the newer one is.
+	cols := sameStream(r)
+	if version >= snapshotVersion {
+		var err error
+		if cols, err = readColumns(r); err != nil {
+			return nil, err
+		}
+	}
 	for range count {
 		var err error
 		if version == snapshotVersionV1 {
 			err = d.readCharacter(r, ledger)
 		} else {
-			err = d.readRun(r, ledger, version, lastDelSeq, lastRunSeq, lastOriginSeq)
+			err = d.readRun(cols, ledger, version, lastDelSeq, lastRunSeq, lastOriginSeq)
 		}
 		if err != nil {
 			return nil, err
+		}
+	}
+	if version >= snapshotVersion {
+		// Every column must have been consumed exactly. A column with bytes
+		// left over describes runs the count did not claim, which is a second
+		// encoding of the same document and so not one this format allows.
+		if !cols.empty() {
+			return nil, ErrMalformed
 		}
 	}
 
@@ -296,15 +338,15 @@ func (d *Doc) readCharacter(r *reader, l *ledger) error {
 // readRun decodes one version 2 entry and adopts its characters one by one, so
 // that a run gets exactly the checks a character-at-a-time snapshot got: the
 // shorter encoding buys space, not trust.
-func (d *Doc) readRun(r *reader, l *ledger, version byte, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
-	id, ok1 := r.steppedID(version, lastRunSeq)
-	clock, ok2 := r.uvarint()
-	origin, ok3 := r.steppedID(version, lastOriginSeq)
-	length, ok4 := r.uvarint()
+func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
+	id, ok1 := steppedID(c.sites, c.seqs, version, lastRunSeq)
+	clock, ok2 := c.clocks.uvarint()
+	origin, ok3 := steppedID(c.oSites, c.oSeqs, version, lastOriginSeq)
+	length, ok4 := c.lengths.uvarint()
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return ErrMalformed
 	}
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV4 {
 		// The clock arrives as the distance above this run's own sequence
 		// number, so it is added back here and held to the ceiling below like
 		// any other clock.
@@ -326,13 +368,13 @@ func (d *Doc) readRun(r *reader, l *ledger, version byte, lastDelSeq, lastRunSeq
 	}
 	// A run of no characters says nothing and would let a snapshot claim any
 	// number of them; each character costs at least a byte still to be read.
-	if length == 0 || length > uint64(len(r.buf)) || clock > MaxClock ||
+	if length == 0 || length > uint64(len(c.text.buf)) || clock > MaxClock ||
 		clock < id.Seq || !origin.wellFormed() || !id.wellFormed() {
 		return ErrMalformed
 	}
 	text := make([]rune, length)
 	for i := range text {
-		ch, ok := r.uvarint()
+		ch, ok := c.text.uvarint()
 		if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
 			return ErrMalformed
 		}
@@ -342,16 +384,16 @@ func (d *Doc) readRun(r *reader, l *ledger, version byte, lastDelSeq, lastRunSeq
 	// The deleted stretches, as gaps and lengths. They must ascend, not overlap
 	// and stay inside the run, or the characters they name would be the wrong
 	// ones.
-	nDels, ok := r.uvarint()
-	if !ok || nDels > uint64(len(r.buf)) {
+	nDels, ok := c.delCounts.uvarint()
+	if !ok || nDels > uint64(len(c.delFld.buf)) {
 		return ErrMalformed
 	}
 	dels := make([]delRange, 0, nDels)
 	at := uint64(0)
 	for range nDels {
-		gap, ok1 := r.uvarint()
-		span, ok2 := r.uvarint()
-		delID, ok3 := r.delID(version, lastDelSeq)
+		gap, ok1 := c.delFld.uvarint()
+		span, ok2 := c.delFld.uvarint()
+		delID, ok3 := c.delFld.delID(version, lastDelSeq)
 		if !ok1 || !ok2 || !ok3 || span == 0 || gap > length ||
 			!delID.wellFormed() || delID.IsRoot() {
 			return ErrMalformed
@@ -524,12 +566,15 @@ func uvarint(buf []byte) (uint64, int) {
 //
 // The root origin is site 0, sequence 0, and it is common; a step of zero from a
 // running value of zero is one byte, which is what it was before.
-func (r *reader) steppedID(version byte, last map[SiteID]uint64) (ID, bool) {
-	if version < snapshotVersion {
-		return r.id()
+func steppedID(siteCol, seqCol *reader, version byte, last map[SiteID]uint64) (ID, bool) {
+	if version < snapshotVersionV4 {
+		// Before version 4 the two came from one stream, one after the other,
+		// which is what id already reads. Spelling it out again here would be
+		// the same code twice, and the copy would be the one no test reaches.
+		return siteCol.id()
 	}
-	site, ok1 := r.uvarint()
-	step, ok2 := r.uvarint()
+	site, ok1 := siteCol.uvarint()
+	step, ok2 := seqCol.uvarint()
 	if !ok1 || !ok2 {
 		return ID{}, false
 	}
@@ -614,4 +659,51 @@ func sortIDs(ids []ID) {
 			ids[j], ids[j-1] = ids[j-1], ids[j]
 		}
 	}
+}
+
+// columns is where each field of a run is read from. Version 5 gives every one
+// its own stream; earlier versions interleave them, which is this with all nine
+// pointing at the same reader.
+type columns struct {
+	sites, seqs, clocks     *reader
+	oSites, oSeqs, lengths  *reader
+	text, delCounts, delFld *reader
+}
+
+// sameStream is how every version before 5 is read: the fields go past in the
+// order the columns are listed in, so one reader serves all of them.
+func sameStream(r *reader) *columns {
+	return &columns{sites: r, seqs: r, clocks: r, oSites: r, oSeqs: r,
+		lengths: r, text: r, delCounts: r, delFld: r}
+}
+
+// readColumns takes apart the nine length-prefixed streams a version 5 snapshot
+// writes. A length past the end of what is left is refused here rather than
+// discovered field by field later.
+func readColumns(r *reader) (*columns, error) {
+	c := &columns{}
+	for _, into := range []**reader{&c.sites, &c.seqs, &c.clocks, &c.oSites,
+		&c.oSeqs, &c.lengths, &c.text, &c.delCounts, &c.delFld} {
+		n, ok := r.uvarint()
+		if !ok || n > uint64(len(r.buf)) {
+			return nil, ErrMalformed
+		}
+		// The length was just held to what is left, so this cannot come up
+		// short. Checking it again would be a line that looks like a guard and
+		// never runs — the coverage says so, and removing it changed nothing.
+		buf, _ := r.bytes(int(n))
+		*into = &reader{buf: buf}
+	}
+	return c, nil
+}
+
+// empty reports whether every column was consumed to its end.
+func (c *columns) empty() bool {
+	for _, r := range []*reader{c.sites, c.seqs, c.clocks, c.oSites, c.oSeqs,
+		c.lengths, c.text, c.delCounts, c.delFld} {
+		if len(r.buf) != 0 {
+			return false
+		}
+	}
+	return true
 }

@@ -175,8 +175,22 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      # -parallel 2 rather than one worker per core.
+      #
+      # Fifteen of these run at once on the same runner, each starting as many
+      # fuzzing workers as it sees cores, so the machine is oversubscribed
+      # several times over. When the fuzz deadline arrives while a worker is
+      # still in an input and cannot be reached, the coordinator reports
+      # "context deadline exceeded" and the lane goes red having found nothing:
+      # six million executions, no crasher, no reproducer. It went red that way
+      # on #27, which changed only documentation, which is what says it is the
+      # runner rather than the code.
+      #
+      # -timeout is separate and generous: it bounds a single input, not the
+      # run, and a fuzzer that finds a genuinely slow input should still say so
+      # rather than hang the lane.
       - name: Fuzz ${{ matrix.target }}
-        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 120s ${{ matrix.pkg }}
+        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 120s -parallel 2 -timeout 10m ${{ matrix.pkg }}
       - name: Upload any failing input
         if: failure()
         uses: actions/upload-artifact@v4
