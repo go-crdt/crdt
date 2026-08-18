@@ -39,6 +39,11 @@ func TestSnapshotBudget(t *testing.T) {
 		dels     int
 		dups     int
 
+		// The nine columns, so their length prefixes can be sized: version 5
+		// writes each field all together and says how long it is.
+		colSites, colSeqs, colClocks, colOSites, colOSeqs int
+		colLengths, colText, colDelCounts, colDelFields   int
+
 		delRanges, delChars                 int
 		delGaps, delLens, delSites, delSeqs int
 
@@ -77,9 +82,14 @@ func TestSnapshotBudget(t *testing.T) {
 	runs := d.runs()
 	runCount += uvarint(uint64(len(runs)))
 	for _, r := range runs {
+		colSites += uvarint(uint64(r.id.Site))
+		colSeqs += uvarint(zigzag(int64(r.id.Seq) - int64(lastRunSeq2[r.id.Site])))
 		ids += uvarint(uint64(r.id.Site)) + uvarint(zigzag(int64(r.id.Seq)-int64(lastRunSeq2[r.id.Site])))
 		lastRunSeq2[r.id.Site] = r.id.Seq
+		colClocks += uvarint(r.clock - r.id.Seq)
 		clocks += uvarint(r.clock - r.id.Seq)
+		colOSites += uvarint(uint64(r.origin.Site))
+		colOSeqs += uvarint(zigzag(int64(r.origin.Seq) - int64(lastOriginSeq2[r.origin.Site])))
 		origins += uvarint(uint64(r.origin.Site)) + uvarint(zigzag(int64(r.origin.Seq)-int64(lastOriginSeq2[r.origin.Site])))
 		lastOriginSeq2[r.origin.Site] = r.origin.Seq
 
@@ -88,10 +98,13 @@ func TestSnapshotBudget(t *testing.T) {
 		originAsStep += uvarint(uint64(r.origin.Site)) + uvarint(r.origin.Seq)
 		_, _, _ = lastRunSeq, lastOriginSeq, lastClock
 		_ = clockFromSeq
+		colLengths += uvarint(uint64(len(r.text)))
 		runCount += uvarint(uint64(len(r.text)))
 		for _, ch := range r.text {
 			text += uvarint(uint64(ch))
+			colText += uvarint(uint64(ch))
 		}
+		colDelCounts += uvarint(uint64(len(r.dels)))
 		runCount += uvarint(uint64(len(r.dels)))
 		at := uint32(0)
 		for _, del := range r.dels {
@@ -105,6 +118,8 @@ func TestSnapshotBudget(t *testing.T) {
 			dels += uvarint(uint64(del.from-at)) + uvarint(uint64(del.to-del.from))
 			dels += uvarint(uint64(del.id.Site))
 			dels += uvarint(zigzag(int64(del.id.Seq) - int64(lastDelSeq[del.id.Site])))
+			colDelFields += uvarint(uint64(del.from-at)) + uvarint(uint64(del.to-del.from)) +
+				uvarint(uint64(del.id.Site)) + uvarint(zigzag(int64(del.id.Seq)-int64(lastDelSeq[del.id.Site])))
 			lastDelSeq[del.id.Site] = del.id.Seq
 			at = del.to
 		}
@@ -119,6 +134,16 @@ func TestSnapshotBudget(t *testing.T) {
 		target := d.dupDeletes[delID]
 		dups += uvarint(uint64(delID.Site)) + uvarint(delID.Seq)
 		dups += uvarint(uint64(target.Site)) + uvarint(target.Seq)
+	}
+
+	// Version 5 length-prefixes each of the nine columns, which is what lets
+	// whoever stores a snapshot take them apart and compress them one at a
+	// time — worth three kilobytes against compressing the whole thing at
+	// once. Those nine lengths are part of the file, so they are part of this
+	// sum; the accounting was short by exactly them, and said so.
+	for _, n := range []int{colSites, colSeqs, colClocks, colOSites, colOSeqs,
+		colLengths, colText, colDelCounts, colDelFields} {
+		runCount += uvarint(uint64(n))
 	}
 
 	total := len(d.Snapshot())
