@@ -62,6 +62,12 @@ type block struct {
 	// answers any question about UTF-16 units without looking at its characters.
 	nsup   int32
 	height uint8
+
+	// leaf is the node of the B-tree in btree.go holding this run, so that a
+	// change to it can be summed up to the root without a search. It is the one
+	// field a run gains by moving to a B-tree, against the seven it loses; see
+	// TestWhatTheBTreeWouldBuy.
+	leaf *bnode
 }
 
 // A delRange is one stretch of a block that was deleted in one go: characters
