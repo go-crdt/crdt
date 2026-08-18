@@ -44,29 +44,18 @@ type block struct {
 	// a list that can only be walked forwards turns "just before" into a walk
 	// from the beginning of the document.
 	prev *block
-	// A block is also a node of the index in tree.go, which puts the same blocks
-	// in the same order and summarises what a walk would otherwise have to
-	// count: subVis is the visible characters this subtree holds, subMin the
-	// block of it whose first character sorts lowest. The count is an int32
-	// because two billion visible characters is eight gigabytes of text before
-	// anything else, and the field would otherwise cost every block eight bytes.
-	left, right, up *block
-	subMin          *block
-	subVis          int32
-	// subSup is the same summary for supplementary characters — those written as
-	// two UTF-16 code units rather than one — which is what turns a UTF-16 offset
-	// into a descent instead of a walk. See utf16.go.
-	subSup int32
 	// nsup counts the supplementary characters in text, deleted ones included, so
 	// that a block holding none — every block of a document with no emoji in it —
 	// answers any question about UTF-16 units without looking at its characters.
-	nsup   int32
-	height uint8
+	nsup int32
+	// slot is which entry of leaf this run is, so a change to it reaches the
+	// root without searching for itself at every level. It costs nothing: the
+	// padding after nsup was already there.
+	slot int32
 
-	// leaf is the node of the B-tree in btree.go holding this run, so that a
-	// change to it can be summed up to the root without a search. It is the one
-	// field a run gains by moving to a B-tree, against the seven it loses; see
-	// TestWhatTheBTreeWouldBuy.
+	// leaf is the node of the B-tree in btree.go holding this run, and with slot
+	// it is what a run gains by moving to a B-tree, against the seven fields it
+	// loses; see TestWhatTheBTreeWouldBuy.
 	leaf *bnode
 }
 
@@ -260,22 +249,18 @@ type Doc struct {
 	head *block // sentinel for the root ID; head.next is the first block
 	vv   VersionVector
 
-	// tree is the root of the index over the same blocks; see tree.go. dirty
-	// holds the one block whose visible-character count the tree has not been
-	// told about yet, which is what keeps typing from paying for the index on
-	// every keystroke.
-	tree     *block
-	dirty    *block
-	dirtyVis int32
-	dirtySup int32
-
-	// shadow is a B-tree over the same runs, maintained beside the AVL index
-	// and asked the same questions, so that the two can be compared on a real
-	// editing history before either replaces the other. It is nil unless a
-	// test asks for it: substituting an index is the change that can corrupt a
-	// document silently, and running both first is the only way to find out
-	// that it would without shipping it.
-	shadow *btree
+	// index is a B-tree over the same runs, holding them in its leaves. It
+	// answers what a walk of the list would otherwise have to count for: which
+	// run holds a position, how many of the characters before it take two
+	// UTF-16 code units, and where the integration walk from a run ends.
+	//
+	// It replaced an AVL tree whose nodes were the runs themselves. That cost
+	// seven fields on every run — two subtree sums, three pointers, the
+	// lowest-sorting run of a subtree, and a height — which took a run from
+	// Go's 112-byte size class to its 160-byte one. A leaf holds pointers
+	// instead, so a run carries one pointer back to its leaf and nothing else,
+	// and the depth is four where the AVL's was seventeen.
+	index *btree
 
 	// bySite indexes each site's blocks by the sequence numbers they cover,
 	// ascending. Finding the character an operation names is a binary search
@@ -354,11 +339,8 @@ func New(site SiteID) *Doc {
 		vv:     VersionVector{},
 		bySite: map[SiteID][]*block{},
 	}
-	d.startIndex()
-	if shadowIndex {
-		d.shadow = &btree{}
-		d.shadow.start(d.head)
-	}
+	d.index = &btree{}
+	d.index.start(d.head)
 	return d
 }
 
@@ -424,11 +406,11 @@ func (d *Doc) split(b *block, i int) *block {
 	b.next = right
 	d.indexAdd(right)
 	// The characters the right-hand block takes over are the ones the left-hand
-	// one no longer holds; index puts them back under the new block.
-	d.addVis(b, -int32(right.visibleFrom(0)), -right.visibleSup())
-	d.index(b, right)
-	d.mirror(b, right)
-	d.mirrorVis(b)
+	// one no longer holds, so they come off b before insertAfter puts them back
+	// under the new run. Letting insertAfter add them without this would count
+	// the same characters twice.
+	d.index.bump(b, -int32(right.visibleFrom(0)), -right.visibleSup())
+	d.index.insertAfter(b, right)
 	return right
 }
 
@@ -533,7 +515,7 @@ func (d *Doc) visibleAt(pos int) (*block, int) {
 			return b, i
 		}
 	}
-	return d.seek(pos)
+	return d.index.seek(pos)
 }
 
 // forward walks towards the end of the document from a known position, giving
@@ -581,7 +563,7 @@ func (d *Doc) leftOf(b *block, i, pos int) (*block, int) {
 	if left, at, ok := backward(b, i, pos, pos-1, scanBudget); ok {
 		return left, at
 	}
-	return d.seek(pos - 1)
+	return d.index.seek(pos - 1)
 }
 
 // mint allocates this site's next operation identity and Lamport timestamp.
@@ -833,7 +815,7 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 			// The run of characters sorting after this one is longer than a
 			// descent, and a peer sending operations that all name one origin
 			// makes it as long as the document. The index finds its end.
-			at = d.lastOver(at, clock, id)
+			at = d.index.lastOver(at, clock, id)
 			i = len(at.text)
 			break
 		}
@@ -850,8 +832,7 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	if extends(at, id, clock, origin) {
 		at.text = append(at.text, ch)
 		at.nsup += supUnit(ch)
-		d.addVis(at, 1, supUnit(ch))
-		d.mirrorVis(at)
+		d.index.bump(at, 1, supUnit(ch))
 		return at, len(at.text) - 1
 	}
 
@@ -864,8 +845,7 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	}
 	at.next = fresh
 	d.indexAdd(fresh)
-	d.index(at, fresh)
-	d.mirror(at, fresh)
+	d.index.insertAfter(at, fresh)
 	return fresh, 0
 }
 
@@ -883,8 +863,7 @@ func (d *Doc) tombstone(op Op) {
 		// While it is still visible, which is what gives it an offset of its own.
 		d.recordDelete(b, i)
 		b.markDeleted(i, op.ID)
-		d.addVis(b, -1, -sup)
-		d.mirrorVis(b)
+		d.index.bump(b, -1, -sup)
 		d.visible--
 		d.sup -= int(sup)
 	case idLess(op.ID, existing):

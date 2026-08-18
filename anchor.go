@@ -64,21 +64,23 @@ func (d *Doc) Visible(anchor ID) bool {
 // it is not.
 //
 // It climbs the index rather than walking the document: the visible characters
-// before a block are those in the subtrees hanging to its left on the way to the
-// root, which is the same descent [Doc.seek] makes, read upwards.
+// before a run are those in its own leaf before it, plus those under every
+// earlier sibling on the way to the root — the same descent [btree.seek] makes,
+// read upwards.
 func (d *Doc) visiblePos(b *block, i int) int {
-	d.flush()
 	n := b.visibleUpto(i)
 	if b.aliveAt(i) {
 		n-- // the character itself is at the offset, not after it
 	}
-	n += int(subVisOf(b.left))
-	for child, p := b, b.up; p != nil; child, p = p, p.up {
-		if p.right == child {
-			n += int(p.subVis - child.subVis)
+	for node, i := b.leaf, int(b.slot); ; {
+		for j := 0; j < i; j++ {
+			n += int(node.vis[j])
 		}
+		if node.up == nil {
+			return n
+		}
+		node, i = node.up, int(node.slot)
 	}
-	return n
 }
 
 // An AuthorRun is a stretch of the visible text one replica wrote.

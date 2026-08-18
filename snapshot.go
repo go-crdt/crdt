@@ -470,7 +470,7 @@ func (d *Doc) adopt(c character, l *ledger) error {
 		// place counted the character as visible, as it is when it arrives; the
 		// snapshot says it was deleted before this replica ever saw it.
 		b.markDeleted(i, c.delID)
-		d.addVis(b, -1, -supUnit(c.ch))
+		d.index.bump(b, -1, -supUnit(c.ch))
 	}
 	if c.clock > d.clock {
 		d.clock = c.clock

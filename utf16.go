@@ -164,26 +164,7 @@ func (d *Doc) DeleteUTF16(pos, length int) ([]Op, error) {
 // every subtree it steps over whole, so it costs the height of the tree rather
 // than the length of the document.
 func (d *Doc) supBefore(pos int) int {
-	d.flush()
-	b := d.tree
-	sup := 0
-	for {
-		if l := b.left; l != nil {
-			if int32(pos) < l.subVis {
-				b = l
-				continue
-			}
-			pos -= int(l.subVis)
-			sup += int(l.subSup)
-		}
-		own := int(b.subVis - subVisOf(b.left) - subVisOf(b.right))
-		if pos < own {
-			return sup + int(b.supBefore(pos))
-		}
-		pos -= own
-		sup += int(b.subSup - subSupOf(b.left) - subSupOf(b.right))
-		b = b.right
-	}
+	return d.index.supBefore(pos)
 }
 
 // runeAtUnit returns the rune offset of the character holding UTF-16 offset u,
@@ -194,33 +175,7 @@ func (d *Doc) supBefore(pos int) int {
 // subVis+subSup of them — and both counts are carried down, because the answer
 // is a character count and the question is a unit count.
 func (d *Doc) runeAtUnit(u int) (int, bool) {
-	d.flush()
-	b := d.tree
-	pos := 0
-	for {
-		if l := b.left; l != nil {
-			units := int(l.subVis + l.subSup)
-			if u < units {
-				b = l
-				continue
-			}
-			u -= units
-			pos += int(l.subVis)
-		}
-		vis := int(b.subVis - subVisOf(b.left) - subVisOf(b.right))
-		units := vis + int(b.subSup-subSupOf(b.left)-subSupOf(b.right))
-		// An offset landing exactly at the end of this block's own characters is
-		// answered here rather than at the start of the next one. Both name the
-		// same position, and stopping here is what lets the walk below treat its
-		// argument as an offset it can always reach.
-		if u <= units {
-			k, split := b.runeAtUnit(u)
-			return pos + k, split
-		}
-		u -= units
-		pos += vis
-		b = b.right
-	}
+	return d.index.runeAtUnit(u)
 }
 
 // visibleSpans yields the stretches of a block still visible, in order. It is

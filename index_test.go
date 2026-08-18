@@ -6,85 +6,48 @@ import (
 	"testing"
 )
 
-// The index in tree.go is not observable: every answer it gives, the list gives
-// too, more slowly. That is exactly what makes it testable — checkIndex walks
-// the list and the tree and requires them to agree, and every test here builds
-// a document some way and then asks.
+// The index in btree.go is not observable: every answer it gives, the list
+// gives too, more slowly. That is exactly what makes it testable — checkIndex
+// walks the list and the tree and requires them to agree, and every test here
+// builds a document some way and then asks.
 
-// checkIndex verifies that the tree holds the same blocks as the list, in the
-// same order, with correct summaries and the AVL invariant.
+// checkIndex verifies that the tree holds the same runs as the list, in the
+// same order, with correct summaries and every invariant a B-tree keeps.
 func checkIndex(t *testing.T, d *Doc) {
 	t.Helper()
-	d.flush()
+	d.index.check(t)
 
-	order := map[*block]int{d.head: 0}
-	n := 1
-	for b := d.head.next; b != nil; b = b.next {
-		order[b] = n
-		n++
-	}
-	if d.tree.up != nil {
-		t.Fatal("the root of the tree has a parent")
-	}
-
-	var walk func(b *block) (count, vis, sup int, min *block, height uint8)
-	walk = func(b *block) (int, int, int, *block, uint8) {
-		count, vis, sup, min, height := 1, b.visibleFrom(0), countAliveSup(b), b, uint8(1)
+	var list []*block
+	vis, sup := 0, 0
+	for b := d.head; b != nil; b = b.next {
+		list = append(list, b)
+		vis += b.visibleFrom(0)
+		sup += countAliveSup(b)
 		if n := countAllSup(b); int(b.nsup) != n {
 			t.Fatalf("block %v claims %d supplementary characters, holds %d", b.id, b.nsup, n)
 		}
-		if l := b.left; l != nil {
-			if l.up != b {
-				t.Fatalf("block %v is the left child of %v but does not point back", l.id, b.id)
-			}
-			if order[l] >= order[b] {
-				t.Fatalf("block %v is left of %v but after it in the document", l.id, b.id)
-			}
-			c, v, s, m, h := walk(l)
-			count, vis, sup, height = count+c, vis+v, sup+s, max(height, h+1)
-			if sortsLower(m, min) {
-				min = m
-			}
-		}
-		if r := b.right; r != nil {
-			if r.up != b {
-				t.Fatalf("block %v is the right child of %v but does not point back", r.id, b.id)
-			}
-			if order[r] <= order[b] {
-				t.Fatalf("block %v is right of %v but before it in the document", r.id, b.id)
-			}
-			c, v, s, m, h := walk(r)
-			count, vis, sup, height = count+c, vis+v, sup+s, max(height, h+1)
-			if sortsLower(m, min) {
-				min = m
-			}
-		}
-		if int(b.subVis) != vis {
-			t.Fatalf("block %v claims %d visible characters below it, holds %d", b.id, b.subVis, vis)
-		}
-		if int(b.subSup) != sup {
-			t.Fatalf("block %v claims %d visible supplementary characters below it, holds %d", b.id, b.subSup, sup)
-		}
-		if b.subMin != min {
-			t.Fatalf("block %v claims %v sorts lowest below it, %v does", b.id, b.subMin.id, min.id)
-		}
-		if b.height != height {
-			t.Fatalf("block %v claims height %d, has %d", b.id, b.height, height)
-		}
-		if l, r := heightOf(b.left), heightOf(b.right); l > r+1 || r > l+1 {
-			t.Fatalf("block %v is out of balance: %d against %d", b.id, l, r)
-		}
-		return count, vis, sup, min, height
 	}
-	count, vis, sup, _, _ := walk(d.tree)
-	if count != len(order) {
-		t.Fatalf("the tree holds %d blocks, the list %d", count, len(order))
+	held := d.index.order()
+	if len(held) != len(list) {
+		t.Fatalf("the tree holds %d runs, the list %d", len(held), len(list))
+	}
+	for i, b := range held {
+		if b != list[i] {
+			t.Fatalf("the tree holds %v at position %d, the list holds %v", b.id, i, list[i].id)
+		}
+	}
+	tvis, tsup := d.index.total()
+	if int(tvis) != vis {
+		t.Fatalf("the tree holds %d visible characters, the list %d", tvis, vis)
+	}
+	if int(tsup) != sup {
+		t.Fatalf("the tree holds %d visible supplementary characters, the list %d", tsup, sup)
 	}
 	if vis != d.visible {
-		t.Fatalf("the tree holds %d visible characters, the document reports %d", vis, d.visible)
+		t.Fatalf("the list holds %d visible characters, the document reports %d", vis, d.visible)
 	}
 	if sup != d.sup {
-		t.Fatalf("the tree holds %d visible supplementary characters, the document reports %d", sup, d.sup)
+		t.Fatalf("the list holds %d visible supplementary characters, the document reports %d", sup, d.sup)
 	}
 }
 
@@ -152,7 +115,7 @@ func TestSeekAgreesWithTheWalk(t *testing.T) {
 	d := fragment(t, 300)
 	text := []rune(d.String())
 	for pos := range text {
-		b, i := d.seek(pos)
+		b, i := d.index.seek(pos)
 		if got := b.text[i]; got != text[pos] {
 			t.Fatalf("seek(%d) found %q, want %q", pos, got, text[pos])
 		}

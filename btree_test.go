@@ -7,9 +7,9 @@ import (
 
 // The B-tree is checked against the answer rather than against itself: a slice
 // of the runs in document order, which is what the index is an index of. Every
-// invariant below is one the AVL index in tree.go already keeps, so the two can
-// be compared directly once this is wired in — and until then this is what says
-// the structure holds.
+// invariant below is one the AVL index it replaced also kept, which is what let
+// the two be compared directly on a real editing history before either was
+// removed.
 
 // order returns the runs the tree holds, left to right.
 func (t *btree) order() []*block {
@@ -32,62 +32,57 @@ func (t *btree) order() []*block {
 // one broke rather than that something did.
 func (t *btree) check(tb testing.TB) {
 	tb.Helper()
-	var walk func(n *bnode, depth int) (vis, sup int32, leafDepth int)
 	depths := map[int]bool{}
-	walk = func(n *bnode, depth int) (int32, int32, int) {
-		if n.isLeaf() {
-			depths[depth] = true
-			var vis, sup int32
-			var min *block
-			for _, r := range n.runs {
-				if r.leaf != n {
-					tb.Fatalf("a run's leaf pointer does not point at the leaf holding it")
-				}
-				vis += runVisible(r)
-				sup += r.visibleSup()
-				if min == nil || sortsLower(r, min) {
-					min = r
-				}
-			}
-			if n.vis != vis || n.sup != sup {
-				tb.Fatalf("a leaf says %d visible and %d supplementary, holds %d and %d",
-					n.vis, n.sup, vis, sup)
-			}
-			if n.min != min {
-				tb.Fatal("a leaf's lowest-sorting run is not the lowest-sorting run it holds")
-			}
-			if len(n.runs) > btreeOrder {
-				tb.Fatalf("a leaf holds %d runs, over the order of %d", len(n.runs), btreeOrder)
-			}
-			return vis, sup, depth
+	var walk func(n *bnode, depth int) (int32, int32, bkey)
+	walk = func(n *bnode, depth int) (int32, int32, bkey) {
+		if len(n.vis) != len(n.sup) || len(n.vis) != len(n.keys) {
+			tb.Fatal("a node's summaries are not all the same length")
 		}
-		if len(n.kids) > btreeOrder {
-			tb.Fatalf("a node holds %d children, over the order of %d", len(n.kids), btreeOrder)
+		if n.isLeaf() && len(n.runs) != len(n.vis) {
+			tb.Fatalf("a leaf holds %d runs and %d summaries", len(n.runs), len(n.vis))
 		}
-		if len(n.kids) < 2 && n != t.root {
-			tb.Fatalf("a node that is not the root holds %d children", len(n.kids))
+		if !n.isLeaf() && len(n.kids) != len(n.vis) {
+			tb.Fatalf("a node holds %d children and %d summaries", len(n.kids), len(n.vis))
+		}
+		if n.count() > btreeOrder {
+			tb.Fatalf("a node holds %d entries, over the order of %d", n.count(), btreeOrder)
+		}
+		if n.count() < 2 && n != t.root {
+			tb.Fatalf("a node that is not the root holds %d entries", n.count())
 		}
 		var vis, sup int32
-		var min *block
-		for _, k := range n.kids {
-			if k.up != n {
-				tb.Fatal("a child does not point back at its parent")
+		var key bkey
+		for i := range n.vis {
+			var kv, ks int32
+			var kk bkey
+			if n.isLeaf() {
+				depths[depth] = true
+				r := n.runs[i]
+				if r.leaf != n || int(r.slot) != i {
+					tb.Fatalf("run %v says it is entry %d of another leaf", r.id, r.slot)
+				}
+				kv, ks, kk = runVisible(r), r.visibleSup(), keyOf(r)
+			} else {
+				k := n.kids[i]
+				if k.up != n || int(k.slot) != i {
+					tb.Fatalf("a child says it is entry %d of another node", k.slot)
+				}
+				kv, ks, kk = walk(k, depth+1)
 			}
-			kv, ks, _ := walk(k, depth+1)
+			if n.vis[i] != kv || n.sup[i] != ks {
+				tb.Fatalf("an entry says %d visible and %d supplementary, holds %d and %d",
+					n.vis[i], n.sup[i], kv, ks)
+			}
+			if n.keys[i] != kk {
+				tb.Fatal("an entry's lowest-sorting character is not the lowest below it")
+			}
 			vis += kv
 			sup += ks
-			if min == nil || (k.min != nil && sortsLower(k.min, min)) {
-				min = k.min
+			if i == 0 || kk.lower(key) {
+				key = kk
 			}
 		}
-		if n.vis != vis || n.sup != sup {
-			tb.Fatalf("a node says %d visible and %d supplementary, holds %d and %d",
-				n.vis, n.sup, vis, sup)
-		}
-		if n.min != min {
-			tb.Fatal("a node's lowest-sorting run is not the lowest of its children's")
-		}
-		return vis, sup, depth
+		return vis, sup, key
 	}
 	walk(t.root, 0)
 	// Every leaf at the same depth is what makes a descent cost the same
@@ -140,8 +135,8 @@ func TestBTreeHoldsItsInvariants(t *testing.T) {
 					t.Fatalf("run %d is not the one inserted there", i)
 				}
 			}
-			if int(tree.root.vis) != n {
-				t.Fatalf("the root says %d visible characters, want %d", tree.root.vis, n)
+			if vis, _ := tree.total(); int(vis) != n {
+				t.Fatalf("the tree says %d visible characters, want %d", vis, n)
 			}
 		})
 	}
@@ -238,7 +233,8 @@ func TestBTreeSeeksToTheEnd(t *testing.T) {
 		at = fresh
 	}
 	runs := tree.order()
-	total := int(tree.root.vis)
+	tvis, _ := tree.total()
+	total := int(tvis)
 
 	got, off := tree.seek(total)
 	if want := runs[len(runs)-1]; got != want {
