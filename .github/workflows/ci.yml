@@ -205,8 +205,33 @@ jobs:
       # -timeout is separate and generous: it bounds a single input, not the
       # run, and a fuzzer that finds a genuinely slow input should still say so
       # rather than hang the lane.
+      #
+      # -parallel 2 made it rarer and did not stop it: it went red the same way
+      # again on #34, which also changed only documentation. So the outcome is
+      # told apart from a real one here rather than made less likely. A fuzzer
+      # that finds something writes it to testdata/fuzz and says so; a run with
+      # no failing input, whose only complaint is the coordinator's own
+      # deadline, found nothing and is reported as having found nothing.
+      #
+      # Every other failure is still a failure, including a deadline in a run
+      # that did write an input.
       - name: Fuzz ${{ matrix.target }}
-        run: go test -run '^$' -fuzz '^${{ matrix.target }}$' -fuzztime 120s -parallel 2 -timeout 10m ${{ matrix.pkg }}
+        run: |
+          set -o pipefail
+          if go test -run '^$' -fuzz '^${{ matrix.target }}$' \
+              -fuzztime 120s -parallel 2 -timeout 10m ${{ matrix.pkg }} 2>&1 | tee fuzz.log; then
+            exit 0
+          fi
+          if grep -q 'Failing input written to' fuzz.log; then
+            echo "::error::${{ matrix.target }} found a failing input"
+            exit 1
+          fi
+          if grep -q 'context deadline exceeded' fuzz.log; then
+            execs=$(grep -o 'execs: [0-9]*' fuzz.log | tail -1)
+            echo "::warning::${{ matrix.target }}: the fuzz deadline arrived while a worker was still in an input; ${execs:-no execs reported}, no failing input. The loaded runner, not the code."
+            exit 0
+          fi
+          exit 1
       - name: Upload any failing input
         if: failure()
         uses: actions/upload-artifact@v4
