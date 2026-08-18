@@ -17,6 +17,71 @@ import (
 // It is not a limit anybody should tighten by shaving a field until it passes.
 // The classes are 16 bytes apart up here, so the difference between 152 and 144
 // is real and the difference between 152 and 150 is nothing at all.
+// The shape a run would have with no per-run index node, which is what a B-tree
+// holding runs in its leaves buys. Neither is built; they exist to size the
+// prize before a project is spent on it, and to keep that size honest as the
+// block changes.
+type runWithoutIndexNode struct {
+	id       ID
+	clock    uint64
+	originID ID
+	text     []rune
+	dels     []delRange
+	next     *block
+	prev     *block
+	nsup     int32
+}
+
+// And again without the list pointers, since a B-tree iterates from its leaves.
+type runInALeaf struct {
+	id       ID
+	clock    uint64
+	originID ID
+	text     []rune
+	dels     []delRange
+	nsup     int32
+}
+
+// sizeClassOf returns the Go size class an allocation of this size lands in.
+func sizeClassOf(size uintptr) uintptr {
+	for _, c := range []uintptr{48, 64, 80, 96, 112, 128, 144, 160, 176, 192} {
+		if size <= c {
+			return c
+		}
+	}
+	return 0
+}
+
+// What the B-tree would buy, in the same units the block is measured in.
+//
+// The previous test says the block cannot lose a size class by shaving its
+// summary, and that the saving would be about 4% anyway. This one says what the
+// other answer is worth, so the two are compared rather than one being assumed
+// to be worth doing because the other is not.
+func TestWhatTheBTreeWouldBuy(t *testing.T) {
+	now := sizeClassOf(unsafe.Sizeof(block{}))
+	noNode := sizeClassOf(unsafe.Sizeof(runWithoutIndexNode{}))
+	inLeaf := sizeClassOf(unsafe.Sizeof(runInALeaf{}))
+	if now == 0 || noNode == 0 || inLeaf == 0 {
+		t.Fatal("a run has grown past every size class this test knows about")
+	}
+
+	t.Logf("a run today                    %3d bytes allocated", now)
+	t.Logf("with no per-run index node     %3d bytes  (%.0f%% less)", noNode, 100*(1-float64(noNode)/float64(now)))
+	t.Logf("and iterating from the leaves  %3d bytes  (%.0f%% less)", inLeaf, 100*(1-float64(inLeaf)/float64(now)))
+
+	// The real trace holds 10 824 runs, and the document it builds holds
+	// 4 541 KiB in total. Runs are the part this changes.
+	const runsOnTheTrace, heldKiB = 10824, 4541
+	saved := float64(runsOnTheTrace) * float64(now-inLeaf) / 1024
+	t.Logf("on the real trace that is %.0f KiB of %d, or %.0f%% of everything the document holds",
+		saved, heldKiB, 100*saved/heldKiB)
+
+	if inLeaf >= now {
+		t.Fatal("the B-tree's prize has gone: a run in a leaf now costs what a block does")
+	}
+}
+
 func TestBlockFitsItsSizeClass(t *testing.T) {
 	size := unsafe.Sizeof(block{})
 

@@ -426,8 +426,33 @@ next person does not look at it again:
   trades a bounded, honest limit for one that fails as silent corruption.
 
 So the block cannot lose a size class without giving something up, and what it
-would save is about 4% of what a real document holds. The B-tree removes the
-per-run node rather than shrinking it, which is a different order of answer.
+would save is about 4% of what a real document holds.
+
+#### What the other answer is worth
+
+The B-tree removes the per-run node rather than shrinking it, and that is a
+different order of answer. `TestWhatTheBTreeWouldBuy` measures it the same way,
+by declaring the shapes and asking Go:
+
+| A run | Allocated | |
+|---|---|---|
+| today | 160 B | |
+| with no per-run index node | **112 B** | 30% less |
+| and iterating from the leaves | **96 B** | 40% less |
+
+The second line drops `left`, `right`, `up`, `subMin`, `subVis`, `subSup` and
+`height`; the third drops `next` and `prev` as well, since a B-tree iterates from
+its leaves and the backwards walk those exist for is what the index replaced.
+
+On the real trace that is **676 KiB of the 4 541 the document holds, about 15%**
+— against the 4% shaving the tail would have bought, for a change that gives up
+nothing. The B-tree's own internal nodes are not free, but at any sensible
+branching factor they are a few percent of the leaves.
+
+That is the case for spending a project on it. It costs the pointer identity of a
+block, which the mark, the per-site index and every walk in `text.go` are written
+in terms of, and it should be built against these two tests: they fail if the
+prize disappears.
 
 ### A second summary, for UTF-16 offsets
 
