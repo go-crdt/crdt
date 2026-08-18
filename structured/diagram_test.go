@@ -1,6 +1,7 @@
 package structured
 
 import (
+	"bytes"
 	"errors"
 	"reflect"
 	"testing"
@@ -230,6 +231,121 @@ func TestDiagramNodePositionForeignBytes(t *testing.T) {
 	applyDiagram(t, d, crdt.PartOps{Part: nodePropsPart, Map: []crdt.MapOp{foreign}})
 	if x, y, ok := d.NodePosition(n); ok {
 		t.Fatalf("NodePosition on foreign bytes = %d,%d,ok", x, y)
+	}
+}
+
+// The generic field accessors reach arbitrary scalar fields — shape, icon,
+// layer — beyond the three the typed setters name, each its own register.
+func TestDiagramGenericNodeAndConnFields(t *testing.T) {
+	d := NewDiagram(1)
+	n1, _, _ := d.AddNode()
+	n2, _, _ := d.AddNode()
+	if _, err := d.SetNodeField(n1, "shape", []byte("cube")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetNodeField(n1, "layer", []byte("base")); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := d.NodeField(n1, "shape"); !ok || string(v) != "cube" {
+		t.Fatalf("NodeField shape = %q,%v", v, ok)
+	}
+	if v, ok := d.NodeField(n1, "layer"); !ok || string(v) != "base" {
+		t.Fatalf("NodeField layer = %q,%v", v, ok)
+	}
+	if _, ok := d.NodeField(n2, "shape"); ok {
+		t.Fatal("NodeField of an unset field = ok")
+	}
+	c, _, err := d.AddConn(n1, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetConnField(c, "arrow", []byte("both")); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := d.ConnField(c, "arrow"); !ok || string(v) != "both" {
+		t.Fatalf("ConnField arrow = %q,%v", v, ok)
+	}
+	if _, ok := d.ConnField(c, "style"); ok {
+		t.Fatal("ConnField of an unset field = ok")
+	}
+}
+
+// The generic accessor and the typed setter share one register: writing "colour"
+// through SetNodeField produces the very same composite bytes as SetNodeColour.
+// This is the retro-compatibility control — the new surface does not fork the
+// storage the old surface uses.
+func TestDiagramGenericFieldSharesStorageWithTyped(t *testing.T) {
+	typed := NewDiagram(1)
+	generic := NewDiagram(1)
+	nt, bt, _ := typed.AddNode()
+	ng, bg, _ := generic.AddNode()
+	if !reflect.DeepEqual(bt, bg) {
+		t.Fatal("two identical AddNode sequences produced different operations")
+	}
+	if _, err := typed.SetNodeColour(nt, "#0f0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generic.SetNodeField(ng, fieldColour, []byte("#0f0")); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(typed.Snapshot(), generic.Snapshot()) {
+		t.Fatal("the generic setter did not write the same bytes as the typed one")
+	}
+	// And it reads back through the typed getter.
+	if col, ok := typed.NodeColour(nt); !ok || col != "#0f0" {
+		t.Fatalf("NodeColour = %q,%v", col, ok)
+	}
+}
+
+// A diagram built with only the pre-existing API encodes exactly as it did before
+// the generic accessors existed: the accessors add reachable fields, not a new
+// on-the-wire shape. Proven by a byte-for-byte snapshot round trip through the
+// unchanged loader.
+func TestDiagramPreExistingAPIUnchanged(t *testing.T) {
+	d := NewDiagram(1)
+	n1, _, _ := d.AddNode()
+	n2, _, _ := d.AddNode()
+	if _, err := d.SetNodePosition(n1, 2, 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetNodeLabel(n1, "start"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.SetNodeColour(n2, "red"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.AddConn(n1, n2); err != nil {
+		t.Fatal(err)
+	}
+	snap := d.Snapshot()
+	loaded, err := LoadDiagram(2, snap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(loaded.Snapshot(), snap) {
+		t.Fatal("a diagram built with the pre-existing API did not reload to itself")
+	}
+}
+
+func TestDiagramGenericFieldRefusesWhenExhausted(t *testing.T) {
+	// Node side.
+	d := NewDiagram(1)
+	n, _, _ := d.AddNode()
+	applyDiagram(t, d, crdt.PartOps{Part: nodePropsPart, Map: []crdt.MapOp{{Kind: crdt.MapSet, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Key: "seed"}}})
+	if _, err := d.SetNodeField(n, "shape", []byte("cube")); !errors.Is(err, crdt.ErrExhausted) {
+		t.Fatalf("SetNodeField = %v, want ErrExhausted", err)
+	}
+	// Connector side.
+	d = NewDiagram(1)
+	n1, _, _ := d.AddNode()
+	n2, _, _ := d.AddNode()
+	c, _, err := d.AddConn(n1, n2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyDiagram(t, d, crdt.PartOps{Part: connPropsPart, Map: []crdt.MapOp{{Kind: crdt.MapSet, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Key: "seed"}}})
+	if _, err := d.SetConnField(c, "arrow", []byte("both")); !errors.Is(err, crdt.ErrExhausted) {
+		t.Fatalf("SetConnField = %v, want ErrExhausted", err)
 	}
 }
 

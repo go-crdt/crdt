@@ -24,8 +24,8 @@ import (
 // exactly, on any platform, js/wasm included.
 
 // A doc is what the harness needs of a replica: to apply peer operations, to
-// state what it holds, and to be compared. Both [Sheet] and [Diagram] are docs,
-// which is the point.
+// state what it holds, and to be compared. [Sheet], [Diagram] and [Document] are
+// all docs, which is the point.
 type doc interface {
 	Apply(...crdt.PartOps) error
 	Snapshot() []byte
@@ -376,6 +376,70 @@ func docTypes() []docType {
 				return &diagramReplica{d: dg}
 			},
 		},
+		{
+			name: "document",
+			mk:   func(s crdt.SiteID) editor { return &documentReplica{d: NewDocument(s)} },
+			load: func(t *testing.T, s crdt.SiteID, snap []byte) editor {
+				doc, err := LoadDocument(s, snap)
+				if err != nil {
+					t.Fatalf("LoadDocument: %v", err)
+				}
+				return &documentReplica{d: doc}
+			},
+		},
+	}
+}
+
+// documentReplica drives a [Document] through all five families and the generic
+// field surface, so the four laws are exercised over the full isometric model:
+// zones, text and layers merging beside nodes and connectors, with concurrent
+// writes to shared, caller-chosen ids.
+type documentReplica struct{ d *Document }
+
+func (r *documentReplica) Apply(b ...crdt.PartOps) error  { return r.d.Apply(b...) }
+func (r *documentReplica) Snapshot() []byte               { return r.d.Snapshot() }
+func (r *documentReplica) Version() crdt.CompositeVersion { return r.d.Version() }
+func (r *documentReplica) Pending() int                   { return r.d.Pending() }
+func (r *documentReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
+	return r.d.OpsSince(v)
+}
+
+// docFields is a small fixed pool of field names so that replicas collide on the
+// same entity and field — which is what makes a concurrent edit a concurrent edit
+// rather than two edits that never meet. The families are the document's own five.
+var docFields = []string{"x", "y", "label", "color", "visible", "order"}
+
+func (r *documentReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
+	t.Helper()
+	d := r.d
+	one := func(b crdt.PartOps, err error) []crdt.PartOps {
+		if err != nil {
+			t.Fatalf("document edit: %v", err)
+		}
+		return []crdt.PartOps{b}
+	}
+	fam := families[rng.IntN(len(families))]
+	id := fmt.Sprintf("e%d", rng.IntN(6)) // a shared six-entity id pool
+	switch rng.IntN(6) {
+	case 0:
+		return one(d.Add(fam, id))
+	case 1:
+		field := docFields[rng.IntN(len(docFields))]
+		return one(d.Set(fam, id, field, EncodeInt(int32(rng.IntN(20))-10)))
+	case 2:
+		field := docFields[rng.IntN(len(docFields))]
+		return one(d.Set(fam, id, field, []byte(fmt.Sprintf("v%d", rng.IntN(50)))))
+	case 3:
+		field := docFields[rng.IntN(len(docFields))]
+		return one(d.Set(fam, id, field, EncodeBool(rng.IntN(2) == 0)))
+	case 4:
+		field := docFields[rng.IntN(len(docFields))]
+		return one(d.DeleteField(fam, id, field))
+	default:
+		if !d.Has(fam, id) {
+			return nil
+		}
+		return one(d.Remove(fam, id))
 	}
 }
 

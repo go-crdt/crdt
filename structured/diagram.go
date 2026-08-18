@@ -210,6 +210,42 @@ func (d *Diagram) NodeColour(n NodeID) (string, bool) {
 	return string(value), true
 }
 
+// SetNodeField writes an arbitrary field of a node and returns the operation to
+// broadcast. It is the generic form of [Diagram.SetNodePosition],
+// [Diagram.SetNodeLabel] and [Diagram.SetNodeColour], for the scalar fields a
+// caller's schema carries beyond those three — a shape, an icon, a layer. Each
+// field is its own LWW-register, so a concurrent write to two of them never
+// conflicts. The value is opaque bytes; a caller storing a number should encode
+// it identically on every architecture, as [EncodeInt] does. Writing the field a
+// typed setter uses ("pos", "label", "colour") reaches the very same register.
+func (d *Diagram) SetNodeField(n NodeID, field string, value []byte) (crdt.PartOps, error) {
+	return d.setNodeField(n, field, value)
+}
+
+// NodeField returns the value of an arbitrary node field and whether it is set.
+// The value is a copy.
+func (d *Diagram) NodeField(n NodeID, field string) ([]byte, bool) {
+	return d.nodeProps.GetField(encodeID(crdt.ID(n)), field)
+}
+
+// SetConnField writes an arbitrary field of a connector and returns the operation
+// to broadcast — the generic form of [Diagram.SetConnEndpoints] for the fields a
+// connector carries beyond its endpoints: a label, a style, an arrow, a colour, a
+// width. Like [Diagram.SetNodeField] each field is its own register.
+func (d *Diagram) SetConnField(c ConnID, field string, value []byte) (crdt.PartOps, error) {
+	op, err := d.connProps.SetField(encodeID(crdt.ID(c)), field, value)
+	if err != nil {
+		return crdt.PartOps{}, err
+	}
+	return crdt.PartOps{Part: connPropsPart, Map: []crdt.MapOp{op}}, nil
+}
+
+// ConnField returns the value of an arbitrary connector field and whether it is
+// set. The value is a copy.
+func (d *Diagram) ConnField(c ConnID, field string) ([]byte, bool) {
+	return d.connProps.GetField(encodeID(crdt.ID(c)), field)
+}
+
 // AddConn adds a connector from one node to another and returns its identity and
 // the operations to broadcast: the connector's own identity, then its endpoints.
 // The endpoints are stored by identity and are not required to name nodes this
