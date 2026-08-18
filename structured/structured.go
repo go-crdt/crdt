@@ -33,6 +33,11 @@
 //     on its own; what does not is the shape two legal moves make between them,
 //     which is a ring. Tree resolves that when the tree is read, by rules that
 //     are a function of the state alone.
+//   - [Sequence] is an ordered collection whose items move. [crdt.List] is an
+//     RGA and has no operation for moving something already in it; written as a
+//     delete and an insert, a move is two operations that a concurrent move
+//     splits, leaving the item in both places or in neither. An item carries
+//     where it sits as a rank instead, so a move is one field write.
 //
 // [Sheet] and [Diagram] are thin wrappers over the same [crdt.Composite]. That
 // they share it is the point: the convergence, commutativity, idempotence and
@@ -137,4 +142,29 @@ func splitFieldKey(key string) (rec, field string, ok bool) {
 		return "", "", false
 	}
 	return rest[:n], rest[n:], true
+}
+
+// mintKey is the one key an identity is drawn from. Its value is never read;
+// what matters is the identity of the operation that wrote it, which is unique
+// to the replica and to the write, and stable across a reload.
+const mintKey = "\x00mint"
+
+// mintID allocates an identity for a new thing, and returns the operation that
+// did it — which has to reach every peer, or the identity is one this replica
+// could mint again after a reload.
+func mintID(m *crdt.Map) (crdt.ID, crdt.MapOp, error) {
+	op, err := m.Set(mintKey, []byte{1})
+	if err != nil {
+		return crdt.ID{}, crdt.MapOp{}, err
+	}
+	return op.ID, op, nil
+}
+
+// idLess is the total order on identities. It settles two things a concurrent
+// edit gave the same rank, which is what makes reading them an order at all.
+func idLess(a, b crdt.ID) bool {
+	if a.Site != b.Site {
+		return a.Site < b.Site
+	}
+	return a.Seq < b.Seq
 }
