@@ -197,19 +197,31 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 		s = uv(s, 1)     // site 1
 		s = uv(s, vvSeq) // at this sequence number
 		s = uv(s, 1)     // one run
-		s = uv(s, 1)     // its site
-		// Version 4 writes the sequence number as a step from the last one this
-		// site used — nothing yet, so from zero — and the clock as the distance
-		// above that sequence number. A clock below its sequence is not
-		// expressible, which is the point of writing it this way; the case that
-		// used to say so is a wrapped distance now, refused against the ceiling.
-		s = uv(s, zigzag(int64(vvSeq)))
-		s = uv(s, clock-vvSeq)
-		s = uv(s, 0)
-		s = uv(s, 0) // origin = root, a step of zero from zero
-		s = uv(s, 1) // one character
-		s = uv(s, 'a')
-		s = uv(s, 0) // no deletions
+		// Version 5 writes each field in a column of its own, length-prefixed.
+		// The sequence number is a step from nothing, and the clock the
+		// distance above it — a clock below its sequence is not expressible,
+		// which is the point of writing it that way.
+		col := func(vs ...uint64) []byte {
+			var b []byte
+			for _, v := range vs {
+				b = uv(b, v)
+			}
+			return b
+		}
+		for _, c := range [][]byte{
+			col(1),                    // run sites
+			col(zigzag(int64(vvSeq))), // run sequence, as a step
+			col(clock - vvSeq),        // clock, as the distance above it
+			col(0),                    // origin site: root
+			col(0),                    // origin sequence, a step of zero
+			col(1),                    // one character
+			col(uint64('a')),          // the text
+			col(0),                    // no deletions
+			nil,                       // and so no deletion fields
+		} {
+			s = uv(s, uint64(len(c)))
+			s = append(s, c...)
+		}
 		s = uv(s, 0) // no duplicate deletes
 		return s
 	}
