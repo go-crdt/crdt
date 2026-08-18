@@ -98,12 +98,22 @@ jobs:
       - name: Fetch the trace
         if: steps.trace.outputs.cache-hit != 'true'
         run: curl -sfLO https://raw.githubusercontent.com/josephg/editing-traces/master/sequential_traces/automerge-paper.json.gz
+      # The whole suite, not one test of it.
+      #
+      # Several tests skip when CRDT_TRACE is unset, and this is the only lane
+      # that sets it. Naming one of them here meant the others never ran
+      # anywhere: TestSnapshotBudget was failing on main for two releases —
+      # the columnar format added nine column lengths it did not account for —
+      # and no lane could see it. A gate that runs one test is a gate that
+      # hides the rest.
       - name: Replay it
         run: |
-          # The test skips when CRDT_TRACE is unset, so prove it did not skip.
-          go test -run TestEditingTrace -v ./... | tee trace.log
+          # The trace tests skip when CRDT_TRACE is unset, so prove they did not.
+          go test -v ./... | tee trace.log
           grep -q 'edits in' trace.log || {
             echo "::error::the editing-trace replay did not run"; exit 1; }
+          grep -q 'runs over' trace.log || {
+            echo "::error::the snapshot budget did not run"; exit 1; }
       - name: Time it
         run: go test -run '^$' -bench EditingTrace -benchtime 3x ./...
 
@@ -170,6 +180,12 @@ jobs:
           - { pkg: ".",           target: FuzzCompositeVersion }
           - { pkg: ".",           target: FuzzParsePartOps }
           - { pkg: "./awareness", target: FuzzUpdate }
+          - { pkg: "./structured", target: FuzzDecodeID }
+          - { pkg: "./structured", target: FuzzDecodeCellKey }
+          - { pkg: "./structured", target: FuzzSplitFieldKey }
+          - { pkg: "./structured", target: FuzzDecodeCell }
+          - { pkg: "./structured", target: FuzzDecodeInt }
+          - { pkg: "./structured", target: FuzzDecodeBool }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

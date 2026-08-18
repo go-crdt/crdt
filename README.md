@@ -24,6 +24,7 @@ Zero dependencies.
 |---|---|
 | `crdt` | the replicated text document (`Doc`), a replicated sequence of values (`List`), a replicated map (`Map`) and a document of named parts (`Composite`) — operations, version vectors, snapshots |
 | `crdt/awareness` | ephemeral presence — who is here and where their cursor is |
+| `crdt/structured` | a shared substrate for co-editing **structured documents** — a collaborative spreadsheet (`Sheet`) and an isometric diagram (`Diagram`) over one core, plus the `Register`, `RecordMap` and `Cell` pieces they compose |
 
 ## Using it
 
