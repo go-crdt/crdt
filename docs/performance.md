@@ -549,10 +549,43 @@ On the real trace that is **676 KiB of the 4 541 the document holds, about 15%**
 nothing. The B-tree's own internal nodes are not free, but at any sensible
 branching factor they are a few percent of the leaves.
 
-That is the case for spending a project on it. It costs the pointer identity of a
-block, which the mark, the per-site index and every walk in `text.go` are written
-in terms of, and it should be built against these two tests: they fail if the
-prize disappears.
+That was the case for spending a project on it. It was spent, and the prize did
+not survive contact — see below.
+
+#### It was built, and it does not pay
+
+The B-tree exists on the `perf/btree` branch: runs in the leaves, summaries in
+the parent, the AVL removed, the whole suite green on the real trace, and its
+answers compared against the AVL's on 104 852 positions and 10 050 integration
+walks before either was taken out.
+
+The table above is right about a run: 152 bytes becomes 120, which is the
+128-byte class instead of the 160-byte one. What it is wrong about is the
+sentence that follows it — that the internal nodes are a few percent of the
+leaves. They are not, because the leaves are not free either. A node carries one
+entry per thing below it, and an entry is two counts, the lowest-sorting key of
+what it holds, and a pointer: twenty-four bytes against the thirty-two a run
+gives back, before the slack of a node that is not full.
+
+That leaves one trade, and it was measured at both ends:
+
+| index | the document holds | allocations, integration walk |
+|---|---|---|
+| the AVL, today | **4 541 KiB** | **15.1k** |
+| B-tree, each node sized to what it holds | 4 389 KiB (−3.3%) | 30.1k (+99%) |
+| B-tree, each node with room to grow | 5 062 KiB (+11.5%) | 16.8k |
+
+A node sized to what it holds recopies all of its summaries on every insertion,
+which doubles the allocations of the walk the index exists to protect and cost
+22% of its time. A node with room to grow allocates like the AVL and costs more
+memory than it saves. The saving in the first row *is* the recopying; they are
+the same fact read two ways.
+
+Nothing here is an argument against the shape. The depth is five rather than
+seventeen and the descent is a scan of one cache line. It is an argument that a
+per-run node costs about what a per-run entry costs, so replacing one with the
+other buys nothing — and that is worth knowing before anyone spends the project
+again.
 
 ### A second summary, for UTF-16 offsets
 
