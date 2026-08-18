@@ -79,15 +79,6 @@ func (t TreeID) String() string { return crdt.ID(t).String() }
 // [decodeID] reads back and not the one String prints.
 func (t TreeID) key() string { return encodeID(crdt.ID(t)) }
 
-// idLess is the total order on identities, used to settle two nodes that a
-// concurrent edit gave the same rank.
-func idLess(a, b TreeID) bool {
-	if a.Site != b.Site {
-		return a.Site < b.Site
-	}
-	return a.Seq < b.Seq
-}
-
 // IsRoot reports whether t names the root rather than a node.
 func (t TreeID) IsRoot() bool { return crdt.ID(t).IsRoot() }
 
@@ -110,12 +101,15 @@ func (t *Tree) Records() *RecordMap { return t.r }
 //
 // It returns the new node's identity and the operations that made it.
 func (t *Tree) Insert(parent, after TreeID) (TreeID, []crdt.MapOp, error) {
-	id := TreeID(t.mint())
-	ops, err := t.place(id, parent, after)
+	fresh, mint, err := mintID(t.Map())
 	if err != nil {
 		return TreeID{}, nil, err
 	}
-	return id, ops, nil
+	ops, err := t.place(TreeID(fresh), parent, after)
+	if err != nil {
+		return TreeID{}, nil, err
+	}
+	return TreeID(fresh), append([]crdt.MapOp{mint}, ops...), nil
 }
 
 // Move puts node under parent, after the sibling named by after. A root TreeID
@@ -312,7 +306,7 @@ func (t *Tree) sortSiblings(nodes []TreeID) {
 		if rank[a] != rank[b] {
 			return rank[a] < rank[b]
 		}
-		return idLess(a, b)
+		return idLess(crdt.ID(a), crdt.ID(b))
 	})
 }
 
@@ -427,32 +421,12 @@ func movedLater(clock uint64, site crdt.SiteID, node TreeID,
 	if site != bestSite {
 		return site > bestSite
 	}
-	return idLess(best, node)
+	return idLess(crdt.ID(best), crdt.ID(node))
 }
 
 func (t *Tree) stampOf(node TreeID) (uint64, crdt.SiteID, bool) {
 	return t.Map().Stamp(fieldKey(node.key(), treeParentField))
 }
-
-// mint allocates an identity for a new node. It comes from a write to the map,
-// so that two replicas never mint the same one.
-func (t *Tree) mint() crdt.ID {
-	// The identity of a node is the identity of the operation that created it,
-	// which is what makes it stable across a reload and unique across replicas.
-	op, err := t.Map().Set(treeMintKey, []byte{1})
-	if err != nil {
-		// Set fails only when the site has no clock left, which is the same
-		// exhaustion every other type here reports through its operation. The
-		// identity returned is then never used: place's own Set fails too.
-		return crdt.ID{}
-	}
-	return op.ID
-}
-
-// treeMintKey is the one key a node identity is drawn from. Its value is never
-// read; what matters is the identity of the operation that wrote it, which is
-// unique to the replica and to the write.
-const treeMintKey = "\x00mint"
 
 // SetField sets one of a node's own fields.
 func (t *Tree) SetField(node TreeID, field string, value []byte) (crdt.MapOp, error) {

@@ -652,3 +652,40 @@ func TestAMoveWithOneClockTickLeft(t *testing.T) {
 		t.Fatal("the node did not go where it was sent")
 	}
 }
+
+// A peer given exactly the operations an edit returned, and nothing else, has
+// to be able to apply them. Sending what OpsSince returns hides a gap in the
+// sequence — the operations park, waiting for one that was never handed over,
+// and the tree silently stops arriving.
+func TestTheOperationsReturnedAreEnoughOnTheirOwn(t *testing.T) {
+	a := NewTree(1)
+	b := NewTree(2)
+
+	parent, ops, err := a.Insert(TreeRoot, TreeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, more, err := a.Insert(parent, TreeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops = append(ops, more...)
+	moved, err := a.Move(child, TreeRoot, parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops = append(ops, moved...)
+
+	if err := b.Apply(ops...); err != nil {
+		t.Fatal(err)
+	}
+	if n := b.Map().Pending(); n != 0 {
+		t.Fatalf("%d operations are parked waiting for one that was not returned", n)
+	}
+	if shapeOf(b) != shapeOf(a) {
+		t.Fatalf("the peer reads\n%s\nthe writer reads\n%s", shapeOf(b), shapeOf(a))
+	}
+	if len(b.Nodes()) != 2 {
+		t.Fatalf("the peer holds %d nodes, want 2", len(b.Nodes()))
+	}
+}
