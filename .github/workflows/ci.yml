@@ -180,6 +180,10 @@ jobs:
           - { pkg: ".",           target: FuzzCompositeVersion }
           - { pkg: ".",           target: FuzzParsePartOps }
           - { pkg: "./awareness", target: FuzzUpdate }
+          - { pkg: "./structured", target: FuzzDecodeID }
+          - { pkg: "./structured", target: FuzzDecodeCellKey }
+          - { pkg: "./structured", target: FuzzSplitFieldKey }
+          - { pkg: "./structured", target: FuzzDecodeCell }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

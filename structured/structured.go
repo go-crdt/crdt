@@ -1,0 +1,127 @@
+// Package structured turns the replicated primitives of the crdt package into a
+// shared substrate for co-editing structured documents. One core expresses
+// both a spreadsheet and an isometric diagram — and any other structured
+// document — rather than each growing a merge engine of its own.
+//
+// # One core, many document types
+//
+// Nothing here re-implements a CRDT. The merge logic lives entirely in the crdt
+// package, and this layer only composes three of its structures:
+//
+//   - [crdt.List] is an RGA: an ordered sequence whose every element carries a
+//     stable identity that survives concurrent insertion and deletion elsewhere.
+//     It is the backbone for a spreadsheet's rows and columns, and — with its
+//     order ignored — a reload-safe source of stable identities and an existence
+//     set for a diagram's nodes and connectors.
+//   - [crdt.Map] is a last-writer-wins key-value map. Each key is, on its own, an
+//     LWW-register: a single value merged by a (Lamport clock, site) total order
+//     with no tie left to chance and no wall clock read. [Register] names that
+//     degenerate case, and [RecordMap] composes many such registers into records
+//     whose fields merge independently.
+//   - [crdt.Composite] holds those parts under one name, one snapshot and one
+//     version, so a whole document is one thing to persist and to authorise.
+//
+// [Sheet] and [Diagram] are thin wrappers over the same [crdt.Composite]. That
+// they share it is the point: the convergence, commutativity, idempotence and
+// associativity the crdt package proves for its parts are inherited by every
+// document type built here, because there is only ever one set of parts doing
+// the merging.
+//
+// # Determinism
+//
+// Like the crdt package, this one never reads the wall clock and never draws a
+// random number, so a document compiled to js/wasm behaves exactly as it does
+// on a server. Replica identity is the caller's [crdt.SiteID]; stable element
+// identities are minted by the RGA, which is why they are reload-safe and never
+// reused, even across a deletion.
+//
+// # What is replicated and what is not
+//
+// The raw content of a cell — a literal or a formula's source text together with
+// the stable identities it references — is replicated. A formula's computed
+// value is not: it is derived locally from content every replica already agrees
+// on, so replicating it would be replicating a function of the state rather than
+// the state. This package is the data layer; it holds no formula engine and no
+// widget.
+package structured
+
+import (
+	"strconv"
+	"strings"
+
+	"github.com/go-crdt/crdt"
+)
+
+// encodeID renders a stable identity as a UTF-8 token "site.seq", so it can be
+// part of a [crdt.Map] key, which must be valid UTF-8. Both fields are decimal,
+// so the single '.' is unambiguous and the encoding is injective.
+func encodeID(id crdt.ID) string {
+	return strconv.FormatUint(uint64(id.Site), 10) + "." + strconv.FormatUint(id.Seq, 10)
+}
+
+// decodeID reverses [encodeID]. It reports failure rather than trusting its
+// input, because a selection published by a peer reaches it; see the awareness
+// wiring.
+func decodeID(s string) (crdt.ID, bool) {
+	dot := strings.IndexByte(s, '.')
+	if dot < 0 {
+		return crdt.ID{}, false
+	}
+	site, err1 := strconv.ParseUint(s[:dot], 10, 64)
+	seq, err2 := strconv.ParseUint(s[dot+1:], 10, 64)
+	if err1 != nil || err2 != nil {
+		return crdt.ID{}, false
+	}
+	return crdt.ID{Site: crdt.SiteID(site), Seq: seq}, true
+}
+
+// cellKey is the [crdt.Map] key a cell is stored under: the row and column
+// identities together, which is what keeps a cell's address stable when a
+// concurrent edit inserts or removes some other row or column. Because neither
+// identity contains a ':', the join is unambiguous and injective.
+func cellKey(row RowID, col ColID) string {
+	return encodeID(crdt.ID(row)) + ":" + encodeID(crdt.ID(col))
+}
+
+// decodeCellKey reverses [cellKey]. Like [decodeID] it refuses malformed input,
+// because a cell coordinate travels in an awareness selection.
+func decodeCellKey(s string) (RowID, ColID, bool) {
+	colon := strings.IndexByte(s, ':')
+	if colon < 0 {
+		return RowID{}, ColID{}, false
+	}
+	row, ok1 := decodeID(s[:colon])
+	col, ok2 := decodeID(s[colon+1:])
+	if !ok1 || !ok2 {
+		return RowID{}, ColID{}, false
+	}
+	return RowID(row), ColID(col), true
+}
+
+// fieldKey is the [crdt.Map] key one field of one record is stored under. The
+// record identity is length-prefixed so that the split back into record and
+// field is exact whatever either contains — a record identity holds a '.', and a
+// field name is arbitrary, so neither a separator search nor a fixed width would
+// do. The length is decimal and the identity valid UTF-8, so the key is too.
+func fieldKey(rec, field string) string {
+	return strconv.Itoa(len(rec)) + "." + rec + field
+}
+
+// splitFieldKey reverses [fieldKey], reporting failure for a key that was not
+// written by it — which a peer may inject, since a [crdt.Map] holds whatever key
+// an applied operation names.
+func splitFieldKey(key string) (rec, field string, ok bool) {
+	dot := strings.IndexByte(key, '.')
+	if dot <= 0 {
+		return "", "", false
+	}
+	n, err := strconv.Atoi(key[:dot])
+	if err != nil || n < 0 {
+		return "", "", false
+	}
+	rest := key[dot+1:]
+	if n > len(rest) {
+		return "", "", false
+	}
+	return rest[:n], rest[n:], true
+}
