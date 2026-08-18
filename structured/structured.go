@@ -21,6 +21,19 @@
 //   - [crdt.Composite] holds those parts under one name, one snapshot and one
 //     version, so a whole document is one thing to persist and to authorise.
 //
+// Two things a map and a list do not express are built here rather than added
+// to the crdt package, because neither needs a new merge rule — only a way of
+// using the ones that exist:
+//
+//   - [Counter] is a number several replicas add to at once. A register cannot
+//     be one, because "add one" is not a value and writing a value cannot say
+//     it. Keying the map by site, so that a replica writes only its own total,
+//     makes concurrent additions concurrent writes to different keys.
+//   - [Tree] is a tree whose nodes move. A parent is a single value and merges
+//     on its own; what does not is the shape two legal moves make between them,
+//     which is a ring. Tree resolves that when the tree is read, by rules that
+//     are a function of the state alone.
+//
 // [Sheet] and [Diagram] are thin wrappers over the same [crdt.Composite]. That
 // they share it is the point: the convergence, commutativity, idempotence and
 // associativity the crdt package proves for its parts are inherited by every

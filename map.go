@@ -343,6 +343,23 @@ func (m *Map) mint() (ID, uint64) {
 	return ID{Site: m.site, Seq: m.vv[m.site] + 1}, m.clock
 }
 
+// Site returns the replica this map writes as. [Doc] and [List] answer the same
+// question the same way.
+func (m *Map) Site() SiteID { return m.site }
+
+// Stamp returns the (clock, site) the current value of key was written at, and
+// whether the key is live. It is the total order the map resolves concurrent
+// writes by, made readable so that something built on the map can order two
+// writes the same way the map did — see structured.Tree, which has to decide
+// which of two concurrent moves happened later.
+func (m *Map) Stamp(key string) (clock uint64, site SiteID, ok bool) {
+	rec, held := m.records[key]
+	if !held || rec.dead {
+		return 0, 0, false
+	}
+	return rec.clock, rec.id.Site, true
+}
+
 // Get returns the value stored at key, and whether the key is present. The value
 // is a copy: writing to it does not change what the map holds.
 //
