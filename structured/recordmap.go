@@ -78,6 +78,20 @@ func (r *RecordMap) Fields(rec string) []string {
 	return out
 }
 
+// HasRecord reports whether a record has at least one live field — which is what
+// it means for it to exist. It stops at the first, so it does not build the whole
+// field list a membership test does not need. A foreign key an operation injected
+// that this map's own writes could not have produced is not a field and does not
+// make a record exist.
+func (r *RecordMap) HasRecord(rec string) bool {
+	for _, key := range r.m.Keys() {
+		if got, _, ok := splitFieldKey(key); ok && got == rec {
+			return true
+		}
+	}
+	return false
+}
+
 // Records returns the identities of every record with at least one live field,
 // ascending. A key an operation injected that this map's own writes could not
 // have produced is not a record and is skipped.

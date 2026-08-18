@@ -184,6 +184,8 @@ jobs:
           - { pkg: "./structured", target: FuzzDecodeCellKey }
           - { pkg: "./structured", target: FuzzSplitFieldKey }
           - { pkg: "./structured", target: FuzzDecodeCell }
+          - { pkg: "./structured", target: FuzzDecodeInt }
+          - { pkg: "./structured", target: FuzzDecodeBool }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
