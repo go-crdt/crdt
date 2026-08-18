@@ -225,6 +225,11 @@ type List struct {
 	pending map[ID][]ListOp
 	parked  int
 
+	// parkSlab is where a parked operation's one-element slice comes from; see
+	// Doc.parkSlab, which explains why one allocation per parked operation was
+	// worth removing and why widening the map's value instead was not.
+	parkSlab []ListOp
+
 	dupDeletes map[ID]ID
 	present    int
 }
@@ -458,7 +463,17 @@ func (l *List) park(op ListOp) {
 		l.pending = map[ID][]ListOp{}
 	}
 	waitingFor := l.blockedOn(op)
-	l.pending[waitingFor] = append(l.pending[waitingFor], op)
+	if held := l.pending[waitingFor]; held != nil {
+		l.pending[waitingFor] = append(held, op)
+		l.parked++
+		return
+	}
+	if len(l.parkSlab) == cap(l.parkSlab) {
+		l.parkSlab = make([]ListOp, 0, parkChunk)
+	}
+	n := len(l.parkSlab)
+	l.parkSlab = append(l.parkSlab, op)
+	l.pending[waitingFor] = l.parkSlab[n : n+1 : n+1]
 	l.parked++
 }
 

@@ -3,6 +3,7 @@ package crdt
 import (
 	"fmt"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -424,6 +425,59 @@ func BenchmarkParsePartOps(b *testing.B) {
 	for range b.N {
 		if _, err := ParsePartOps(message); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// Applying a history back to front, which is the shape that parks everything:
+// nothing is applicable until the last operation arrives, so every one before
+// it waits. Doc has such a benchmark against a real editing trace;
+// these are the same question asked of the other two types, which park the
+// same way and had nothing measuring them under it.
+func BenchmarkApplyListReversed(b *testing.B) {
+	src := NewList(1)
+	var ops []ListOp
+	for i := range benchSize {
+		got, err := src.Insert(i, []byte{byte(i)})
+		if err != nil {
+			b.Fatal(err)
+		}
+		ops = append(ops, got...)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		b.StopTimer()
+		l := NewList(2)
+		b.StartTimer()
+		for i := len(ops) - 1; i >= 0; i-- {
+			if err := l.Apply(ops[i]); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+}
+
+func BenchmarkApplyMapReversed(b *testing.B) {
+	src := NewMap(1)
+	var ops []MapOp
+	for i := range benchSize {
+		got, err := src.Set(strconv.Itoa(i), []byte{byte(i)})
+		if err != nil {
+			b.Fatal(err)
+		}
+		ops = append(ops, got)
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for range b.N {
+		b.StopTimer()
+		m := NewMap(2)
+		b.StartTimer()
+		for i := len(ops) - 1; i >= 0; i-- {
+			if err := m.Apply(ops[i]); err != nil {
+				b.Fatal(err)
+			}
 		}
 	}
 }
