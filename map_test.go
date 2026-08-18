@@ -1328,3 +1328,47 @@ func FuzzLoadMap(f *testing.F) {
 		}
 	})
 }
+
+// Site and Stamp are what something built on a map needs to order two writes
+// the same way the map did — see structured.Tree, which decides which of two
+// concurrent moves happened later.
+func TestMapSiteAndStamp(t *testing.T) {
+	m := NewMap(7)
+	if m.Site() != 7 {
+		t.Fatalf("the map writes as site %d, want 7", m.Site())
+	}
+
+	if _, _, ok := m.Stamp("absent"); ok {
+		t.Fatal("a key that was never written has a stamp")
+	}
+
+	op, err := m.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock, site, ok := m.Stamp("k")
+	if !ok {
+		t.Fatal("a key that was just written has no stamp")
+	}
+	if clock != op.Clock || site != op.ID.Site {
+		t.Fatalf("the stamp is (%d, %d), want the write's (%d, %d)",
+			clock, site, op.Clock, op.ID.Site)
+	}
+
+	// A peer's write that wins takes the stamp with it.
+	high := MapOp{Kind: MapSet, ID: ID{Site: 9, Seq: 1}, Clock: op.Clock + 1, Key: "k", Value: []byte("w")}
+	if err := m.Apply(high); err != nil {
+		t.Fatal(err)
+	}
+	if clock, site, _ := m.Stamp("k"); clock != high.Clock || site != 9 {
+		t.Fatalf("after a peer's write the stamp is (%d, %d), want (%d, 9)", clock, site, high.Clock)
+	}
+
+	// A deleted key has no stamp, even though the map keeps its clock.
+	if _, err := m.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := m.Stamp("k"); ok {
+		t.Fatal("a deleted key still reports a stamp")
+	}
+}
