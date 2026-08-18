@@ -326,7 +326,6 @@ type runBuilder struct {
 	runs  []encodedRun
 	count int // overrides the encoded number of runs
 	tail  []byte
-	ver   byte
 }
 
 type encodedRun struct {
@@ -339,10 +338,7 @@ type encodedRun struct {
 
 func (b runBuilder) build() []byte {
 	out := append([]byte{}, "crdt"...)
-	version := b.ver
-	if version == 0 {
-		version = snapshotVersion
-	}
+	const version = snapshotVersion
 	lastDel := map[SiteID]uint64{}
 	lastRun := map[SiteID]uint64{}
 	lastOrigin := map[SiteID]uint64{}
@@ -357,59 +353,60 @@ func (b runBuilder) build() []byte {
 		n = len(b.runs)
 	}
 	out = binary.AppendUvarint(out, uint64(n))
+
+	// A case names a run's sequence, clock and origin outright, because that is
+	// what a reader of the test wants to see; the encodings are applied here.
+	// Version 4 writes the two sequence numbers as steps and the clock as the
+	// distance above the run's own sequence. Version 5 writes each field in a
+	// column of its own, which is the same bytes in a different order.
+	//
+	// A case that asks for a clock below the sequence — which no honest replica
+	// can produce — still encodes: the subtraction wraps, and the enormous
+	// distance is refused against the ceiling instead of against the sequence.
+	// The case still fails to load, which is what it asserts.
+	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields []byte
 	for _, r := range b.runs {
-		// A case names the run's sequence, clock and origin outright, because
-		// that is what a reader of the test wants to see. Version 4 writes the
-		// two sequence numbers as steps and the clock as the distance above the
-		// run's own sequence, so the conversion happens here.
-		//
-		// A case that asks for a clock below the sequence — which no honest
-		// replica can produce — still encodes: the subtraction wraps, and the
-		// enormous distance is refused against the ceiling instead of against
-		// the sequence. The case still fails to load, which is what it asserts.
-		if version >= snapshotVersion {
-			out = binary.AppendUvarint(out, r.site)
-			out = binary.AppendUvarint(out, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
-			lastRun[SiteID(r.site)] = r.seq
-			out = binary.AppendUvarint(out, r.clock-r.seq)
-			out = binary.AppendUvarint(out, r.originSite)
-			out = binary.AppendUvarint(out, zigzag(int64(r.originSeq)-int64(lastOrigin[SiteID(r.originSite)])))
-			lastOrigin[SiteID(r.originSite)] = r.originSeq
-		} else {
-			for _, v := range []uint64{r.site, r.seq, r.clock, r.originSite, r.originSeq} {
-				out = binary.AppendUvarint(out, v)
-			}
-		}
+		runSites = binary.AppendUvarint(runSites, r.site)
+		seqs = binary.AppendUvarint(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
+		lastRun[SiteID(r.site)] = r.seq
+		clocks = binary.AppendUvarint(clocks, r.clock-r.seq)
+		oSites = binary.AppendUvarint(oSites, r.originSite)
+		oSeqs = binary.AppendUvarint(oSeqs, zigzag(int64(r.originSeq)-int64(lastOrigin[SiteID(r.originSite)])))
+		lastOrigin[SiteID(r.originSite)] = r.originSeq
 		length := r.length
 		if length == 0 {
 			length = uint64(len(r.text))
 		}
-		out = binary.AppendUvarint(out, length)
+		lengths = binary.AppendUvarint(lengths, length)
 		for _, ch := range r.text {
-			out = binary.AppendUvarint(out, uint64(ch))
+			text = binary.AppendUvarint(text, uint64(ch))
 		}
 		dn := r.delCount
 		if dn == 0 {
 			dn = len(r.dels)
 		}
-		out = binary.AppendUvarint(out, uint64(dn))
+		delCounts = binary.AppendUvarint(delCounts, uint64(dn))
 		for _, d := range r.dels {
-			// A case names the deleting operation by its absolute sequence
-			// number, because that is what a reader of the test wants to see.
-			// Version 3 writes it as a step from the last one that site used,
-			// so the conversion happens here rather than in every case.
-			out = binary.AppendUvarint(out, d[0])
-			out = binary.AppendUvarint(out, d[1])
-			out = binary.AppendUvarint(out, d[2])
-			if version >= snapshotVersionV3 {
-				site := SiteID(d[2])
-				out = binary.AppendUvarint(out, zigzag(int64(d[3])-int64(lastDel[site])))
-				lastDel[site] = d[3]
-			} else {
-				out = binary.AppendUvarint(out, d[3])
-			}
+			delFields = binary.AppendUvarint(delFields, d[0])
+			delFields = binary.AppendUvarint(delFields, d[1])
+			delFields = binary.AppendUvarint(delFields, d[2])
+			site := SiteID(d[2])
+			delFields = binary.AppendUvarint(delFields, zigzag(int64(d[3])-int64(lastDel[site])))
+			lastDel[site] = d[3]
 		}
 	}
+	// Version 5 writes each field in a column of its own, length-prefixed.
+	//
+	// There is no branch here for the versions before it. This builder only
+	// ever produced the current format — nothing has ever set b.ver — and an
+	// interleaved branch that has never run is a branch that is wrong. The
+	// older formats are covered by fixtures written by the builds that
+	// produced them, which is a stronger check than a builder imitating them.
+	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields} {
+		out = binary.AppendUvarint(out, uint64(len(col)))
+		out = append(out, col...)
+	}
+
 	out = binary.AppendUvarint(out, 0) // no duplicate deletions
 	return append(out, b.tail...)
 }
@@ -692,5 +689,124 @@ func TestLoadRejectsTruncatedVersionTwoSnapshots(t *testing.T) {
 		if _, err := Load(2, raw[:n]); err == nil {
 			t.Fatalf("Load(%d of %d bytes) succeeded, want an error", n, len(raw))
 		}
+	}
+}
+
+// A version 5 snapshot is nine length-prefixed columns, and each of the ways
+// that can be wrong has to be refused rather than half-read.
+//
+// These are failure modes the format did not have before: interleaved fields
+// end where the runs end, but a column carries its own length and can claim
+// more bytes than exist, or fewer than the runs need, or more than they use.
+// The last is the one worth stating: bytes left over in a column describe runs
+// the count did not claim, which would make two byte strings for one document.
+func TestLoadRejectsMalformedColumns(t *testing.T) {
+	good := wellFormedRun().build()
+	if _, err := Load(2, good); err != nil {
+		t.Fatalf("the fixture does not load: %v", err)
+	}
+
+	// Where the columns start: past the magic, the version, the version-vector
+	// table and the run count.
+	head := len(snapshotMagic) + 1
+	r := &reader{buf: good[head:]}
+	nSites, _ := r.uvarint()
+	for range nSites {
+		r.uvarint()
+		r.uvarint()
+	}
+	r.uvarint() // the run count
+	colsAt := len(good) - len(r.buf)
+
+	tests := []struct {
+		name  string
+		alter func([]byte) []byte
+	}{
+		{"a column claiming more bytes than the snapshot holds", func(b []byte) []byte {
+			out := append([]byte{}, b[:colsAt]...)
+			out = binary.AppendUvarint(out, 1<<20)
+			return append(out, b[colsAt+1:]...)
+		}},
+		{"a column cut short", func(b []byte) []byte {
+			// Drop the last byte of the last column, so its length overruns.
+			return b[:len(b)-2]
+		}},
+		{"a column that runs out before the runs do", func(b []byte) []byte {
+			// The run count still says one, and the column of sites is empty:
+			// the field the first run needs is simply not there. Nothing about
+			// the length is wrong, which is what makes this a different
+			// refusal from the three around it.
+			out := append([]byte{}, b[:colsAt]...)
+			out = binary.AppendUvarint(out, 0) // an empty sites column
+			return append(out, b[colsAt+2:]...)
+		}},
+		{"a column with bytes to spare", func(b []byte) []byte {
+			// One more site than there are runs: the column is longer than the
+			// count consumes, and what is left over is a run nobody claimed.
+			out := append([]byte{}, b[:colsAt]...)
+			out = binary.AppendUvarint(out, 2) // the sites column, now two bytes
+			out = append(out, b[colsAt+1], 9)  // its byte, and one nobody reads
+			return append(out, b[colsAt+2:]...)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Load(2, tt.alter(append([]byte{}, good...))); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Load() = %v, want ErrMalformed", err)
+			}
+		})
+	}
+}
+
+// Truncating a version 3 snapshot anywhere must fail, as truncating a version 1
+// or a version 2 one must. It is also the only thing that exercises reading a
+// run header from a version that wrote it in full rather than in columns and
+// stopped mid-field.
+func TestLoadRejectsTruncatedVersionThreeSnapshots(t *testing.T) {
+	encoded, err := os.ReadFile("testdata/v3-snapshot.base64")
+	if err != nil {
+		t.Fatalf("reading the fixture: %v", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil {
+		t.Fatalf("decoding the fixture: %v", err)
+	}
+	for n := range len(raw) {
+		if _, err := Load(2, raw[:n]); err == nil {
+			t.Fatalf("Load(%d of %d bytes) succeeded, want an error", n, len(raw))
+		}
+	}
+}
+
+// A deletion whose fields run out part way through. The count says there is a
+// stretch to read and the column has room for a byte of it, so the refusal has
+// to come from the field that is missing rather than from the length.
+func TestLoadRejectsADeletionCutOffMidField(t *testing.T) {
+	b := wellFormedRun()
+	good := b.build()
+	if _, err := Load(2, good); err != nil {
+		t.Fatalf("the fixture does not load: %v", err)
+	}
+	// The deletion-fields column is the last one; keep one byte of it.
+	head := len(snapshotMagic) + 1
+	r := &reader{buf: good[head:]}
+	nSites, _ := r.uvarint()
+	for range nSites {
+		r.uvarint()
+		r.uvarint()
+	}
+	r.uvarint()
+	at := len(good) - len(r.buf)
+	for range 8 { // the eight columns before the deletion fields
+		n, _ := r.uvarint()
+		r.bytes(int(n))
+	}
+	at = len(good) - len(r.buf)
+	cut := append([]byte{}, good[:at]...)
+	cut = binary.AppendUvarint(cut, 1) // one byte of deletion fields
+	cut = append(cut, good[at+1])      // the gap, and nothing after it
+	cut = binary.AppendUvarint(cut, 0) // no duplicate deletions
+	if _, err := Load(2, cut); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("Load() = %v, want ErrMalformed", err)
 	}
 }

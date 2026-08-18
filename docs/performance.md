@@ -240,6 +240,18 @@ whoever stores or sends them compresses. A plain whole-blob compression of the
 columnar layout gives 97 811 rather than 96 703, which is the price of keeping
 the boundary in the right place.
 
+#### And so, version 5
+
+The format writes the columns. Each is length-prefixed, so whoever stores a
+snapshot can take them apart and compress them one at a time. Measured on the
+same document: **115 KB with the standard library's flate**, against 148 for
+version 4, and about 106 with brotli at quality 9 — under diamond-types' 109,
+with the one dependency and without it we are level.
+
+Small documents pay a little for it: nine column lengths is nine bytes, so the
+version 2 fixture grows from 96 bytes to 105. This is a format for documents,
+and a document with two runs in it is not the one the 478 KB came from.
+
 ### Memory
 
 Only where it can be read honestly. Yjs is JavaScript, so `heapUsed` after a
