@@ -153,7 +153,24 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - run: sudo apt-get update && sudo apt-get install -y qemu-user-static
+      # apt has sat on this step for the better part of an hour, more than once,
+      # on the install rather than on anything this repository does. It is
+      # bounded and retried rather than waited on: three attempts of ten minutes
+      # each, and a lane that gives up says so instead of looking busy.
+      - name: Install qemu-user-static
+        run: |
+          for attempt in 1 2 3; do
+            if timeout 600 sudo apt-get update -qq \
+                && timeout 600 sudo apt-get install -y -qq qemu-user-static; then
+              exit 0
+            fi
+            echo "::warning::apt attempt $attempt did not finish in ten minutes; retrying"
+            sudo pkill -9 -x apt-get || true
+            sudo rm -f /var/lib/apt/lists/lock /var/cache/apt/archives/lock /var/lib/dpkg/lock*
+            sudo dpkg --configure -a || true
+          done
+          echo "::error::qemu-user-static could not be installed in three attempts"
+          exit 1
       - name: Test under qemu (${{ matrix.goarch }})
         run: GOARCH=${{ matrix.goarch }} go test -exec=${{ matrix.qemu }} ./...
 

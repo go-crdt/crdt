@@ -83,6 +83,11 @@ func (s *Sequence) Records() *RecordMap { return s.r }
 
 // Insert puts a new item holding value after the item named by after, or at the
 // front for [SeqStart].
+//
+// A nil value writes no value at all, which is one operation fewer and is what
+// a sequence whose items are identities rather than contents wants — the axes
+// of a [Sheet], where the item is the row and the row has no value of its own.
+// It is not the same as an empty value, which is written.
 func (s *Sequence) Insert(after ItemID, value []byte) (ItemID, []crdt.MapOp, error) {
 	if !after.IsStart() && !s.r.HasRecord(after.key()) {
 		return ItemID{}, nil, crdt.ErrInvalidOp
@@ -95,6 +100,9 @@ func (s *Sequence) Insert(after ItemID, value []byte) (ItemID, []crdt.MapOp, err
 	setRank, err := s.rank(item, after)
 	if err != nil {
 		return ItemID{}, nil, err
+	}
+	if value == nil {
+		return item, []crdt.MapOp{mint, setRank}, nil
 	}
 	setValue, err := s.r.SetField(item.key(), seqValueField, value)
 	if err != nil {

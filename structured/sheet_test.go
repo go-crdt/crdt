@@ -16,6 +16,26 @@ func applyAll(t *testing.T, s *Sheet, batches ...crdt.PartOps) {
 	}
 }
 
+// mustRow and mustCol add one, discarding the operations: the tests below that
+// use them are about what the sheet reads, not about what it broadcasts.
+func mustRow(t *testing.T, s *Sheet) RowID {
+	t.Helper()
+	id, _, err := s.AppendRow()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func mustCol(t *testing.T, s *Sheet) ColID {
+	t.Helper()
+	id, _, err := s.AppendCol()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 // baseSheet builds two synchronised replicas with rows r0,r1 and column c0, and
 // returns them together with those identities.
 func baseSheet(t *testing.T) (a, b *Sheet, r0, r1 RowID, c0 ColID) {
@@ -268,33 +288,47 @@ func TestSheetSnapshotRoundTrip(t *testing.T) {
 }
 
 // Every local edit refuses rather than wrapping the clock once a peer has driven
-// it to the ceiling. The list and the map are separate parts with separate
-// clocks, so each is exhausted on its own.
+// it to the ceiling. The three parts have separate clocks, so each is exhausted
+// on its own.
 func TestSheetEditsRefuseWhenClockExhausted(t *testing.T) {
 	s := NewSheet(1)
-	// Exhaust the rows list clock, and leave a row present to delete.
-	topRow := crdt.ListOp{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{axisMark}}
-	applyAll(t, s, crdt.PartOps{Part: rowsPart, List: []crdt.ListOp{topRow}})
+	// Two rows and two columns to work on, made while there is still clock.
+	mustRow(t, s)
+	mustRow(t, s)
+	mustCol(t, s)
+	mustCol(t, s)
+	rows, cols := s.Rows(), s.Cols()
+
+	ceiling := func(part crdt.Part) {
+		t.Helper()
+		top := crdt.MapOp{Kind: crdt.MapSet, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock,
+			Key: fieldKey("other", "g"), Value: []byte("x")}
+		applyAll(t, s, crdt.PartOps{Part: part, Map: []crdt.MapOp{top}})
+	}
+
+	ceiling(rowsPart)
 	if _, _, err := s.AppendRow(); !errors.Is(err, crdt.ErrExhausted) {
 		t.Fatalf("AppendRow = %v, want ErrExhausted", err)
+	}
+	if _, err := s.MoveRow(0, 1); !errors.Is(err, crdt.ErrExhausted) {
+		t.Fatalf("MoveRow = %v, want ErrExhausted", err)
 	}
 	if _, err := s.DeleteRow(0); !errors.Is(err, crdt.ErrExhausted) {
 		t.Fatalf("DeleteRow = %v, want ErrExhausted", err)
 	}
-	// Same for the columns list.
-	topCol := crdt.ListOp{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{axisMark}}
-	applyAll(t, s, crdt.PartOps{Part: colsPart, List: []crdt.ListOp{topCol}})
+
+	ceiling(colsPart)
 	if _, _, err := s.AppendCol(); !errors.Is(err, crdt.ErrExhausted) {
 		t.Fatalf("AppendCol = %v, want ErrExhausted", err)
+	}
+	if _, err := s.MoveCol(0, 1); !errors.Is(err, crdt.ErrExhausted) {
+		t.Fatalf("MoveCol = %v, want ErrExhausted", err)
 	}
 	if _, err := s.DeleteCol(0); !errors.Is(err, crdt.ErrExhausted) {
 		t.Fatalf("DeleteCol = %v, want ErrExhausted", err)
 	}
-	// And the cells map.
-	rows := s.Rows()
-	cols := s.Cols()
-	topCell := crdt.MapOp{Kind: crdt.MapSet, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Key: "seed"}
-	applyAll(t, s, crdt.PartOps{Part: cellsPart, Map: []crdt.MapOp{topCell}})
+
+	ceiling(cellsPart)
 	if _, err := s.SetCell(rows[0], cols[0], Literal("v")); !errors.Is(err, crdt.ErrExhausted) {
 		t.Fatalf("SetCell = %v, want ErrExhausted", err)
 	}
@@ -305,4 +339,192 @@ func TestSheetEditsRefuseWhenClockExhausted(t *testing.T) {
 
 func reflectEqualSnapshot(a, b *Sheet) bool {
 	return reflect.DeepEqual(a.Snapshot(), b.Snapshot())
+}
+
+// rowOrder reads the rows as the positions of the identities given, so a
+// reordering can be stated as a line rather than as four comparisons.
+func rowOrder(s *Sheet, named map[RowID]string) string {
+	out := ""
+	for _, row := range s.Rows() {
+		if out != "" {
+			out += " "
+		}
+		out += named[row]
+	}
+	return out
+}
+
+// A row can be dragged to another place, which is what the axes became
+// sequences for. It is one operation, and the row keeps its identity, so its
+// cells come with it.
+func TestMovingARowTakesItsCellsWithIt(t *testing.T) {
+	s := NewSheet(1)
+	a, b, c := mustRow(t, s), mustRow(t, s), mustRow(t, s)
+	col := mustCol(t, s)
+	named := map[RowID]string{a: "a", b: "b", c: "c"}
+	for row, name := range named {
+		if _, err := s.SetCell(row, col, Literal(name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, want := rowOrder(s, named), "a b c"; got != want {
+		t.Fatalf("the rows read %q, want %q", got, want)
+	}
+
+	// The last row to the front, then the first to the end.
+	ops, err := s.MoveRow(2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(ops.Map); n != 1 {
+		t.Fatalf("a move took %d operations, want 1", n)
+	}
+	if got, want := rowOrder(s, named), "c a b"; got != want {
+		t.Fatalf("after moving the last row first the rows read %q, want %q", got, want)
+	}
+	if _, err := s.MoveRow(1, 2); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rowOrder(s, named), "c b a"; got != want {
+		t.Fatalf("after moving a row later the rows read %q, want %q", got, want)
+	}
+
+	// And earlier, but not all the way to the front, which is the third of the
+	// three ways a move can go.
+	d := mustRow(t, s)
+	named[d] = "d"
+	if got, want := rowOrder(s, named), "c b a d"; got != want {
+		t.Fatalf("the rows read %q, want %q", got, want)
+	}
+	if _, err := s.MoveRow(3, 1); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rowOrder(s, named), "c d b a"; got != want {
+		t.Fatalf("after moving a row earlier the rows read %q, want %q", got, want)
+	}
+
+	// Every cell is still where its row is, which is the property the identity
+	// buys: nothing else in the sheet moved.
+	for _, row := range s.Rows() {
+		cell, ok := s.GetCell(row, col)
+		if row == d {
+			if ok {
+				t.Fatal("the row added last has a cell")
+			}
+			continue
+		}
+		if !ok || cell.Text != named[row] {
+			t.Fatalf("the cell of row %q reads %q", named[row], cell.Text)
+		}
+	}
+}
+
+func TestMovingAColumn(t *testing.T) {
+	s := NewSheet(1)
+	row := mustRow(t, s)
+	first, second := mustCol(t, s), mustCol(t, s)
+	if _, err := s.SetCell(row, first, Literal("1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetCell(row, second, Literal("2")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MoveCol(1, 0); err != nil {
+		t.Fatal(err)
+	}
+	if cols := s.Cols(); cols[0] != second || cols[1] != first {
+		t.Fatal("the columns did not swap")
+	}
+	cell, _ := s.GetCell(row, s.Cols()[0])
+	if cell.Text != "2" {
+		t.Fatalf("the first column now reads %q, want the column that moved there", cell.Text)
+	}
+}
+
+// A formula names its dependencies by the identities of their row and column,
+// so dragging a row about cannot break one.
+func TestAFormulaSurvivesItsRowBeingMoved(t *testing.T) {
+	s := NewSheet(1)
+	top, bottom := mustRow(t, s), mustRow(t, s)
+	col := mustCol(t, s)
+	if _, err := s.SetCell(top, col, Literal("7")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetCell(bottom, col, Formula("=above", CellRef{Row: top, Col: col})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MoveRow(1, 0); err != nil {
+		t.Fatal(err)
+	}
+	cell, ok := s.GetCell(bottom, col)
+	if !ok || len(cell.Refs) != 1 {
+		t.Fatal("the formula lost its reference")
+	}
+	if cell.Refs[0].Row != top || cell.Refs[0].Col != col {
+		t.Fatal("the formula's reference no longer names the cell it did")
+	}
+}
+
+// Two replicas dragging the same row at the same time. As a delete and an
+// insert this leaves the row twice or not at all; as one field write both
+// replicas settle it the same way.
+func TestTwoReplicasMoveTheSameRow(t *testing.T) {
+	a := NewSheet(1)
+	first, second, third := mustRow(t, a), mustRow(t, a), mustRow(t, a)
+	named := map[RowID]string{first: "1", second: "2", third: "3"}
+
+	b, err := LoadSheet(2, a.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromA, err := a.MoveRow(0, 2) // the first row to the end
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromB, err := b.MoveRow(0, 1) // and into the middle
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyAll(t, a, fromB)
+	applyAll(t, b, fromA)
+
+	if rowOrder(a, named) != rowOrder(b, named) {
+		t.Fatalf("the replicas disagree: %q and %q", rowOrder(a, named), rowOrder(b, named))
+	}
+	if a.RowCount() != 3 {
+		t.Fatalf("the sheet holds %d rows after the concurrent move, want 3: %q",
+			a.RowCount(), rowOrder(a, named))
+	}
+	seen := map[RowID]bool{}
+	for _, row := range a.Rows() {
+		if seen[row] {
+			t.Fatal("a row is read twice")
+		}
+		seen[row] = true
+	}
+}
+
+func TestWhatAMoveOnAnAxisRefuses(t *testing.T) {
+	s := NewSheet(1)
+	mustRow(t, s)
+	mustRow(t, s)
+	mustCol(t, s)
+
+	if _, err := s.MoveRow(0, 0); !errors.Is(err, ErrNoChange) {
+		t.Fatalf("moving a row to where it is gave %v, want ErrNoChange", err)
+	}
+	for _, c := range []struct{ from, to int }{{-1, 0}, {0, -1}, {2, 0}, {0, 2}} {
+		if _, err := s.MoveRow(c.from, c.to); !errors.Is(err, crdt.ErrOutOfRange) {
+			t.Fatalf("MoveRow(%d, %d) = %v, want ErrOutOfRange", c.from, c.to, err)
+		}
+	}
+	for _, c := range []struct{ from, to int }{{-1, 0}, {0, 1}, {1, 0}} {
+		if _, err := s.MoveCol(c.from, c.to); err == nil {
+			t.Fatalf("MoveCol(%d, %d) with one column was accepted", c.from, c.to)
+		}
+	}
+	// The rows are untouched by any of it.
+	if s.RowCount() != 2 || s.ColCount() != 1 {
+		t.Fatal("a refused move changed the sheet")
+	}
 }

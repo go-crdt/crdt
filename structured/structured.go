@@ -10,9 +10,10 @@
 //
 //   - [crdt.List] is an RGA: an ordered sequence whose every element carries a
 //     stable identity that survives concurrent insertion and deletion elsewhere.
-//     It is the backbone for a spreadsheet's rows and columns, and — with its
-//     order ignored — a reload-safe source of stable identities and an existence
-//     set for a diagram's nodes and connectors.
+//     With its order ignored it is a reload-safe source of stable identities and
+//     an existence set, which is what a diagram's nodes and connectors are. It
+//     is not what an axis of a spreadsheet is, because an RGA has no operation
+//     for moving something already in it; see [Sequence].
 //   - [crdt.Map] is a last-writer-wins key-value map. Each key is, on its own, an
 //     LWW-register: a single value merged by a (Lamport clock, site) total order
 //     with no tie left to chance and no wall clock read. [Register] names that
@@ -37,7 +38,9 @@
 //     RGA and has no operation for moving something already in it; written as a
 //     delete and an insert, a move is two operations that a concurrent move
 //     splits, leaving the item in both places or in neither. An item carries
-//     where it sits as a rank instead, so a move is one field write.
+//     where it sits as a rank instead, so a move is one field write. It is what
+//     the rows and columns of a [Sheet] are, which is what makes a row something
+//     a person can drag.
 //
 // [Sheet] and [Diagram] are thin wrappers over the same [crdt.Composite]. That
 // they share it is the point: the convergence, commutativity, idempotence and
