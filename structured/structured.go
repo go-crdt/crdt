@@ -34,6 +34,12 @@
 //     on its own; what does not is the shape two legal moves make between them,
 //     which is a ring. Tree resolves that when the tree is read, by rules that
 //     are a function of the state alone.
+//   - [RichText] is text that carries formatting. Written into the sequence —
+//     a bold-on character, a bold-off character — two replicas bolding
+//     overlapping stretches produce interleaved markers and read differently;
+//     written per character it converges and costs a write per letter. A mark
+//     is one operation naming two boundaries instead, and the formatting is
+//     worked out when the text is read.
 //   - [Sequence] is an ordered collection whose items move. [crdt.List] is an
 //     RGA and has no operation for moving something already in it; written as a
 //     delete and an insert, a move is two operations that a concurrent move
