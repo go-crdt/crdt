@@ -21,6 +21,13 @@ var (
 	connPropsPart = crdt.Part{Kind: crdt.PartMap, Name: "conns"}
 )
 
+// presentMark is the one-byte value a node or connector element carries. A list
+// value must not be empty, and the identity is the element rather than its
+// value, so the value is a single constant byte carrying nothing. Unlike a
+// sheet's axes these two lists are existence sets whose order is ignored, so
+// nothing here wants moving and they stay lists.
+const presentMark = 1
+
 // The fields a node and a connector carry. Each is an independent LWW-register,
 // so a concurrent change to two of them never conflicts.
 const (
@@ -122,7 +129,7 @@ func (d *Diagram) Pending() int { return d.doc.Pending() }
 // AddNode adds a node and returns its identity and the operation to broadcast.
 // The node has no fields yet.
 func (d *Diagram) AddNode() (NodeID, crdt.PartOps, error) {
-	ops, err := d.nodes.Insert(d.nodes.Len(), []byte{axisMark})
+	ops, err := d.nodes.Insert(d.nodes.Len(), []byte{presentMark})
 	if err != nil {
 		return NodeID{}, crdt.PartOps{}, err
 	}
@@ -251,7 +258,7 @@ func (d *Diagram) ConnField(c ConnID, field string) ([]byte, bool) {
 // The endpoints are stored by identity and are not required to name nodes this
 // replica already holds — the node may arrive later, or be concurrently removed.
 func (d *Diagram) AddConn(from, to NodeID) (ConnID, []crdt.PartOps, error) {
-	ops, err := d.conns.Insert(d.conns.Len(), []byte{axisMark})
+	ops, err := d.conns.Insert(d.conns.Len(), []byte{presentMark})
 	if err != nil {
 		return ConnID{}, nil, err
 	}

@@ -371,7 +371,7 @@ func TestDiagramSnapshotRoundTrip(t *testing.T) {
 // part has been driven to the ceiling by a peer.
 func TestDiagramEditsRefuseWhenClockExhausted(t *testing.T) {
 	maxList := func() crdt.ListOp {
-		return crdt.ListOp{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{axisMark}}
+		return crdt.ListOp{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{presentMark}}
 	}
 
 	// nodes list exhausted: AddNode refused.
@@ -384,7 +384,7 @@ func TestDiagramEditsRefuseWhenClockExhausted(t *testing.T) {
 	// A present node, then nodes list exhausted: RemoveNode refused.
 	d = NewDiagram(1)
 	n, _, _ := d.AddNode()
-	applyDiagram(t, d, crdt.PartOps{Part: nodesPart, List: []crdt.ListOp{{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{axisMark}}}})
+	applyDiagram(t, d, crdt.PartOps{Part: nodesPart, List: []crdt.ListOp{{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{presentMark}}}})
 	if _, err := d.RemoveNode(n); !errors.Is(err, crdt.ErrExhausted) {
 		t.Fatalf("RemoveNode = %v, want ErrExhausted", err)
 	}
@@ -438,7 +438,7 @@ func TestDiagramEditsRefuseWhenClockExhausted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	applyDiagram(t, d, crdt.PartOps{Part: connsPart, List: []crdt.ListOp{{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{axisMark}}}})
+	applyDiagram(t, d, crdt.PartOps{Part: connsPart, List: []crdt.ListOp{{Kind: crdt.OpInsert, ID: crdt.ID{Site: 9, Seq: 1}, Clock: crdt.MaxClock, Value: []byte{presentMark}}}})
 	if _, err := d.RemoveConn(c); !errors.Is(err, crdt.ErrExhausted) {
 		t.Fatalf("RemoveConn = %v, want ErrExhausted", err)
 	}
