@@ -40,6 +40,13 @@
 //     written per character it converges and costs a write per letter. A mark
 //     is one operation naming two boundaries instead, and the formatting is
 //     worked out when the text is read.
+//   - [Ink] is what is drawn by hand. A stroke is a path that arrives a point at
+//     a time, so held as one value every point sent rewrites the whole path and
+//     the person watching sees the line redrawn rather than extended. The points
+//     are a sequence of their own here, appended to, each saying which stroke it
+//     belongs to — one stream rather than one per stroke, because a part cannot
+//     be taken out of a composite and a whiteboard would otherwise spend more on
+//     saying what it has than on what was drawn.
 //   - [Blobs] holds the files a document refers to but is not made of. A file
 //     as one map value is one operation the size of the file: it cannot be sent
 //     as it is read, resumed if the connection drops, or recognised as one a
