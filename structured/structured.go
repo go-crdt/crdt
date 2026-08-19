@@ -40,6 +40,13 @@
 //     written per character it converges and costs a write per letter. A mark
 //     is one operation naming two boundaries instead, and the formatting is
 //     worked out when the text is read.
+//   - [Blobs] holds the files a document refers to but is not made of. A file
+//     as one map value is one operation the size of the file: it cannot be sent
+//     as it is read, resumed if the connection drops, or recognised as one a
+//     peer already has. Cut into chunks stored under the hash of their own
+//     bytes, it is as many operations as it has chunks, and the same chunk
+//     written by two replicas is the same key and the same value — so there is
+//     nothing to merge and nothing is stored twice.
 //   - [Sequence] is an ordered collection whose items move. [crdt.List] is an
 //     RGA and has no operation for moving something already in it; written as a
 //     delete and an insert, a move is two operations that a concurrent move
