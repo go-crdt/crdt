@@ -40,6 +40,11 @@
 //     written per character it converges and costs a write per letter. A mark
 //     is one operation naming two boundaries instead, and the formatting is
 //     worked out when the text is read.
+//   - [Undo] puts back what this replica did, and only that. It is not a stack
+//     of states — restoring one would throw away what everybody else has done
+//     since, and travel to them as an instruction to do the same. An undo here
+//     is a new edit, made now, that has the effect of the old one not having
+//     happened, and it reaches a peer as an ordinary edit.
 //   - [Ink] is what is drawn by hand. A stroke is a path that arrives a point at
 //     a time, so held as one value every point sent rewrites the whole path and
 //     the person watching sees the line redrawn rather than extended. The points
