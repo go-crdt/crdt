@@ -387,6 +387,17 @@ func docTypes() []docType {
 				return &documentReplica{d: doc}
 			},
 		},
+		{
+			name: "blocks",
+			mk:   func(s crdt.SiteID) editor { return &blocksReplica{b: NewBlocks(s)} },
+			load: func(t *testing.T, s crdt.SiteID, snap []byte) editor {
+				blk, err := LoadBlocks(s, snap)
+				if err != nil {
+					t.Fatalf("LoadBlocks: %v", err)
+				}
+				return &blocksReplica{b: blk}
+			},
+		},
 	}
 }
 
@@ -573,5 +584,102 @@ func (r *diagramReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
 			return nil
 		}
 		return one(d.RemoveConn(conns[rng.IntN(len(conns))]))
+	}
+}
+
+// blocksReplica drives a [Blocks] through the four laws. It is the one document
+// type here whose structure lives in two parts at once — the blocks are markers
+// in the text and records in a map — so it is the one where an operation
+// arriving late can leave the two disagreeing, and the oracle is byte-equal
+// snapshots rather than an equal reading.
+type blocksReplica struct{ b *Blocks }
+
+func (r *blocksReplica) Apply(b ...crdt.PartOps) error  { return r.b.Apply(b...) }
+func (r *blocksReplica) Snapshot() []byte               { return r.b.Snapshot() }
+func (r *blocksReplica) Version() crdt.CompositeVersion { return r.b.Version() }
+func (r *blocksReplica) Pending() int                   { return r.b.Pending() }
+func (r *blocksReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
+	return r.b.OpsSince(v)
+}
+
+// A small fixed pool, so that two replicas collide on the same block, the same
+// type and the same mark rather than editing past each other.
+var (
+	blockTypes = []string{"paragraph", "heading", "quote", "code", "item"}
+	blockMarks = []string{"bold", "italic", "link"}
+)
+
+func (r *blocksReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
+	t.Helper()
+	b := r.b
+	one := func(batch crdt.PartOps, err error) []crdt.PartOps {
+		if err != nil {
+			t.Fatalf("blocks edit: %v", err)
+		}
+		return []crdt.PartOps{batch}
+	}
+	ids := b.IDs()
+	pick := func() BlockID { return ids[rng.IntN(len(ids))] }
+	if len(ids) == 0 {
+		_, batches, err := b.Insert(DocStart, blockTypes[rng.IntN(len(blockTypes))])
+		if err != nil {
+			t.Fatalf("blocks insert: %v", err)
+		}
+		return batches
+	}
+	id := pick()
+	blk, _ := b.Block(id)
+	n := len([]rune(blk.Text))
+	switch rng.IntN(9) {
+	case 0:
+		_, batches, err := b.Insert(id, blockTypes[rng.IntN(len(blockTypes))])
+		if err != nil {
+			t.Fatalf("blocks insert: %v", err)
+		}
+		return batches
+	case 1:
+		_, batches, err := b.Split(id, rng.IntN(n+1), blockTypes[rng.IntN(len(blockTypes))])
+		if err != nil {
+			t.Fatalf("blocks split: %v", err)
+		}
+		return batches
+	case 2:
+		return one(b.InsertText(id, rng.IntN(n+1), fmt.Sprintf("%c", 'a'+rune(rng.IntN(26)))))
+	case 3:
+		if n == 0 {
+			return nil
+		}
+		at := rng.IntN(n)
+		return one(b.DeleteText(id, at, 1+rng.IntN(n-at)))
+	case 4:
+		return one(b.SetType(id, blockTypes[rng.IntN(len(blockTypes))]))
+	case 5:
+		return one(b.SetDepth(id, rng.IntN(4)))
+	case 6:
+		if n < 2 {
+			return nil
+		}
+		from := rng.IntN(n - 1)
+		name := blockMarks[rng.IntN(len(blockMarks))]
+		if rng.IntN(2) == 0 {
+			return one(b.Unmark(id, from, id, 1+from+rng.IntN(n-from-1), name))
+		}
+		return one(b.Mark(id, from, id, 1+from+rng.IntN(n-from-1), name,
+			[]byte(fmt.Sprintf("v%d", rng.IntN(4))), Expand(rng.IntN(4))))
+	case 7:
+		batches, err := b.Remove(id)
+		if err != nil {
+			t.Fatalf("blocks remove: %v", err)
+		}
+		return batches
+	default:
+		if len(ids) < 2 || id == ids[0] {
+			return nil
+		}
+		batches, err := b.Merge(id)
+		if err != nil {
+			t.Fatalf("blocks merge: %v", err)
+		}
+		return batches
 	}
 }

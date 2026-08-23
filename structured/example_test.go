@@ -57,3 +57,35 @@ func ExampleDocument() {
 	fmt.Println(grace.IDs(structured.Nodes), n, string(label))
 	// Output: [server] 5 web
 }
+
+// A Blocks is a document made of blocks — headings, paragraphs, list items —
+// however many of them, in three parts. Here two replicas edit the same seam at
+// the same moment: one is finishing a paragraph and the other is starting the
+// next, which are the same offset and are not the same place. Both edits land
+// where they were meant, with nothing arbitrated.
+func ExampleBlocks() {
+	ada, grace := structured.NewBlocks(1), structured.NewBlocks(2)
+
+	// Ada writes a heading and a paragraph, and shares them.
+	title, first, _ := ada.Insert(structured.DocStart, "heading")
+	second, _ := ada.InsertText(title, 0, "Rivers")
+	body, third, _ := ada.Insert(title, "paragraph")
+	fourth, _ := ada.InsertText(body, 0, "They run downhill")
+	grace.Apply(append(append(first, second), append(third, fourth)...)...)
+
+	// Offline: Ada finishes the heading, Grace starts the paragraph.
+	fromAda, _ := ada.InsertText(title, 6, " and seas")
+	fromGrace, _ := grace.InsertText(body, 0, "Mostly, ")
+
+	ada.Apply(fromGrace)
+	grace.Apply(fromAda)
+
+	for _, block := range grace.List() {
+		fmt.Printf("%s: %s\n", block.Type, block.Text)
+	}
+	fmt.Println(len(grace.Version()), "parts")
+	// Output:
+	// heading: Rivers and seas
+	// paragraph: Mostly, They run downhill
+	// 2 parts
+}
