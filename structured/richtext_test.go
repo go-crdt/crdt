@@ -299,16 +299,16 @@ func TestRubbishInTheMarksMap(t *testing.T) {
 
 	good := encodeMark(mark{kind: markAdd, name: "x", start: anchor{kind: atStart}, end: anchor{kind: atEnd}})
 	for _, rubbish := range [][]byte{
-		{},                                        // nothing at all
-		{markAdd},                                 // no expand
-		{9, 0, 1, 'x', 0, 0, 1},                   // a kind that is neither add nor remove
-		{markAdd, 0, 0xFF},                        // a name length that never ends
-		{markAdd, 0, 0},                           // an empty name
-		{markAdd, 0, 1, 'x'},                      // no value after the name
-		{markAdd, 0, 1, 'x', 0},                   // no anchors
-		{markAdd, 0, 1, 'x', 0, 7},                // an anchor kind that is none of the four
-		{markAdd, 0, 1, 'x', 0, beforeChar},       // an anchor with no identity
-		{markAdd, 0, 1, 'x', 0, beforeChar, 1},    // an identity with no sequence
+		{},                                     // nothing at all
+		{markAdd},                              // no expand
+		{9, 0, 1, 'x', 0, 0, 1},                // a kind that is neither add nor remove
+		{markAdd, 0, 0xFF},                     // a name length that never ends
+		{markAdd, 0, 0},                        // an empty name
+		{markAdd, 0, 1, 'x'},                   // no value after the name
+		{markAdd, 0, 1, 'x', 0},                // no anchors
+		{markAdd, 0, 1, 'x', 0, 7},             // an anchor kind that is none of the four
+		{markAdd, 0, 1, 'x', 0, beforeChar},    // an anchor with no identity
+		{markAdd, 0, 1, 'x', 0, beforeChar, 1}, // an identity with no sequence
 		{markAdd, 0, 1, 'x', 0, beforeChar, 1, 0}, // a sequence of zero, which no site issues
 		append(append([]byte{}, good...), 'j'),    // something left over
 		encodeMark(mark{kind: markAdd, name: "gone", // an identity from another document
