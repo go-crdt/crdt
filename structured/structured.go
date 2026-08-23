@@ -59,6 +59,17 @@
 //     bytes, it is as many operations as it has chunks, and the same chunk
 //     written by two replicas is the same key and the same value — so there is
 //     nothing to merge and nothing is stored twice.
+//   - [Blocks] is a document made of blocks — paragraphs, headings, list items,
+//     quotes, code — each holding formatted text and nested to a depth. Written
+//     as a rich text per block it converges and does not scale: a part cannot be
+//     taken out of a composite and a version carries one entry per part, so a
+//     thousand blocks is a thousand entries exchanged on every sync whether the
+//     document still holds them or not. The blocks are markers in one text
+//     instead, keyed to one map, which is three parts however many blocks there
+//     are. The marker is a character rather than a boundary between two, because
+//     "the end of this paragraph" and "the start of the next" are the same
+//     offset and are not the same place — a character has two sides and a
+//     boundary has one.
 //   - [Sequence] is an ordered collection whose items move. [crdt.List] is an
 //     RGA and has no operation for moving something already in it; written as a
 //     delete and an insert, a move is two operations that a concurrent move

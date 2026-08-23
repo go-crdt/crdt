@@ -24,7 +24,7 @@ Zero dependencies.
 |---|---|
 | `crdt` | the replicated text document (`Doc`), a replicated sequence of values (`List`), a replicated map (`Map`) and a document of named parts (`Composite`) — operations, version vectors, snapshots |
 | `crdt/awareness` | ephemeral presence — who is here and where their cursor is |
-| `crdt/structured` | a shared substrate for co-editing **structured documents** — a collaborative spreadsheet (`Sheet`) and an isometric diagram (`Diagram`) over one core, plus the `Register`, `RecordMap` and `Cell` pieces they compose |
+| `crdt/structured` | a shared substrate for co-editing **structured documents** over one core — a block document (`Blocks`), formatted text (`RichText`), a spreadsheet (`Sheet`), an isometric diagram (`Diagram`), a movable tree (`Tree`), a movable sequence (`Sequence`), a counter (`Counter`), chunked files (`Blobs`), handwriting (`Ink`) and undo (`Undo`), plus the `Register`, `RecordMap` and `Cell` pieces they compose |
 
 ## Using it
 
@@ -200,9 +200,10 @@ are checked against node's, not against ours.
 
 ## Status
 
-Version 0.13: the text, list and map CRDTs, a composite document that holds them
+Version 0.27: the text, list and map CRDTs, a composite document that holds them
 as named parts, the wire and snapshot formats, awareness, and the surface an
-editor needs — reported changes, anchors, authorship, and UTF-16 addressing.
+editor needs — reported changes, anchors, authorship, UTF-16 addressing, undo,
+and reading a document as it stood at any version.
 Pure Go, CGO=0, **100% statement coverage** on both packages, race-clean, six-arch
 CI, and the full suite green under `js/wasm`.
 
