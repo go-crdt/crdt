@@ -59,6 +59,15 @@
 //     bytes, it is as many operations as it has chunks, and the same chunk
 //     written by two replicas is the same key and the same value — so there is
 //     nothing to merge and nothing is stored twice.
+//   - [Set] is a collection of names replicas add to and take from at once —
+//     the labels on a card, the people in a conversation, the layers that are
+//     showing. A map keyed by the name converges on the case that happens
+//     badly: one replica adds a label while another, which has never seen it,
+//     takes it away, and one of the two writes wins by an order that has
+//     nothing to do with what either knew. Every addition mints a tag of its
+//     own instead, and a removal takes away the tags it can see — so an
+//     addition nobody had seen is untouched by it, not as a policy but for
+//     want of anything to base one on.
 //   - [MultiRegister] is a value two replicas are allowed to disagree about.
 //     A [Register] settles every concurrent write by the (clock, site) order,
 //     which is right when the losing write is of no interest and wrong when it

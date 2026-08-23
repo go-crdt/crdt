@@ -120,3 +120,28 @@ func ExampleMultiRegister() {
 	// readme.txt
 	// readme.txt true
 }
+
+// A Set is a collection of names, where a removal takes away what it saw and
+// nothing else. Here two replicas edit the labels on a card at the same moment:
+// Grace clears the labels she has been shown while Ada adds one Grace has never
+// seen, and the new label survives — which a map keyed by the label would have
+// settled by an order that has nothing to do with what either knew.
+func ExampleSet() {
+	ada, grace := structured.NewSet(1), structured.NewSet(2)
+
+	shared, _ := ada.Add("draft")
+	grace.Apply(shared...)
+
+	// Offline: Ada labels it urgent, Grace clears what she can see.
+	added, _ := ada.Add("urgent")
+	removed, _ := grace.Remove("draft")
+
+	ada.Apply(removed...)
+	grace.Apply(added...)
+
+	fmt.Println(grace.Names())
+	fmt.Println(grace.Adders("urgent"))
+	// Output:
+	// [urgent]
+	// [1]
+}
