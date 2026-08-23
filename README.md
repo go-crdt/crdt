@@ -24,7 +24,7 @@ Zero dependencies.
 |---|---|
 | `crdt` | the replicated text document (`Doc`), a replicated sequence of values (`List`), a replicated map (`Map`) and a document of named parts (`Composite`) — operations, version vectors, snapshots |
 | `crdt/awareness` | ephemeral presence — who is here and where their cursor is |
-| `crdt/structured` | a shared substrate for co-editing **structured documents** over one core — a block document (`Blocks`), formatted text (`RichText`), a spreadsheet (`Sheet`), an isometric diagram (`Diagram`), a movable tree (`Tree`), a movable sequence (`Sequence`), a counter (`Counter`), chunked files (`Blobs`), handwriting (`Ink`) and undo (`Undo`), plus the `Register`, `RecordMap` and `Cell` pieces they compose |
+| `crdt/structured` | a shared substrate for co-editing **structured documents** over one core — a block document (`Blocks`), formatted text (`RichText`), a value replicas may disagree about (`MultiRegister`), a spreadsheet (`Sheet`), an isometric diagram (`Diagram`), a movable tree (`Tree`), a movable sequence (`Sequence`), a counter (`Counter`), chunked files (`Blobs`), handwriting (`Ink`) and undo (`Undo`), plus the `Register`, `RecordMap` and `Cell` pieces they compose |
 
 ## Using it
 

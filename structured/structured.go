@@ -59,6 +59,15 @@
 //     bytes, it is as many operations as it has chunks, and the same chunk
 //     written by two replicas is the same key and the same value — so there is
 //     nothing to merge and nothing is stored twice.
+//   - [MultiRegister] is a value two replicas are allowed to disagree about.
+//     A [Register] settles every concurrent write by the (clock, site) order,
+//     which is right when the losing write is of no interest and wrong when it
+//     is: two people rename the same thing at once and one of the names is gone,
+//     with nothing anywhere recording that there was a second. This keeps a
+//     version vector beside each replica's own value, so a value written without
+//     seeing another is not superseded by it and both are read. Choosing between
+//     them is writing the one chosen — a write dominates everything its writer
+//     could see — so there is no operation for settling and none is needed.
 //   - [Blocks] is a document made of blocks — paragraphs, headings, list items,
 //     quotes, code — each holding formatted text and nested to a depth. Written
 //     as a rich text per block it converges and does not scale: a part cannot be

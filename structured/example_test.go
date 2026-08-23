@@ -89,3 +89,34 @@ func ExampleBlocks() {
 	// paragraph: Mostly, They run downhill
 	// 2 parts
 }
+
+// A MultiRegister keeps a disagreement instead of settling it. Here two
+// replicas rename the same thing while disconnected: an ordinary register would
+// throw one name away with nothing left saying it existed, and this one hands
+// both back. Choosing between them is writing the one chosen.
+func ExampleMultiRegister() {
+	ada, grace := structured.NewMultiRegister(1), structured.NewMultiRegister(2)
+
+	// Offline, each names the file.
+	fromAda, _ := ada.Set([]byte("notes.txt"))
+	fromGrace, _ := grace.Set([]byte("readme.txt"))
+
+	ada.Apply(fromGrace)
+	grace.Apply(fromAda)
+
+	fmt.Println(ada.Conflicted())
+	for _, name := range ada.Values() {
+		fmt.Printf("%s\n", name)
+	}
+
+	// Ada picks one. That write saw both, so it supersedes both.
+	chosen, _ := ada.Set([]byte("readme.txt"))
+	grace.Apply(chosen)
+	name, only := grace.Value()
+	fmt.Printf("%s %v\n", name, only)
+	// Output:
+	// true
+	// notes.txt
+	// readme.txt
+	// readme.txt true
+}
