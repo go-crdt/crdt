@@ -53,6 +53,24 @@ func (id ID) String() string {
 //
 // Distinctness is the caller's responsibility: distinct b almost always yields
 // distinct SiteIDs, but a hash cannot promise it.
+//
+// # Across instances that have never spoken
+//
+// That responsibility has a sharp edge the moment more than one instance is
+// involved. A site identity has to be unique across every replica that will
+// ever meet, not merely across the ones one server hands out — two operations
+// claiming one identity is the thing this package rests on not happening, and
+// no merge can recover from it.
+//
+// So b must carry the instance. Derive from something SCOPED — an
+// eduPersonPrincipalName, a subject-id, an OIDC issuer and subject together, a
+// URL — and never from a bare local identifier: two instances that each have a
+// user "42" would derive the same site from it, on purpose, because a hash is
+// a function and that is what a function does. There is a test of both.
+//
+// Measured on scoped identifiers of the shape a SAML assertion carries: twenty
+// million of them over four thousand scopes, no collisions, which is what a
+// uniform 64-bit hash gives at that size. See federation_test.go.
 func DeriveSiteID(b []byte) SiteID {
 	const (
 		offset = 14695981039346656037
