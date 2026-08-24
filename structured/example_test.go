@@ -145,3 +145,36 @@ func ExampleSet() {
 	// [urgent]
 	// [1]
 }
+
+// A Proposals is changes to a document that are not part of it yet. A proposal
+// is a replica that has not synced: accepting it applies the document's own
+// operations, so it merges with whatever happened while it was open and leaves
+// every anchor where it was.
+func ExampleProposals() {
+	docs := structured.NewProposals(1)
+	text, _ := docs.Composite().Text("text")
+	text.Insert(0, "Hello world")
+
+	// A draft is a replica, so it gets a site of its own.
+	draft, _ := docs.Draft(2)
+	drafted, _ := draft.Composite().Text("text")
+	drafted.Insert(6, "beautiful ")
+	id, _, _ := docs.Put("an adjective", draft)
+
+	// The document has not moved, and the proposal can be read before it is in.
+	fmt.Println(text.String())
+	preview, _ := docs.Preview(id, 9)
+	previewed, _ := preview.Text("text")
+	fmt.Println(previewed.String())
+
+	// Meanwhile somebody edits the same sentence, and accepting merges.
+	text.Insert(11, ", and goodbye")
+	docs.Accept(id)
+	fmt.Println(text.String())
+	fmt.Println(docs.List()[0].State)
+	// Output:
+	// Hello world
+	// Hello beautiful world
+	// Hello beautiful world, and goodbye
+	// accepted
+}

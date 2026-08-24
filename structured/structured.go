@@ -59,6 +59,17 @@
 //     bytes, it is as many operations as it has chunks, and the same chunk
 //     written by two replicas is the same key and the same value — so there is
 //     nothing to merge and nothing is stored twice.
+//   - [Proposals] are changes to a document that are not part of it yet: a
+//     suggested edit, a change put up for review. Held as a second copy of the
+//     document and reconciled later, accepting one means applying a difference
+//     between two texts, and applying a difference mints new characters — so
+//     every comment, mark and cursor anchored to the characters it replaced
+//     would be left pointing at nothing. A proposal is a replica that has not
+//     synced instead: its operations are the document's own, against the
+//     document's own identities, written down where reviewers can read them.
+//     Accepting is applying them, which merges with whatever happened
+//     meanwhile because that is what a replica coming back from offline does;
+//     turning one down costs nothing, because they were never applied.
 //   - [Set] is a collection of names replicas add to and take from at once —
 //     the labels on a card, the people in a conversation, the layers that are
 //     showing. A map keyed by the name converges on the case that happens
