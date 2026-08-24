@@ -1,3 +1,5 @@
+<p align="center"><img src="https://raw.githubusercontent.com/go-crdt/brand/main/social/go-crdt.png" alt="go-crdt/crdt" width="720"></p>
+
 # crdt — collaborative text editing in pure Go
 
 [![CI](https://github.com/go-crdt/crdt/actions/workflows/ci.yml/badge.svg)](https://github.com/go-crdt/crdt/actions/workflows/ci.yml)
