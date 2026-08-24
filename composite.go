@@ -265,6 +265,22 @@ func (c *Composite) Pending() int {
 	return n
 }
 
+// DropPending forgets what every part is holding back, and returns how many
+// operations that was. See [Doc.DropPending] for why it is safe.
+func (c *Composite) DropPending() int {
+	n := 0
+	for _, d := range c.texts {
+		n += d.DropPending()
+	}
+	for _, l := range c.lists {
+		n += l.DropPending()
+	}
+	for _, m := range c.maps {
+		n += m.DropPending()
+	}
+	return n
+}
+
 // A CompositeVersion records what a replica holds, part by part. There is no
 // single vector for a composite, because there is no single sequence of
 // operations: each part counts its own, so what a peer is missing is a question

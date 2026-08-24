@@ -141,9 +141,17 @@ func (r *MultiRegister) readings() []entry {
 	out := make([]entry, 0, len(keys))
 	for _, key := range keys {
 		site, err := strconv.ParseUint(key, 10, 64)
-		if err != nil {
+		if err != nil || strconv.FormatUint(site, 10) != key {
 			// A key no replica of this type wrote. A map holds whatever key an
 			// applied operation names, so this is a peer's, not a fault.
+			//
+			// The second half of that test is what makes a site's key its own:
+			// ParseUint accepts leading zeros, so "1", "01" and "0001" all
+			// name site 1, and a reading is supposed to be one per replica.
+			// Accepting all three would put three of them in the list, each
+			// claiming to be the same replica, and whichever carried the
+			// highest vector would hide the one that replica actually wrote.
+			// Only the canonical spelling is a key this type writes.
 			continue
 		}
 		raw, _ := r.m.Get(key)
@@ -295,6 +303,15 @@ func decodeReading(in []byte) (vector map[crdt.SiteID]uint64, value []byte, clea
 		return nil, nil, false, false
 	}
 	in = in[used:]
+	// A count larger than the remaining bytes allow is a corrupt header, and it
+	// is refused before anything is allocated for it — the rule ParsePartOps
+	// states and decodeCell keeps. Each entry is two varints of at least one
+	// byte each, so a vector of n entries needs at least 2n bytes; without this
+	// a five-byte value asked for a map of any size the peer liked, and one
+	// found by fuzzing spent three minutes in this line.
+	if n > uint64(len(in))/2 {
+		return nil, nil, false, false
+	}
 	vector = make(map[crdt.SiteID]uint64, n)
 	var last uint64
 	for i := uint64(0); i < n; i++ {

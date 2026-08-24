@@ -254,6 +254,25 @@ func (b *Blocks) Text(id BlockID) (string, bool) {
 	return string([]rune(b.text().String())[m.pos+1 : m.end]), true
 }
 
+// Preamble returns the characters before the first block, which is nothing in
+// any document this package wrote.
+//
+// A block begins at a marker, so a document written through this type begins
+// with one and there is nothing in front of it. Another writer — a peer running
+// a different version, or a caller reaching past this type to the text part —
+// can put characters there, and they belong to no block. They are returned here
+// rather than dropped: text that is in the document but reachable through no
+// method is worse than text somebody has to decide what to do with.
+func (b *Blocks) Preamble() string {
+	runes := []rune(b.text().String())
+	for i, r := range runes {
+		if r == BlockMark {
+			return string(runes[:i])
+		}
+	}
+	return string(runes)
+}
+
 // Plain returns the whole document as text, with the markers taken out and the
 // blocks separated by sep — "\n" for something a person reads.
 //

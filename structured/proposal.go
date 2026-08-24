@@ -318,7 +318,7 @@ func (p *Proposals) List() []Proposal {
 	out := make([]Proposal, 0, len(keys))
 	raised := make(map[ProposalID]stamp, len(keys))
 	for _, key := range keys {
-		id, ok := decodeID(key)
+		id, ok := decodeThing(key)
 		if !ok {
 			continue
 		}

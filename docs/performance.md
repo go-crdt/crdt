@@ -308,6 +308,79 @@ cd docs/comparison && npm install
 CRDT_TRACE=…/automerge-paper.json.gz node --expose-gc bench.js yjs --runs 10
 ```
 
+## Ten thousand clients on one file
+
+The trace above is one person typing. This is the other question: what happens
+when ten thousand of them are on the same document and the network is broken.
+
+`TestAHundredClientsAndABrokenNetwork` is a hundred by default and takes its
+size from the environment. What it does to them: partitions lasting several
+rounds, batches that never arrive at all, delivery shuffled and duplicated,
+clients that arrive long after the session started and are welcomed with a
+snapshot, clients that lose their connection **and go on typing**, clients that
+come back and have to be reconciled in both directions, clients that close the
+tab for good, processes restarted from a snapshot, and replicas throwing away
+what they were holding back. Everybody types near the front, so the same
+characters are contended.
+
+The claim, checked two ways: once the network heals, every client holds a
+**byte-identical** snapshot, and each agrees with itself — the index against the
+list it indexes, the counters against the blocks they count.
+
+| | 100 clients | 10 000 clients |
+|---|---|---|
+| rounds | 120 | 150 |
+| wall clock | 2.7 s | 2 m 08 s |
+| edits | 16 813 | 11 151 |
+| batches delivered / lost / duplicated | 48 245 / 7 005 / 778 | 13 556 / 4 849 / 310 |
+| reconciliations | 7 686 | 5 210 |
+| joined late / disconnected / reconnected / left | 69 / 50 / 26 / 2 | 7 085 / 6 185 / 4 052 / 441 |
+| edits made while disconnected | 3 167 | 1 959 |
+| restarts from a snapshot | 47 | 33 |
+| operations dropped while parked | 19 723 | 66 |
+| **agreeing at the end** | **95** | **9 586** |
+| the document | 5 713 characters, 2 404 tombstones | 5 144 characters, 489 tombstones |
+
+The test refuses to pass if the chaos did not happen: no losses, no duplicates,
+no restarts, no reconciliations, nobody joining, disconnecting, reconnecting or
+leaving, no offline edits, no deletions, or an empty document all fail it.
+
+Ten thousand clients do not each hold a connection to the other nine thousand
+nine hundred and ninety-nine, so the harness has what a real deployment has: a
+hub they sync against, which arbitrates nothing and is a replica like any other.
+Without it the run still converges and proves less — every client edits its own
+almost-empty copy and they meet once at the end. With it, three quarters of the
+edits land on a document somebody else has already been writing.
+
+### What actually grows with the number of clients
+
+A replica's memory is a function of the document, not of how many people are
+editing it: ten thousand clients each hold one document, and the document is the
+same size whoever holds it. (The 26.9 GiB above is this harness holding ten
+thousand of them in one process.)
+
+One thing does grow. A version vector carries an entry per site that has ever
+written, it is exchanged on every sync, and `OpsSince` walks it:
+
+| sites | version | per site | `OpsSince`, nothing owed | snapshot |
+|---|---|---|---|---|
+| 100 | 201 B | 2.0 B | 0.97 µs | 1 017 B |
+| 1 000 | 2 876 B | 2.9 B | 11.04 µs | 12 647 B |
+| 10 000 | 29 876 B | 3.0 B | 95.67 µs | 129 649 B |
+| 100 000 | 383 495 B | 3.8 B | 821.16 µs | 1 550 509 B |
+
+Linear, at about ten nanoseconds a site, which is what a map lookup costs. Said
+plainly for a deployment: a server telling ten thousand clients "you are up to
+date" once a second spends about a second of one core doing it, and reads a
+thirty-kilobyte version for each answer. That is the price of asking "what am I
+missing" with per-site vectors. It is not a defect and there is nothing cheaper
+to do inside a call that is handed the vector; batching or sharding it is the
+job of the protocol above.
+
+A composite's version is per part **and** per site, so it multiplies: 1 000 sites
+cost 4 758 bytes over one part and 47 979 over sixteen. That is the same argument
+`structured.Blocks` is built on, measured at the version rather than the part.
+
 ## Synthetic benchmarks
 
 On a document of 10 000 characters:

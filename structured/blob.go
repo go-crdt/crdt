@@ -199,7 +199,13 @@ func (b *Blobs) Get(name string) ([]byte, bool) {
 	if !ok {
 		return nil, false
 	}
-	out := make([]byte, 0, total)
+	// No capacity is reserved from total. It is the manifest's word for how
+	// long the file is, and a manifest is bytes a peer wrote: reserving on it
+	// let ten bytes ask for an exabyte. The loop below appends only chunks that
+	// are present and hash to their own digest, so what this grows to is
+	// bounded by bytes this replica really holds, and the length is checked
+	// against total afterwards.
+	var out []byte
 	for _, digest := range keys {
 		piece, held := b.chunks.Get(chunkKey(digest))
 		if !held || !hashesTo(piece, digest) {
@@ -346,7 +352,12 @@ func decodeManifest(value []byte) (total int, keys []string, ok bool) {
 		return 0, nil, false
 	}
 	rest = rest[used:]
-	if uint64(len(rest)) != count*sha256.Size {
+	// Divide rather than multiply. count*sha256.Size is uint64 arithmetic and
+	// wraps: count = 1<<59 makes it zero, so a ten-byte manifest with no
+	// digests at all satisfied the equality and then asked for a slice of
+	// 1<<59 strings. Comparing against len(rest)/sha256.Size cannot wrap,
+	// because len(rest) is a real length.
+	if count > uint64(len(rest))/sha256.Size || uint64(len(rest)) != count*sha256.Size {
 		return 0, nil, false
 	}
 	// A file of no bytes has no chunks, and a file of some bytes has some: a

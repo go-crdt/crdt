@@ -161,6 +161,29 @@ func decodeID(s string) (crdt.ID, bool) {
 	return crdt.ID{Site: crdt.SiteID(site), Seq: seq}, true
 }
 
+// decodeThing decodes a record key into the identity of a thing.
+//
+// It differs from [decodeID] in one way, and the difference is the whole point:
+// it refuses the root identity. Every type here uses that identity as a
+// sentinel meaning a PLACE rather than a thing — the top of a [Tree], the front
+// of a [Sequence] — and a record named after it is not something any replica of
+// this package writes.
+//
+// A peer can write one by hand, and one did: a record keyed "0.0" made a tree
+// whose root was its own child, and reading it recursed until the process died
+// of a stack overflow — which is not a panic and cannot be recovered from. The
+// root is not a thing, so a record named after it is not one either.
+//
+// [decodeID] keeps its meaning, because the root is a perfectly good field
+// VALUE: a node at the top of a tree stores the root as its parent.
+func decodeThing(key string) (crdt.ID, bool) {
+	id, ok := decodeID(key)
+	if !ok || id.IsRoot() {
+		return crdt.ID{}, false
+	}
+	return id, true
+}
+
 // cellKey is the [crdt.Map] key a cell is stored under: the row and column
 // identities together, which is what keeps a cell's address stable when a
 // concurrent edit inserts or removes some other row or column. Because neither

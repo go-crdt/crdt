@@ -268,15 +268,41 @@ func (t *Tree) Nodes() []TreeID {
 	for _, kids := range byParent {
 		t.sortSiblings(kids)
 	}
-	out := make([]TreeID, 0, len(shape))
+	return walkShape(byParent, TreeRoot, len(shape))
+}
+
+// walkShape returns everything below root, depth first.
+//
+// It refuses to visit a node twice, and that guard is the whole reason it is a
+// function of its own rather than a closure inside [Tree.Nodes]: [Tree.shape]
+// breaks every ring before it returns, so no shape it produces can make this
+// recurse forever, and a guard nothing can reach is a guard nobody can check.
+// Here it can be handed a ring directly.
+//
+// What it prevents is not a wrong answer but a stack overflow, which is not a
+// panic: it kills the process rather than raising something a caller could
+// handle. That happened, from one map operation a peer sent.
+func walkShape(byParent map[TreeID][]TreeID, root TreeID, size int) []TreeID {
+	out := make([]TreeID, 0, size)
+	// The root counts as seen, so a shape naming it as its own child skips
+	// rather than descends. Each node is marked before it is appended, not
+	// after it is entered: marking on entry stops the recursion and still lets
+	// a ring put a node in the answer twice, which is a wrong tree rather than
+	// a dead process — one bug in place of the other.
+	seen := make(map[TreeID]bool, size)
+	seen[root] = true
 	var walk func(TreeID)
 	walk = func(at TreeID) {
 		for _, kid := range byParent[at] {
+			if seen[kid] {
+				continue
+			}
+			seen[kid] = true
 			out = append(out, kid)
 			walk(kid)
 		}
 	}
-	walk(TreeRoot)
+	walk(root)
 	return out
 }
 
@@ -288,7 +314,10 @@ func (t *Tree) Depth(node TreeID) (int, bool) {
 	}
 	shape := t.shape()
 	depth := 1
-	for at := shape[node]; !at.IsRoot(); at = shape[at] {
+	// Bounded for the reason [Tree.Nodes] keeps a visited set: shape is
+	// acyclic, and a loop that trusts that with no bound hangs rather than
+	// answers if it ever stops being so.
+	for at := shape[node]; !at.IsRoot() && depth <= len(shape); at = shape[at] {
 		depth++
 	}
 	return depth, true
@@ -327,7 +356,9 @@ func (t *Tree) shape() map[TreeID]TreeID {
 	stated := make(map[TreeID]TreeID, len(nodes))
 	live := make(map[TreeID]bool, len(nodes))
 	for _, key := range nodes {
-		id, ok := decodeID(key)
+		// decodeThing rather than decodeID: a record named after the root is
+		// not a node, and treating it as one made the root its own child.
+		id, ok := decodeThing(key)
 		if !ok {
 			continue
 		}

@@ -180,10 +180,13 @@ func (s *Sequence) Items() []ItemID {
 	records := s.r.Records()
 	items := make([]ItemID, 0, len(records))
 	for _, key := range records {
-		id, ok := decodeID(key)
+		id, ok := decodeThing(key)
 		if !ok {
-			// A record whose name is not an identity is not an item. Only a
-			// peer writing into the map by hand can make one.
+			// A record whose name is not an identity is not an item, and
+			// neither is one named after the start sentinel: that identity
+			// means the place before the first item, so listing it would hand
+			// a caller a "thing" that means "the front" when passed back.
+			// Only a peer writing into the map by hand can make either.
 			continue
 		}
 		items = append(items, ItemID(id))
