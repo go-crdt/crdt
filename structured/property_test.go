@@ -167,7 +167,11 @@ func TestCommutativity(t *testing.T) {
 			ops := flatten(source[0].(interface {
 				OpsSince(crdt.CompositeVersion) []crdt.PartOps
 			}).OpsSince(nil))
-			if len(ops) < 20 {
+			floor := tc.minOps
+			if floor == 0 {
+				floor = 20
+			}
+			if len(ops) < floor {
 				t.Fatalf("only %d operations to permute; fixture too small", len(ops))
 			}
 			rng := rand.New(rand.NewPCG(7, 7))
@@ -350,6 +354,14 @@ type docType struct {
 	name string
 	mk   func(crdt.SiteID) editor
 	load func(*testing.T, crdt.SiteID, []byte) editor
+	// minOps is how many operations a session of this type has to produce for
+	// permuting them to mean anything. It defaults to 20, and two types cannot
+	// reach it however much they are edited: a [Counter] and a [MultiRegister]
+	// keep one key per site and a replica only ever writes its own, so the
+	// operations a session leaves are bounded by the number of replicas rather
+	// than by the number of edits. That is the property those types exist for,
+	// not a thin fixture.
+	minOps int
 }
 
 func docTypes() []docType {
@@ -387,6 +399,19 @@ func docTypes() []docType {
 				return &documentReplica{d: doc}
 			},
 		},
+		// Every other type this package builds, driven by the same harness.
+		// A test written for a type exercises what its author thought of; this
+		// exercises what nobody did.
+		{name: "tree", mk: newTreeReplica, load: loadComposite(bindTree)},
+		{name: "sequence", mk: newSequenceReplica, load: loadComposite(bindSequence)},
+		{name: "counter", mk: newCounterReplica, load: loadComposite(bindCounter), minOps: 6},
+		{name: "set", mk: newSetReplica, load: loadComposite(bindSet)},
+		{name: "multiregister", mk: newMultiReplica, load: loadComposite(bindMulti), minOps: 6},
+		{name: "richtext", mk: newRichReplica, load: loadComposite(bindRichReplica)},
+		{name: "ink", mk: newInkReplica, load: loadComposite(bindInkReplica)},
+		{name: "blobs", mk: newBlobReplica, load: loadComposite(bindBlobReplica)},
+		{name: "proposals", mk: newProposalReplica, load: loadComposite(bindProposalReplica)},
+		{name: "undo", mk: newUndoReplica, load: loadComposite(bindUndoReplica)},
 		{
 			name: "blocks",
 			mk:   func(s crdt.SiteID) editor { return &blocksReplica{b: NewBlocks(s)} },
