@@ -437,6 +437,34 @@ func (m *Map) Tombstones() int { return len(m.records) - m.live }
 // operation their own site issued before them.
 func (m *Map) Pending() int { return m.parked }
 
+// DropPending forgets the operations this replica is holding back, and returns
+// how many there were.
+//
+// An operation that arrives before the one it depends on is parked, which is
+// right: it may become applicable a moment later, and dropping it silently
+// would lose an edit. What is not right is that nothing bounds the pile. A peer
+// sending operations that can never apply — each waiting on a sequence number
+// that site never issues — costs about 140 bytes apiece, forever, for a
+// document that stays empty.
+//
+// This is the lever for that, and it is safe for one reason: a parked operation
+// has had no effect on the state, so it is not in the version vector. A peer
+// asked what this replica is missing sends it again. Dropping and re-syncing
+// therefore loses nothing and diverges from nobody — which is asserted in the
+// tests rather than argued here.
+//
+// It is deliberately the caller's decision. A cap inside this package would
+// have to choose what to do when it is reached, and the only answers are to
+// drop — which is a policy, not a merge rule — or to refuse an Apply for
+// reasons that have nothing to do with what it was handed.
+func (m *Map) DropPending() int {
+	n := m.parked
+	m.pending = nil
+	m.parkSlab = nil
+	m.parked = 0
+	return n
+}
+
 // Version returns what this replica holds, to be handed to a peer that will send
 // back what it is missing; see [Map.OpsSince].
 func (m *Map) Version() VersionVector { return m.vv.Clone() }

@@ -466,6 +466,34 @@ func (d *Doc) Tombstones() int { return d.total - d.visible }
 // number that only grows means a peer is withholding operations.
 func (d *Doc) Pending() int { return d.parked }
 
+// DropPending forgets the operations this replica is holding back, and returns
+// how many there were.
+//
+// An operation that arrives before the one it depends on is parked, which is
+// right: it may become applicable a moment later, and dropping it silently
+// would lose an edit. What is not right is that nothing bounds the pile. A peer
+// sending operations that can never apply — each waiting on a sequence number
+// that site never issues — costs about 140 bytes apiece, forever, for a
+// document that stays empty.
+//
+// This is the lever for that, and it is safe for one reason: a parked operation
+// has had no effect on the state, so it is not in the version vector. A peer
+// asked what this replica is missing sends it again. Dropping and re-syncing
+// therefore loses nothing and diverges from nobody — which is asserted in the
+// tests rather than argued here.
+//
+// It is deliberately the caller's decision. A cap inside this package would
+// have to choose what to do when it is reached, and the only answers are to
+// drop — which is a policy, not a merge rule — or to refuse an Apply for
+// reasons that have nothing to do with what it was handed.
+func (d *Doc) DropPending() int {
+	n := d.parked
+	d.pending = nil
+	d.parkSlab = nil
+	d.parked = 0
+	return n
+}
+
 // Version returns a copy of the version vector describing which operations this
 // replica holds. Pass it to a peer's [Doc.OpsSince] to be sent exactly what is
 // missing.

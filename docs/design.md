@@ -223,6 +223,27 @@ that call reports it. Watching costs the walk up the index per text operation,
 and nothing at all for the parts nobody is watching — `Apply` takes a path that
 does not so much as copy a version vector.
 
+### What waiting costs, and how to stop paying it
+
+An operation arriving before the one it depends on waits rather than being
+dropped, because the number it would skip could be a key nobody would ever hear
+about again. Nothing bounds how much waits.
+
+Measured: operations that can never apply — each waiting on a sequence number
+its site never issues — cost about **140 bytes apiece**, held for as long as the
+document is, on a document that stays empty. That is around eight times what
+they cost on the wire, and a peer chooses how many to send.
+
+`DropPending` is the lever, and it is safe for one reason: a parked operation
+has had no effect on the state, so it is **not in the version vector**. A peer
+asked what this replica is missing sends it again. Dropping and re-syncing loses
+nothing and diverges from nobody.
+
+There is deliberately no cap in here. A cap has to decide what to do when it is
+reached, and the only two answers are to drop — which is a policy, and the
+caller's — or to refuse an `Apply` for reasons that have nothing to do with what
+it was handed.
+
 ## Anchors, and authorship
 
 An editor needs somewhere stable to hang a comment. An offset is not that: the
