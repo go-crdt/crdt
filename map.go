@@ -309,10 +309,6 @@ type Map struct {
 	// changed. It is set only for the duration of ApplyChanges, so Apply pays
 	// nothing for it.
 	touched map[string]struct{}
-	// absorbed collects what admit integrates while somebody is asking.
-	// See [Map.ApplyAbsorbed].
-	absorbed  []MapOp
-	absorbing bool
 }
 
 // A mapRecord is what a replica keeps for one key: the write that is winning,
@@ -479,7 +475,7 @@ func (m *Map) Version() VersionVector { return m.vv.Clone() }
 //
 // A malformed operation is rejected and nothing in the batch is applied.
 func (m *Map) Apply(ops ...MapOp) error {
-	_, err := m.applyWith(false, ops)
+	_, err := m.applyWith(false, ops, nil)
 	return err
 }
 
@@ -496,10 +492,10 @@ func (m *Map) Apply(ops ...MapOp) error {
 // is told about, which is also what keeps this honest when a batch writes one
 // key twice: the key appears once, and reading it gives the winner.
 func (m *Map) ApplyChanges(ops ...MapOp) ([]string, error) {
-	return m.applyWith(true, ops)
+	return m.applyWith(true, ops, nil)
 }
 
-func (m *Map) applyWith(watching bool, ops []MapOp) ([]string, error) {
+func (m *Map) applyWith(watching bool, ops []MapOp, absorbed *[]MapOp) ([]string, error) {
 	for _, op := range ops {
 		if err := op.validate(); err != nil {
 			return nil, err
@@ -510,7 +506,7 @@ func (m *Map) applyWith(watching bool, ops []MapOp) ([]string, error) {
 		defer func() { m.touched = nil }()
 	}
 	for _, op := range ops {
-		m.admit(op)
+		m.admit(op, absorbed)
 	}
 	if !watching || len(m.touched) == 0 {
 		return nil, nil
@@ -526,7 +522,9 @@ func (m *Map) applyWith(watching bool, ops []MapOp) ([]string, error) {
 // admit integrates an operation and then anything that was waiting for it,
 // through an explicit queue rather than by recursion: a history delivered back
 // to front unblocks a chain as long as the history itself.
-func (m *Map) admit(op MapOp) {
+// admit takes an optional place to record what it integrates; see
+// [Doc.admit] on why it is a parameter and not a field.
+func (m *Map) admit(op MapOp, absorbed *[]MapOp) {
 	queue := []MapOp{op}
 	for len(queue) > 0 {
 		next := queue[len(queue)-1]
@@ -540,8 +538,8 @@ func (m *Map) admit(op MapOp) {
 			continue
 		}
 		m.integrate(next)
-		if m.absorbing {
-			m.absorbed = append(m.absorbed, next)
+		if absorbed != nil {
+			*absorbed = append(*absorbed, next)
 		}
 		queue = m.wake(queue, next.ID.Site, had, next.ID.Seq)
 	}

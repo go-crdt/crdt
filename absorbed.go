@@ -27,34 +27,31 @@ package crdt
 // The order is the order they were integrated in, which is a causal order: an
 // operation appears after the one it was waiting for.
 func (d *Doc) ApplyAbsorbed(ops ...Op) ([]Op, error) {
-	d.absorbing, d.absorbed = true, nil
-	defer func() { d.absorbing, d.absorbed = false, nil }()
-	if _, err := d.applyWith(false, ops); err != nil {
+	var absorbed []Op
+	if _, err := d.applyWith(false, ops, &absorbed); err != nil {
 		return nil, err
 	}
-	return d.absorbed, nil
+	return absorbed, nil
 }
 
 // ApplyAbsorbed is [List.Apply], and also reports the operations it integrated,
 // including any that had been parked waiting for them.
 func (l *List) ApplyAbsorbed(ops ...ListOp) ([]ListOp, error) {
-	l.absorbing, l.absorbed = true, nil
-	defer func() { l.absorbing, l.absorbed = false, nil }()
-	if _, err := l.applyWith(false, ops); err != nil {
+	var absorbed []ListOp
+	if _, err := l.applyWith(false, ops, &absorbed); err != nil {
 		return nil, err
 	}
-	return l.absorbed, nil
+	return absorbed, nil
 }
 
 // ApplyAbsorbed is [Map.Apply], and also reports the operations it integrated,
 // including any that had been parked waiting for them.
 func (m *Map) ApplyAbsorbed(ops ...MapOp) ([]MapOp, error) {
-	m.absorbing, m.absorbed = true, nil
-	defer func() { m.absorbing, m.absorbed = false, nil }()
-	if _, err := m.applyWith(false, ops); err != nil {
+	var absorbed []MapOp
+	if _, err := m.applyWith(false, ops, &absorbed); err != nil {
 		return nil, err
 	}
-	return m.absorbed, nil
+	return absorbed, nil
 }
 
 // ApplyAbsorbed is [Composite.Apply], and also reports what it integrated, per
