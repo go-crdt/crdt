@@ -1,9 +1,3 @@
-//go:build !js
-
-// These exercise what a server relaying between replicas needs, and a browser
-// is not one. They are kept off js/wasm because that build has a four-gigabyte
-// address space and this package's test binary already peaks against it — see
-// the issue this refers to; the straw is not the point, the pile is.
 package crdt
 
 import (

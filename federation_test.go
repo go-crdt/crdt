@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 )
 
@@ -26,27 +27,50 @@ func TestDeriveSiteIDAtEduGAINScale(t *testing.T) {
 		people = 20000000
 		scopes = 4000
 	)
-	seen := make(map[SiteID]string, people)
-	collisions := 0
-	var first [2]string
+	// The sites, sorted, rather than a map of every identifier that produced
+	// one. Counting collisions only needs to know which values repeat, and
+	// twenty million of them are 160 MB as a slice against about ten times that
+	// as a map holding the strings too — which was most of this package's test
+	// memory, and under js/wasm there are only four gigabytes of address space
+	// to have.
+	sites := make([]uint64, 0, people)
 	for i := range people {
 		// The shape a SAML assertion hands over.
-		id := fmt.Sprintf("u%d@inst%d.ac.example", i, i%scopes)
-		site := DeriveSiteID([]byte(id))
-		if prev, clash := seen[site]; clash {
-			collisions++
-			if first[0] == "" {
-				first[0], first[1] = prev, id
-			}
-			continue
-		}
-		seen[site] = id
+		sites = append(sites, uint64(DeriveSiteID(fmt.Appendf(nil, "u%d@inst%d.ac.example", i, i%scopes))))
 	}
+	slices.Sort(sites)
+	collisions := 0
+	var clashed uint64
+	for i := 1; i < len(sites); i++ {
+		if sites[i] == sites[i-1] {
+			collisions++
+			if collisions == 1 {
+				clashed = sites[i]
+			}
+		}
+	}
+	sites = nil
+
 	// What a uniform 64-bit hash would give: n^2 / 2^65.
 	expected := float64(people) * float64(people) / 36893488147419103232.0
 	t.Logf("%d identifiers over %d scopes: %d collisions (a uniform 64-bit hash gives %.4f)",
 		people, scopes, collisions, expected)
-	if first[0] != "" {
+	if collisions > 0 {
+		// Naming the pair costs a second pass, which is worth paying only when
+		// there is something to name.
+		var first [2]string
+		for i := range people {
+			id := fmt.Sprintf("u%d@inst%d.ac.example", i, i%scopes)
+			if uint64(DeriveSiteID([]byte(id))) != clashed {
+				continue
+			}
+			if first[0] == "" {
+				first[0] = id
+				continue
+			}
+			first[1] = id
+			break
+		}
 		t.Logf("   for instance %q and %q would share a site", first[0], first[1])
 	}
 	if collisions > 0 {
