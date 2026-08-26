@@ -281,6 +281,10 @@ type Doc struct {
 	// long history back to front.
 	pending map[ID][]Op
 	parked  int
+	// absorbed collects what admit integrates while somebody is asking. Nil
+	// when nobody is, which is nearly always: see [Doc.ApplyAbsorbed].
+	absorbed  []Op
+	absorbing bool
 
 	// parkSlab is where a parked operation's one-element slice comes from.
 	//
@@ -707,6 +711,9 @@ func (d *Doc) admit(op Op) {
 			continue
 		}
 		d.integrate(next)
+		if d.absorbing {
+			d.absorbed = append(d.absorbed, next)
+		}
 		if woken, ok := d.pending[next.ID]; ok {
 			delete(d.pending, next.ID)
 			d.parked -= len(woken)

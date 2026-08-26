@@ -309,6 +309,10 @@ type Map struct {
 	// changed. It is set only for the duration of ApplyChanges, so Apply pays
 	// nothing for it.
 	touched map[string]struct{}
+	// absorbed collects what admit integrates while somebody is asking.
+	// See [Map.ApplyAbsorbed].
+	absorbed  []MapOp
+	absorbing bool
 }
 
 // A mapRecord is what a replica keeps for one key: the write that is winning,
@@ -536,6 +540,9 @@ func (m *Map) admit(op MapOp) {
 			continue
 		}
 		m.integrate(next)
+		if m.absorbing {
+			m.absorbed = append(m.absorbed, next)
+		}
 		queue = m.wake(queue, next.ID.Site, had, next.ID.Seq)
 	}
 }
