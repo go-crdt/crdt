@@ -232,6 +232,10 @@ type List struct {
 
 	dupDeletes map[ID]ID
 	present    int
+	// absorbed collects what admit integrates while somebody is asking.
+	// See [List.ApplyAbsorbed].
+	absorbed  []ListOp
+	absorbing bool
 }
 
 // NewList returns an empty list that issues operations as site. Every replica
@@ -461,6 +465,9 @@ func (l *List) admit(op ListOp) {
 			continue
 		}
 		l.integrate(next)
+		if l.absorbing {
+			l.absorbed = append(l.absorbed, next)
+		}
 		if woken, ok := l.pending[next.ID]; ok {
 			delete(l.pending, next.ID)
 			l.parked -= len(woken)
