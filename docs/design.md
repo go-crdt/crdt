@@ -330,6 +330,52 @@ repairable by anything downstream: the value changes with no operation having
 been applied, so the replica silently disagrees with every peer that received
 the same operation, and no later operation says what it should have been.
 
+### Trading the past for size, and what that costs
+
+A replica remembers every operation it ever applied, deletions included, because
+a replica that forgot could not tell a character arriving late from one it had
+already seen. That memory is what lets two copies merge with no server, and it
+is also why a heavily revised document is larger than its text.
+
+`Rewritten` builds a new replica holding the same content and none of the past.
+What it recovers is exactly what was deleted, and nothing else — which is worth
+saying with numbers, because the intuition that documents grow without bound is
+half wrong. On a text of 40 000 edits:
+
+| deleted | with its past | rewritten | smaller by |
+| --- | --- | --- | --- |
+| nothing | 2226.6 KB | 2226.6 KB | 1.0x |
+| a ninth | 2062.6 KB | 1781.3 KB | 1.2x |
+| a third | 1816.5 KB | 1113.4 KB | 1.6x |
+| all of it | 1386.8 KB | 0.1 KB | 17110x |
+
+Live content is irreducible; only the dead part can be given back. A document
+nobody deletes from has nothing to gain, and the common case — steady writing
+with some revision — gains about a factor of two, not the order of magnitude the
+emptied case suggests.
+
+The price is every identity. The new replica mints its own, so an old copy's
+operations anchor to characters the new one never had: they are not rejected and
+they corrupt nothing, they park as pending and stay there. A rewrite therefore
+*replaces* the replicas that preceded it rather than joining them, which is only
+safe where a document is quiescent — being archived, or compacted by its single
+writer.
+
+And it is why there is no `Rewritten` on `Composite`. This is the trap
+`Proposals` exists to avoid, one level down: rich text marks, tree parents and
+sequence positions are stored against the identities of the characters they
+describe, and a composite cannot tell a part carrying such anchors from a part
+of plain text. Offering one would silently empty the mark table of every
+formatted document it touched. Rewrite the parts known to be plain, or rebuild
+the anchors deliberately.
+
+Reclaiming space *without* breaking identities means collecting tombstones once
+no replica can still refer to them, and that is not a smaller version of this.
+In RGA an insertion anchors to the element preceding it, tombstones included, so
+a tombstone is load-bearing until every replica that might anchor to it is
+accounted for — which needs causal stability, and causal stability needs to know
+the set of replicas. That is a different design, not a tuning of this one.
+
 ## Counting in UTF-16
 
 The document counts characters. CodeMirror, the DOM, the Language Server
