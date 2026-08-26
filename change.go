@@ -29,7 +29,7 @@ type Change struct {
 //
 // A malformed operation is rejected and nothing in the batch is applied.
 func (d *Doc) Apply(ops ...Op) error {
-	_, err := d.applyWith(false, ops)
+	_, err := d.applyWith(false, ops, nil)
 	return err
 }
 
@@ -43,10 +43,10 @@ func (d *Doc) Apply(ops ...Op) error {
 // Finding where each edit landed costs a walk up the index per operation, which
 // [Doc.Apply] does not pay. Use that one when nothing is watching.
 func (d *Doc) ApplyChanges(ops ...Op) ([]Change, error) {
-	return d.applyWith(true, ops)
+	return d.applyWith(true, ops, nil)
 }
 
-func (d *Doc) applyWith(watching bool, ops []Op) ([]Change, error) {
+func (d *Doc) applyWith(watching bool, ops []Op, absorbed *[]Op) ([]Change, error) {
 	for _, op := range ops {
 		if err := op.validate(); err != nil {
 			return nil, err
@@ -57,7 +57,7 @@ func (d *Doc) applyWith(watching bool, ops []Op) ([]Change, error) {
 		defer func() { d.collect = nil }()
 	}
 	for _, op := range ops {
-		d.admit(op)
+		d.admit(op, absorbed)
 	}
 	if !watching {
 		return nil, nil

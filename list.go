@@ -232,10 +232,6 @@ type List struct {
 
 	dupDeletes map[ID]ID
 	present    int
-	// absorbed collects what admit integrates while somebody is asking.
-	// See [List.ApplyAbsorbed].
-	absorbed  []ListOp
-	absorbing bool
 }
 
 // NewList returns an empty list that issues operations as site. Every replica
@@ -406,7 +402,7 @@ func (l *List) Delete(pos, count int) ([]ListOp, error) {
 //
 // A malformed operation is rejected and nothing in the batch is applied.
 func (l *List) Apply(ops ...ListOp) error {
-	_, err := l.applyWith(false, ops)
+	_, err := l.applyWith(false, ops, nil)
 	return err
 }
 
@@ -423,10 +419,10 @@ func (l *List) Apply(ops ...ListOp) error {
 // not. A caller that needs the positions can be given them without breaking
 // anyone; none has needed them yet.
 func (l *List) ApplyChanges(ops ...ListOp) (bool, error) {
-	return l.applyWith(true, ops)
+	return l.applyWith(true, ops, nil)
 }
 
-func (l *List) applyWith(watching bool, ops []ListOp) (bool, error) {
+func (l *List) applyWith(watching bool, ops []ListOp, absorbed *[]ListOp) (bool, error) {
 	for _, op := range ops {
 		if err := op.validate(); err != nil {
 			return false, err
@@ -434,7 +430,7 @@ func (l *List) applyWith(watching bool, ops []ListOp) (bool, error) {
 	}
 	if !watching {
 		for _, op := range ops {
-			l.admit(op)
+			l.admit(op, absorbed)
 		}
 		return false, nil
 	}
@@ -445,14 +441,16 @@ func (l *List) applyWith(watching bool, ops []ListOp) (bool, error) {
 	// nothing for a comparison it will not make.
 	before := l.vv.Clone()
 	for _, op := range ops {
-		l.admit(op)
+		l.admit(op, absorbed)
 	}
 	return !before.Equal(l.vv), nil
 }
 
 // admit integrates an operation, or files it under whatever it waits for, and
 // then does the same for everything that was waiting on what it integrated.
-func (l *List) admit(op ListOp) {
+// admit takes an optional place to record what it integrates; see
+// [Doc.admit] on why it is a parameter and not a field.
+func (l *List) admit(op ListOp, absorbed *[]ListOp) {
 	queue := []ListOp{op}
 	for len(queue) > 0 {
 		next := queue[len(queue)-1]
@@ -465,8 +463,8 @@ func (l *List) admit(op ListOp) {
 			continue
 		}
 		l.integrate(next)
-		if l.absorbing {
-			l.absorbed = append(l.absorbed, next)
+		if absorbed != nil {
+			*absorbed = append(*absorbed, next)
 		}
 		if woken, ok := l.pending[next.ID]; ok {
 			delete(l.pending, next.ID)

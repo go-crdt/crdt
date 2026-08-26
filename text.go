@@ -281,10 +281,6 @@ type Doc struct {
 	// long history back to front.
 	pending map[ID][]Op
 	parked  int
-	// absorbed collects what admit integrates while somebody is asking. Nil
-	// when nobody is, which is nearly always: see [Doc.ApplyAbsorbed].
-	absorbed  []Op
-	absorbing bool
 
 	// parkSlab is where a parked operation's one-element slice comes from.
 	//
@@ -698,7 +694,13 @@ func (d *Doc) Delete(pos, length int) ([]Op, error) {
 //
 // The work list is explicit rather than recursive: a history delivered back to
 // front unblocks a chain as long as the history itself.
-func (d *Doc) admit(op Op) {
+// admit takes an optional place to record what it integrates. Nil, which is
+// what every path but [Doc.ApplyAbsorbed] passes, because a replica that nobody
+// is asking must not carry a field for the question: these structures are made
+// by the hundred thousand in a test and by the million in a document, and
+// twenty-four bytes each is how a suite that fits in a browser's four gigabytes
+// stops fitting.
+func (d *Doc) admit(op Op, absorbed *[]Op) {
 	queue := []Op{op}
 	for len(queue) > 0 {
 		next := queue[len(queue)-1]
@@ -711,8 +713,8 @@ func (d *Doc) admit(op Op) {
 			continue
 		}
 		d.integrate(next)
-		if d.absorbing {
-			d.absorbed = append(d.absorbed, next)
+		if absorbed != nil {
+			*absorbed = append(*absorbed, next)
 		}
 		if woken, ok := d.pending[next.ID]; ok {
 			delete(d.pending, next.ID)
