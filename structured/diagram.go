@@ -126,6 +126,89 @@ func (d *Diagram) Apply(batches ...crdt.PartOps) error { return d.doc.Apply(batc
 // part, for the operations they depend on.
 func (d *Diagram) Pending() int { return d.doc.Pending() }
 
+// Composite returns the document underneath, for a caller that needs the parts
+// themselves.
+func (d *Diagram) Composite() *crdt.Composite { return d.doc }
+
+// Sweep removes the properties of nodes and connectors that are no longer in the
+// diagram.
+//
+// It is the counterpart of [Diagram.RemoveNode] being one operation. Removing a
+// node takes it out of the list of what exists; its label, its colour and its
+// position stay in the map, keyed by a node nothing can reach any more. That is
+// deliberate — a removal should be one operation, not one per property somebody
+// happened to set — and it means a diagram worked on for a while carries every
+// node it ever held.
+//
+// This is what takes those bytes away, and it belongs where [Ink.Sweep]
+// belongs: run when the drawing is quiet rather than while somebody is editing
+// it. It has the same hazard for the same reason — a peer may be setting a
+// property on a node this replica has been told to remove, and that arrives
+// after the sweep and is swept by the next one. Nothing is corrupted; the node
+// is removed, which is what was asked.
+//
+// Sweeping turns unreachable records into tombstones. [Diagram.Collect] is what
+// gives the tombstones back, once every replica has seen them go.
+func (d *Diagram) Sweep() ([]crdt.PartOps, error) {
+	live := map[string]bool{}
+	for _, n := range d.Nodes() {
+		live[encodeID(crdt.ID(n))] = true
+	}
+	var nodeOps []crdt.MapOp
+	for _, rec := range d.nodeProps.Records() {
+		if live[rec] {
+			continue
+		}
+		got, err := d.nodeProps.DeleteRecord(rec)
+		if err != nil {
+			return nil, err
+		}
+		nodeOps = append(nodeOps, got...)
+	}
+
+	liveConns := map[string]bool{}
+	for _, c := range d.Conns() {
+		liveConns[encodeID(crdt.ID(c))] = true
+	}
+	var connOps []crdt.MapOp
+	for _, rec := range d.connProps.Records() {
+		if liveConns[rec] {
+			continue
+		}
+		got, err := d.connProps.DeleteRecord(rec)
+		if err != nil {
+			return nil, err
+		}
+		connOps = append(connOps, got...)
+	}
+
+	var out []crdt.PartOps
+	if len(nodeOps) > 0 {
+		out = append(out, crdt.PartOps{Part: nodePropsPart, Map: nodeOps})
+	}
+	if len(connOps) > 0 {
+		out = append(out, crdt.PartOps{Part: connPropsPart, Map: connOps})
+	}
+	if len(out) == 0 {
+		return nil, ErrNoChange
+	}
+	return out, nil
+}
+
+// Collect gives back what a diagram that has been worked on no longer needs: the
+// nodes and connectors that were removed, and the records saying they were.
+//
+// A diagram is where this is worth asking for by hand. Its nodes live in a list
+// and their properties in a map, and neither gives anything back on its own: a
+// node dragged around and then deleted leaves an element and a record per
+// property behind it, for good. On a diagram of two hundred nodes half of which
+// were tried and removed, that is most of what the file weighs.
+//
+// stable must be a version every replica has delivered, per part; see
+// [crdt.Doc.Collect] for what that means and who can know it. A part it does not
+// name is left alone.
+func (d *Diagram) Collect(stable crdt.CompositeVersion) int { return d.doc.Collect(stable) }
+
 // AddNode adds a node and returns its identity and the operation to broadcast.
 // The node has no fields yet.
 func (d *Diagram) AddNode() (NodeID, crdt.PartOps, error) {

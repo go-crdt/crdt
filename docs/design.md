@@ -417,6 +417,62 @@ it is tested rather than argued: four hundred random histories, collected on one
 replica and not on the other, then eighty concurrent edits each delivered in a
 shuffled order, and the two must agree.
 
+#### A list, a map, and a document of parts
+
+A list collects on the same terms and is simpler to collect: every element
+carries its own origin, so there is no rule that one goes only with its
+neighbours. The only extra care is a removal two replicas made at once, which is
+recorded against the element it removed and so has to be stable as well.
+
+A map is different in kind, and easier. It keeps one record per key rather than
+one per edit, so what accumulates is not the history of a key but the keys that
+were deleted — and a tombstone is kept for exactly one reason, which
+`Map.integrate` states: it stops an older set resurrecting a key somebody has
+since deleted. It may go once no such write can still arrive. Nothing on the wire
+changes, because a map *already* gives back a sequence number without its
+operation — a second write to a key overwrites the first, and `OpsSince` reports
+the gap as `MapSuperseded` rather than pretending the operation is still here.
+Collecting frees a sequence number the same way and the same span covers it, so
+there is no format version and no floor to persist.
+
+What a map needs instead is a different guard. Misused, it does not strand an
+operation, it **resurrects a key** — silently, and on one replica only. And the
+mistake cannot be recognised by identity: the offending write is one this
+replica has never seen, so it is above its version vector and above any floor.
+So a map remembers the highest *clock* it collected under and refuses a write at
+or below it for a key it does not hold. Under correct use no such write can
+arrive, so the guard never fires; when it does, it is naming the mistake.
+
+`Composite.Collect` collects every part the caller vouches for, and a part it
+does not name is left alone. This is where the difference between collecting and
+rewriting is worth stating plainly, because it is why one is offered on a
+composite and the other is refused. A rewrite mints new identities, and the
+structured layer keeps rich text marks, tree parents and sequence positions
+against the identities of the characters they describe — so a rewrite would
+empty every one of them. Collection keeps every identity it does not drop, and
+drops only what is already invisible and already agreed to be gone: a mark on a
+character that is collected was a mark on text nobody could see, and it stays
+exactly as inert as it was. Tested rather than argued, on rich text with a mark
+over the run that gets collected.
+
+#### Two steps for a diagram, and why
+
+A diagram is where compaction has to be asked for by hand, and where asking once
+is not enough. `RemoveNode` takes a node out of the list of what exists and
+leaves its label, its colour and its position in the map, keyed by a node nothing
+can reach. That is deliberate — a removal should be one operation, not one per
+property somebody happened to set — and it means a worked-on diagram carries
+every node it ever held, as live records rather than tombstones. Collection
+cannot touch live records.
+
+So there are two deliberate actions, and they do different work. `Diagram.Sweep`
+turns the unreachable records into tombstones; `Diagram.Collect` gives the
+tombstones back. Measured on a diagram of two hundred nodes, half of them tried
+and removed, each placed, labelled, coloured and moved five times: 16 420 bytes,
+14 734 after sweeping, **8 197 after collecting — 2.0x**. Sweeping alone is worth
+almost nothing, which is the point: it converts one kind of weight into another,
+and only the second step is a saving.
+
 #### What it costs
 
 **A peer that is behind.** `OpsSince` on a collected replica cannot hand back a

@@ -1090,6 +1090,10 @@ func TestMapOpDecoderRejects(t *testing.T) {
 func encodeMapSnapshot(parts ...any) []byte {
 	out := append([]byte{}, mapMagic[:]...)
 	out = append(out, mapVersion)
+	// Version 2: the clock tombstones were collected under. Nothing built here
+	// has ever been collected, so it is zero — and a case that wants to say
+	// otherwise passes it as the first part.
+	out = binary.AppendUvarint(out, 0)
 	for _, part := range parts {
 		switch v := part.(type) {
 		case uint64:

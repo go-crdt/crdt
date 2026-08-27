@@ -1579,6 +1579,7 @@ func TestLoadCompositeHoldsTheClockCeiling(t *testing.T) {
 	// A map snapshot whose vector promises a sequence number past the ceiling.
 	beyond := append([]byte{}, mapMagic[:]...)
 	beyond = append(beyond, mapVersion)
+	beyond = binary.AppendUvarint(beyond, 0) // version 2: nothing collected
 	beyond = binary.AppendUvarint(beyond, 1)
 	beyond = binary.AppendUvarint(beyond, 1)
 	beyond = binary.AppendUvarint(beyond, MaxClock+1)

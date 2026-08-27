@@ -309,6 +309,12 @@ type Map struct {
 	// changed. It is set only for the duration of ApplyChanges, so Apply pays
 	// nothing for it.
 	touched map[string]struct{}
+
+	// collectedBelow is the highest clock a tombstone was dropped under by
+	// [Map.Collect], and zero for a map nobody has collected. It is what
+	// recognises a write that would have lost to a tombstone that is gone; see
+	// [Map.Collect].
+	collectedBelow uint64
 }
 
 // A mapRecord is what a replica keeps for one key: the write that is winning,
@@ -506,7 +512,9 @@ func (m *Map) applyWith(watching bool, ops []MapOp, absorbed *[]MapOp) ([]string
 		defer func() { m.touched = nil }()
 	}
 	for _, op := range ops {
-		m.admit(op, absorbed)
+		if err := m.admit(op, absorbed); err != nil {
+			return nil, err
+		}
 	}
 	if !watching || len(m.touched) == 0 {
 		return nil, nil
@@ -524,7 +532,7 @@ func (m *Map) applyWith(watching bool, ops []MapOp, absorbed *[]MapOp) ([]string
 // to front unblocks a chain as long as the history itself.
 // admit takes an optional place to record what it integrates; see
 // [Doc.admit] on why it is a parameter and not a field.
-func (m *Map) admit(op MapOp, absorbed *[]MapOp) {
+func (m *Map) admit(op MapOp, absorbed *[]MapOp) error {
 	queue := []MapOp{op}
 	for len(queue) > 0 {
 		next := queue[len(queue)-1]
@@ -537,12 +545,16 @@ func (m *Map) admit(op MapOp, absorbed *[]MapOp) {
 			m.park(next)
 			continue
 		}
+		if m.resurrects(next) {
+			return ErrStranded
+		}
 		m.integrate(next)
 		if absorbed != nil {
 			*absorbed = append(*absorbed, next)
 		}
 		queue = m.wake(queue, next.ID.Site, had, next.ID.Seq)
 	}
+	return nil
 }
 
 // park files an operation under the one it is waiting for.
@@ -711,7 +723,10 @@ func supersededRun(site SiteID, first, last uint64) MapOp {
 // length where a version byte was meant.
 var mapMagic = [...]byte{'c', 'r', 'd', 't', 'm'}
 
-const mapVersion = 1
+const (
+	mapVersion   = 2
+	mapVersionV1 = 1
+)
 
 // Snapshot encodes the whole map — every key ever written, deleted ones
 // included, each with the identity and Lamport timestamp of the write it holds —
@@ -732,6 +747,11 @@ func (m *Map) Snapshot() []byte {
 	out := make([]byte, 0, len(mapMagic)+1+3*len(sites)+16*len(m.records))
 	out = append(out, mapMagic[:]...)
 	out = append(out, mapVersion)
+	// Version 2: the clock tombstones were collected under, zero for a map
+	// nobody has collected, which costs one byte. Without it a reloaded map
+	// forgets that a write it does not recognise may be one that should have
+	// lost, and lets a collected key come back.
+	out = binary.AppendUvarint(out, m.collectedBelow)
 
 	out = binary.AppendUvarint(out, uint64(len(sites)))
 	for _, site := range sites {
@@ -784,11 +804,22 @@ func LoadMap(site SiteID, snapshot []byte) (*Map, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || v[0] != mapVersion {
+	if !ok || (v[0] != mapVersion && v[0] != mapVersionV1) {
 		return nil, ErrMalformed
 	}
+	version := v[0]
 
 	m := NewMap(site)
+	if version >= mapVersion {
+		below, ok := r.uvarint()
+		// A clock above the ceiling names an operation no replica could have
+		// issued, and this one decides which writes are refused: a crafted
+		// value would refuse every write there is.
+		if !ok || below > MaxClock {
+			return nil, ErrMalformed
+		}
+		m.collectedBelow = below
+	}
 	nSites, ok := r.uvarint()
 	if !ok {
 		return nil, ErrMalformed
