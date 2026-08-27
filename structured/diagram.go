@@ -116,7 +116,9 @@ func (d *Diagram) Version() crdt.CompositeVersion { return d.doc.Version() }
 
 // OpsSince returns the operations this replica holds that v does not, batched by
 // part. Pass a nil version for everything.
-func (d *Diagram) OpsSince(v crdt.CompositeVersion) []crdt.PartOps { return d.doc.OpsSince(v) }
+func (d *Diagram) OpsSince(v crdt.CompositeVersion) ([]crdt.PartOps, error) {
+	return d.doc.OpsSince(v)
+}
 
 // Apply integrates batches of operations from peers, tolerating duplicates and
 // reordering.

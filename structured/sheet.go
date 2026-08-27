@@ -81,7 +81,9 @@ func (s *Sheet) Version() crdt.CompositeVersion { return s.doc.Version() }
 // OpsSince returns the operations this replica holds that v does not, batched by
 // part and ready to send to the peer that produced v. Pass a nil version for
 // everything.
-func (s *Sheet) OpsSince(v crdt.CompositeVersion) []crdt.PartOps { return s.doc.OpsSince(v) }
+func (s *Sheet) OpsSince(v crdt.CompositeVersion) ([]crdt.PartOps, error) {
+	return s.doc.OpsSince(v)
+}
 
 // Apply integrates batches of operations from peers, tolerating duplicates and
 // reordering exactly as the underlying parts do.

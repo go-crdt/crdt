@@ -265,7 +265,7 @@ func TestADocumentAgreesWithItself(t *testing.T) {
 				// The peer edits too, so the document integrates work it did
 				// not make — which is the path that builds the index by a
 				// different road.
-				if err := peer.Apply(d.OpsSince(peer.Version())...); err != nil {
+				if err := peer.Apply(must(d.OpsSince(peer.Version()))...); err != nil {
 					t.Fatalf("%s: peer catching up: %v", what, err)
 				}
 				at := rng.IntN(peer.Len() + 1)
@@ -317,7 +317,7 @@ func TestADocumentBuiltFromOperationsAgreesWithItself(t *testing.T) {
 	if _, err := source.Delete(100, 200); err != nil {
 		t.Fatal(err)
 	}
-	ops := source.OpsSince(nil)
+	ops := must(source.OpsSince(nil))
 
 	for seed := range uint64(20) {
 		rng := rand.New(rand.NewPCG(seed, 7))
@@ -463,7 +463,7 @@ func TestAListAgreesWithItself(t *testing.T) {
 					t.Fatalf("%s: Insert: %v", what, err)
 				}
 			case rng.IntN(3) == 0:
-				if err := peer.Apply(l.OpsSince(peer.Version())...); err != nil {
+				if err := peer.Apply(must(l.OpsSince(peer.Version()))...); err != nil {
 					t.Fatalf("%s: peer catching up: %v", what, err)
 				}
 				ops, err := peer.Insert(rng.IntN(peer.Len()+1), []byte("peer"))

@@ -51,7 +51,7 @@ func TestSnapshotPreservesHistory(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	fresh := New(3)
-	apply(t, fresh, loaded.OpsSince(nil))
+	apply(t, fresh, must(loaded.OpsSince(nil)))
 	if got, want := fresh.String(), a.String(); got != want {
 		t.Fatalf("replaying a loaded snapshot gave %q, want %q", got, want)
 	}
@@ -313,7 +313,7 @@ func TestSnapshotCarriesDuplicateDeletions(t *testing.T) {
 		t.Fatal("the losing deletion did not survive the round trip")
 	}
 	fresh := New(4)
-	apply(t, fresh, loaded.OpsSince(nil))
+	apply(t, fresh, must(loaded.OpsSince(nil)))
 	if !fresh.Version().Equal(a.Version()) {
 		t.Fatalf("Version() = %v, want %v", fresh.Version(), a.Version())
 	}
@@ -570,7 +570,7 @@ func TestLoadReadsASnapshotWrittenByVersionOne(t *testing.T) {
 	// It must be usable, not merely readable: the history replays, and writing it
 	// out again produces the current format, which reloads to the same thing.
 	peer := New(8)
-	apply(t, peer, d.OpsSince(nil))
+	apply(t, peer, must(d.OpsSince(nil)))
 	if got := peer.String(); got != want {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
@@ -625,7 +625,7 @@ func TestLoadReadsASnapshotWrittenByVersionThree(t *testing.T) {
 	}
 
 	peer := New(8)
-	apply(t, peer, d.OpsSince(nil))
+	apply(t, peer, must(d.OpsSince(nil)))
 	if got := peer.String(); got != want {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
@@ -687,7 +687,7 @@ func TestLoadReadsASnapshotWrittenByVersionTwo(t *testing.T) {
 	// the same tombstones. The tombstones matter here more than anywhere else —
 	// they are what the changed field names.
 	peer := New(8)
-	apply(t, peer, d.OpsSince(nil))
+	apply(t, peer, must(d.OpsSince(nil)))
 	if got := peer.String(); got != want {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}

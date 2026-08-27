@@ -84,7 +84,7 @@ func BenchmarkInsertAtStart(b *testing.B) {
 // Applying a peer's operation needs no walk: the origin is found by identity.
 func BenchmarkApplyRemote(b *testing.B) {
 	source, _ := filled(b, benchSize)
-	ops := source.OpsSince(nil)
+	ops := must(source.OpsSince(nil))
 	b.ResetTimer()
 	for range b.N {
 		b.StopTimer()
@@ -188,7 +188,7 @@ func BenchmarkMemoryPerCharacter(b *testing.B) {
 // in step does, once per operation, for a walk up the index.
 func BenchmarkApplyRemoteWithChanges(b *testing.B) {
 	source, _ := filled(b, benchSize)
-	ops := source.OpsSince(nil)
+	ops := must(source.OpsSince(nil))
 	b.ResetTimer()
 	for range b.N {
 		if _, err := New(2).ApplyChanges(ops...); err != nil {
@@ -260,7 +260,7 @@ func loomShaped(b *testing.B) *Composite {
 	// Two more replicas touch every part, so no part's version is a single site.
 	for _, site := range benchSites[1:] {
 		peer := NewComposite(site)
-		if err := peer.Apply(c.OpsSince(nil)...); err != nil {
+		if err := peer.Apply(must(c.OpsSince(nil))...); err != nil {
 			b.Fatal(err)
 		}
 		var back []PartOps
@@ -333,7 +333,7 @@ func BenchmarkCompositeOpsSinceNothing(b *testing.B) {
 	c := loomShaped(b)
 	b.ResetTimer()
 	for range b.N {
-		if len(c.OpsSince(nil)) == 0 {
+		if len(must(c.OpsSince(nil))) == 0 {
 			b.Fatal("nothing to send")
 		}
 	}
@@ -346,7 +346,7 @@ func BenchmarkCompositeOpsSinceNothing(b *testing.B) {
 func BenchmarkCompositeOpsSinceOnePart(b *testing.B) {
 	c := loomShaped(b)
 	peer := NewComposite(99)
-	if err := peer.Apply(c.OpsSince(nil)...); err != nil {
+	if err := peer.Apply(must(c.OpsSince(nil))...); err != nil {
 		b.Fatal(err)
 	}
 	held := peer.Version()
@@ -359,7 +359,7 @@ func BenchmarkCompositeOpsSinceOnePart(b *testing.B) {
 	}
 	b.ResetTimer()
 	for range b.N {
-		if len(c.OpsSince(held)) != 1 {
+		if len(must(c.OpsSince(held))) != 1 {
 			b.Fatal("want the one part that moved")
 		}
 	}
@@ -390,7 +390,7 @@ func BenchmarkCompositeVersionMarshal(b *testing.B) {
 // pay for entirely different things.
 func BenchmarkAppendPartOps(b *testing.B) {
 	c := loomShaped(b)
-	batches := c.OpsSince(nil)
+	batches := must(c.OpsSince(nil))
 	message, err := AppendPartOps(nil, batches)
 	if err != nil {
 		b.Fatal(err)
@@ -417,7 +417,7 @@ func BenchmarkAppendPartOps(b *testing.B) {
 }
 
 func BenchmarkParsePartOps(b *testing.B) {
-	message, err := AppendPartOps(nil, loomShaped(b).OpsSince(nil))
+	message, err := AppendPartOps(nil, must(loomShaped(b).OpsSince(nil)))
 	if err != nil {
 		b.Fatal(err)
 	}

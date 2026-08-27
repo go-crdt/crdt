@@ -257,7 +257,7 @@ func TestConcurrentDeleteOfSameCharacter(t *testing.T) {
 	}
 
 	c := New(3)
-	apply(t, c, a.OpsSince(nil))
+	apply(t, c, must(a.OpsSince(nil)))
 	if got, want := c.String(), a.String(); got != want {
 		t.Fatalf("third replica String() = %q, want %q", got, want)
 	}
@@ -339,7 +339,7 @@ func TestOpsSinceSendsOnlyWhatIsMissing(t *testing.T) {
 	insert(t, a, 3, "def")
 	remove(t, a, 0, 1)
 
-	missing := a.OpsSince(mark)
+	missing := must(a.OpsSince(mark))
 	if got, want := len(missing), 4; got != want {
 		t.Fatalf("OpsSince returned %d operations, want %d", got, want)
 	}
@@ -347,7 +347,7 @@ func TestOpsSinceSendsOnlyWhatIsMissing(t *testing.T) {
 	if got, want := b.String(), a.String(); got != want {
 		t.Fatalf("String() = %q, want %q", got, want)
 	}
-	if got := a.OpsSince(b.Version()); len(got) != 0 {
+	if got := must(a.OpsSince(b.Version())); len(got) != 0 {
 		t.Fatalf("OpsSince after catching up returned %d operations, want 0", len(got))
 	}
 }
@@ -357,7 +357,7 @@ func TestOpsSinceIsCausallyOrderedForInsertions(t *testing.T) {
 	insert(t, d, 0, "abcdef")
 	remove(t, d, 1, 2)
 	seen := map[ID]bool{{}: true}
-	for _, op := range d.OpsSince(nil) {
+	for _, op := range must(d.OpsSince(nil)) {
 		if op.Kind != OpInsert {
 			continue
 		}
@@ -430,7 +430,7 @@ func TestRemoteOperationClearsTheMark(t *testing.T) {
 		t.Fatal("integrating a peer's operation left the mark in place")
 	}
 	insert(t, b, 4, "X")
-	apply(t, a, b.OpsSince(a.Version()))
+	apply(t, a, must(b.OpsSince(a.Version())))
 	if got, want := b.String(), a.String(); got != want {
 		t.Fatalf("diverged: b = %q, a = %q", got, want)
 	}
@@ -466,7 +466,7 @@ func TestADeletionsIdentityNamesNoCharacter(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			d := New(3)
-			apply(t, d, source.OpsSince(nil))
+			apply(t, d, must(source.OpsSince(nil)))
 			apply(t, d, []Op{tt.op})
 			if got := d.Pending(); got != 1 {
 				t.Fatalf("Pending() = %d, want 1: the operation was integrated", got)
@@ -513,7 +513,7 @@ func TestDeletionsAreStoredAsStretches(t *testing.T) {
 	// Every deletion still has to be repeatable to a peer, one operation per
 	// character, whatever the records look like here.
 	peer := New(2)
-	apply(t, peer, d.OpsSince(nil))
+	apply(t, peer, must(d.OpsSince(nil)))
 	if got, want := peer.String(), d.String(); got != want {
 		t.Fatalf("the peer holds %q, want %q", got, want)
 	}
@@ -555,7 +555,7 @@ func TestAnInsertionInsideADeletedStretchDividesTheRecord(t *testing.T) {
 
 	// The divided records must still name the right operations.
 	third := New(3)
-	apply(t, third, a.OpsSince(nil))
+	apply(t, third, must(a.OpsSince(nil)))
 	if got, want := third.String(), "abXef"; got != want {
 		t.Fatalf("replaying gave %q, want %q", got, want)
 	}

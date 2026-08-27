@@ -505,3 +505,115 @@ func TestCanReplayIsFalseBelowTheFloor(t *testing.T) {
 		t.Fatalf("re-seeded to %q, want %q", fresh.String(), a.String())
 	}
 }
+
+// The point of the change: a difference below the floor is refused rather than
+// handed over with holes in it.
+//
+// A replica applying a batch with a gap in a site's sequence numbers parks
+// everything after the gap and says nothing — every operation in it is
+// well-formed, and the one that would let the rest through is not coming. So
+// the replica that would have sent it says no, and the caller sends a snapshot.
+func TestOpsSinceRefusesBelowTheFloor(t *testing.T) {
+	a, b := New(1), New(2)
+	mine, err := a.Insert(0, "AAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Apply(mine...); err != nil {
+		t.Fatal(err)
+	}
+	behind := b.Version()
+	theirs, err := b.Insert(b.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(theirs...); err != nil {
+		t.Fatal(err)
+	}
+
+	// Before collecting, a difference from where b stood is an answer.
+	if _, err := a.OpsSince(behind); err != nil {
+		t.Fatalf("OpsSince before collecting = %v, want an answer", err)
+	}
+	if _, err := a.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.Collect(a.Version()); n != 3 {
+		t.Fatalf("collected %d characters, want 3", n)
+	}
+	if _, err := a.OpsSince(behind); !errors.Is(err, ErrCollected) {
+		t.Fatalf("OpsSince below the floor = %v, want ErrCollected", err)
+	}
+	// From its own version, and from anything at or above the floor, it still
+	// answers.
+	if _, err := a.OpsSince(a.Version()); err != nil {
+		t.Fatalf("OpsSince at the current version = %v, want an answer", err)
+	}
+}
+
+// A list refuses the same way, and a composite refuses for the whole document
+// rather than a part at a time.
+func TestListAndCompositeOpsSinceRefuseBelowTheFloor(t *testing.T) {
+	l := NewList(1)
+	if _, err := l.Insert(0, []byte("one")); err != nil {
+		t.Fatal(err)
+	}
+	early := l.Version()
+	peer := NewList(2)
+	if err := peer.Apply(must(l.OpsSince(nil))...); err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := peer.Insert(peer.Len(), []byte("two"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Apply(theirs...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := l.Delete(0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if n := l.Collect(l.Version()); n != 1 {
+		t.Fatalf("collected %d elements, want 1", n)
+	}
+	if _, err := l.OpsSince(early); !errors.Is(err, ErrCollected) {
+		t.Fatalf("List.OpsSince below the floor = %v, want ErrCollected", err)
+	}
+
+	c := NewComposite(1)
+	body, err := c.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Insert(0, "AAA"); err != nil {
+		t.Fatal(err)
+	}
+	earlyComposite := c.Version()
+	other := NewComposite(2)
+	if err := other.Apply(must(c.OpsSince(nil))...); err != nil {
+		t.Fatal(err)
+	}
+	otherBody, err := other.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	more, err := otherBody.Insert(otherBody.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Apply(PartOps{Part: Part{Kind: PartText, Name: "body"}, Text: more}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := c.Collect(c.Version()); n != 3 {
+		t.Fatalf("collected %d, want 3", n)
+	}
+	if _, err := c.OpsSince(earlyComposite); !errors.Is(err, ErrCollected) {
+		t.Fatalf("Composite.OpsSince below the floor = %v, want ErrCollected", err)
+	}
+	if _, err := c.OpsSince(c.Version()); err != nil {
+		t.Fatalf("Composite.OpsSince at the current version = %v, want an answer", err)
+	}
+}

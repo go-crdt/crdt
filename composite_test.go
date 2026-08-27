@@ -318,7 +318,7 @@ func TestCompositeSnapshotRoundTrip(t *testing.T) {
 	}
 	// And the whole history is still there to serve a peer that has been away.
 	fresh := NewComposite(3)
-	if err := fresh.Apply(loaded.OpsSince(nil)...); err != nil {
+	if err := fresh.Apply(must(loaded.OpsSince(nil))...); err != nil {
 		t.Fatalf("replaying a loaded document's history: %v", err)
 	}
 	if !bytes.Equal(fresh.Snapshot(), c.Snapshot()) {
@@ -345,7 +345,7 @@ func TestCompositeSnapshotOmitsEmptyParts(t *testing.T) {
 	if !ada.Version().Equal(grace.Version()) {
 		t.Fatal("a part reached for and left empty changed the version")
 	}
-	if got := len(ada.OpsSince(grace.Version())); got != 0 {
+	if got := len(must(ada.OpsSince(grace.Version()))); got != 0 {
 		t.Fatalf("an empty part offered %d batches to a peer that holds everything", got)
 	}
 }
@@ -484,13 +484,13 @@ func TestCompositeVersionRoundTrip(t *testing.T) {
 	c := filledComposite(t, 1)
 	// A second site, so the shared site table has something to share.
 	peer := NewComposite(0x9E3779B97F4A7C15)
-	if err := peer.Apply(c.OpsSince(nil)...); err != nil {
+	if err := peer.Apply(must(c.OpsSince(nil))...); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mapPart(t, peer, "cells").Set("Z9", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Apply(peer.OpsSince(c.Version())...); err != nil {
+	if err := c.Apply(must(peer.OpsSince(c.Version()))...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -833,7 +833,7 @@ func samePartOps(a, b PartOps) bool {
 
 func TestPartOpsRoundTrip(t *testing.T) {
 	c := filledComposite(t, 1)
-	batches := c.OpsSince(nil)
+	batches := must(c.OpsSince(nil))
 	if len(batches) != 4 {
 		t.Fatalf("OpsSince gave %d batches, want 4", len(batches))
 	}
@@ -886,7 +886,7 @@ func TestPartOpsRoundTrip(t *testing.T) {
 // rebuilds the document at the far end, byte for byte.
 func TestPartOpsCarryAWholeCompositeOverTheWire(t *testing.T) {
 	ada := filledComposite(t, 1)
-	message, err := AppendPartOps(nil, ada.OpsSince(nil))
+	message, err := AppendPartOps(nil, must(ada.OpsSince(nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -910,14 +910,14 @@ func TestPartOpsCarryAWholeCompositeOverTheWire(t *testing.T) {
 		t.Fatal("a composite carried over the wire did not reproduce itself")
 	}
 	// And the peer now holds everything, so there is nothing left to send it.
-	if got := ada.OpsSince(grace.Version()); got != nil {
+	if got := must(ada.OpsSince(grace.Version())); got != nil {
 		t.Fatalf("the peer is still missing %v", got)
 	}
 	// The other direction: a reply carrying one part's operations.
 	if _, err := mapPart(t, grace, "cells").Set("C1", []byte("c")); err != nil {
 		t.Fatal(err)
 	}
-	reply, err := AppendPartOps(nil, grace.OpsSince(ada.Version()))
+	reply, err := AppendPartOps(nil, must(grace.OpsSince(ada.Version())))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1052,10 +1052,10 @@ func TestParsePartOpsRejects(t *testing.T) {
 func TestCompositeOpsSinceSkipsWhatThePeerHolds(t *testing.T) {
 	ada := filledComposite(t, 1)
 	grace := NewComposite(2)
-	if err := grace.Apply(ada.OpsSince(nil)...); err != nil {
+	if err := grace.Apply(must(ada.OpsSince(nil))...); err != nil {
 		t.Fatal(err)
 	}
-	if got := ada.OpsSince(grace.Version()); got != nil {
+	if got := must(ada.OpsSince(grace.Version())); got != nil {
 		t.Fatalf("a peer holding everything was offered %v", got)
 	}
 
@@ -1065,14 +1065,14 @@ func TestCompositeOpsSinceSkipsWhatThePeerHolds(t *testing.T) {
 	if _, err := mapPart(t, ada, "cells").Set("C3", []byte("x")); err != nil {
 		t.Fatal(err)
 	}
-	batches := ada.OpsSince(held)
+	batches := must(ada.OpsSince(held))
 	if len(batches) != 1 || batches[0].Part != (Part{Kind: PartMap, Name: "cells"}) {
 		t.Fatalf("OpsSince offered %d batches, want the one part that moved", len(batches))
 	}
 	if len(batches[0].Map) != 1 {
 		t.Fatalf("OpsSince offered %d operations, want the one that is missing", len(batches[0].Map))
 	}
-	for _, b := range ada.OpsSince(nil) {
+	for _, b := range must(ada.OpsSince(nil)) {
 		if len(b.Text)+len(b.List)+len(b.Map) == 0 {
 			t.Fatalf("OpsSince offered an empty batch for %v", b.Part)
 		}
@@ -1080,7 +1080,7 @@ func TestCompositeOpsSinceSkipsWhatThePeerHolds(t *testing.T) {
 	// A peer that is ahead on a part is not sent it either.
 	ahead := ada.Version()
 	ahead[Part{Kind: PartText, Name: "file:main.tex"}][99] = 3
-	for _, b := range ada.OpsSince(ahead) {
+	for _, b := range must(ada.OpsSince(ahead)) {
 		if b.Part.Kind == PartText {
 			t.Fatal("a peer ahead of this replica was sent the part anyway")
 		}
@@ -1092,7 +1092,7 @@ func TestCompositeCatchUpOnEachKind(t *testing.T) {
 	// position part of the way along.
 	ada := filledComposite(t, 1)
 	grace := NewComposite(2)
-	if err := grace.Apply(ada.OpsSince(nil)...); err != nil {
+	if err := grace.Apply(must(ada.OpsSince(nil))...); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(ada.Snapshot(), grace.Snapshot()) {
@@ -1108,7 +1108,7 @@ func TestCompositeCatchUpOnEachKind(t *testing.T) {
 	if _, err := mapPart(t, ada, "cells").Set("D4", []byte("y")); err != nil {
 		t.Fatal(err)
 	}
-	batches := ada.OpsSince(half)
+	batches := must(ada.OpsSince(half))
 	if len(batches) != 3 {
 		t.Fatalf("OpsSince offered %d batches, want three", len(batches))
 	}
@@ -1290,7 +1290,7 @@ func TestCompositeConvergenceAcrossSnapshot(t *testing.T) {
 			t.Fatalf("seed %d: a joining replica holds a different state", seed)
 		}
 		relayed := NewComposite(98)
-		if err := relayed.Apply(joined.OpsSince(nil)...); err != nil {
+		if err := relayed.Apply(must(joined.OpsSince(nil))...); err != nil {
 			t.Fatalf("seed %d: replaying from a joined replica: %v", seed, err)
 		}
 		if !bytes.Equal(relayed.Snapshot(), s.docs[0].Snapshot()) {
@@ -1660,13 +1660,13 @@ func compositeCorpus(t *testing.T) (snapshot, version []byte) {
 	t.Helper()
 	c := filledComposite(t, 1)
 	peer := NewComposite(2)
-	if err := peer.Apply(c.OpsSince(nil)...); err != nil {
+	if err := peer.Apply(must(c.OpsSince(nil))...); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := mapPart(t, peer, "cells").Set("Z1", []byte("z")); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Apply(peer.OpsSince(c.Version())...); err != nil {
+	if err := c.Apply(must(peer.OpsSince(c.Version()))...); err != nil {
 		t.Fatal(err)
 	}
 	encoded, err := c.Version().MarshalBinary()
@@ -1681,7 +1681,7 @@ func compositeCorpus(t *testing.T) (snapshot, version []byte) {
 // the operation decoders, by a path the others do not take.
 func FuzzParsePartOps(f *testing.F) {
 	c := filledComposite(&testing.T{}, 1)
-	message, err := AppendPartOps(nil, c.OpsSince(nil))
+	message, err := AppendPartOps(nil, must(c.OpsSince(nil)))
 	if err != nil {
 		f.Fatal(err)
 	}
@@ -1788,7 +1788,7 @@ func FuzzLoadComposite(f *testing.F) {
 			t.Fatal("a version did not survive the wire")
 		}
 		replayed := NewComposite(2)
-		if err := replayed.Apply(loaded.OpsSince(nil)...); err != nil {
+		if err := replayed.Apply(must(loaded.OpsSince(nil))...); err != nil {
 			t.Fatalf("replaying a loaded document's history was rejected: %v", err)
 		}
 		// The bytes, but only for a document that has given nothing back. What
@@ -1846,6 +1846,6 @@ func FuzzCompositeVersion(f *testing.F) {
 		}
 		// And whatever it decodes to must be usable as a peer's position.
 		c := filledComposite(&testing.T{}, 1)
-		_ = c.OpsSince(v)
+		_ = must(c.OpsSince(v))
 	})
 }

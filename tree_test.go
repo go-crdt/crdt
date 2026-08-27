@@ -288,7 +288,7 @@ func TestSameOriginFloodInsideADocument(t *testing.T) {
 	if _, err := d.Insert(0, "hello world"); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	ops := d.OpsSince(nil)
+	ops := must(d.OpsSince(nil))
 	origin := ops[4].ID // after "hello"
 
 	peer := New(2)

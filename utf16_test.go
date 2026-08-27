@@ -263,7 +263,7 @@ func TestUTF16SurvivesDeletionAndSnapshots(t *testing.T) {
 
 	// And a peer that was sent the operations rather than the snapshot.
 	peer := New(3)
-	if err := peer.Apply(d.OpsSince(nil)...); err != nil {
+	if err := peer.Apply(must(d.OpsSince(nil))...); err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
 	checkIndex(t, peer)

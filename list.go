@@ -655,7 +655,10 @@ func (l *List) Visible(anchor ID) bool {
 //
 // The result is in list order, which for insertions is a causal order: an
 // element always follows its origin.
-func (l *List) OpsSince(vv VersionVector) []ListOp {
+func (l *List) OpsSince(vv VersionVector) ([]ListOp, error) {
+	if !l.readable(vv) {
+		return nil, ErrCollected
+	}
 	var ops []ListOp
 	for _, e := range l.elements {
 		if !vv.Includes(e.id) {
@@ -685,7 +688,7 @@ func (l *List) OpsSince(vv VersionVector) []ListOp {
 			Kind: OpDelete, ID: delID, Clock: delID.Seq, Target: l.dupDeletes[delID],
 		})
 	}
-	return ops
+	return ops, nil
 }
 
 // listMagic prefixes a list snapshot, so a document snapshot handed to [LoadList]
