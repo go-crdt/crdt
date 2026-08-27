@@ -3,6 +3,7 @@ package crdt
 import (
 	"encoding/binary"
 	"errors"
+	"sort"
 )
 
 // A [List] replicates a sequence of values the way [Doc] replicates a sequence
@@ -232,6 +233,13 @@ type List struct {
 
 	dupDeletes map[ID]ID
 	present    int
+
+	// floor is the version below which this replica can no longer say what the
+	// list held, and collected counts what [List.Collect] dropped, per site, so
+	// that a loader's accounting stays exact. Both are empty until somebody
+	// collects. See [Doc.Collect].
+	floor     VersionVector
+	collected map[SiteID]uint64
 }
 
 // NewList returns an empty list that issues operations as site. Every replica
@@ -430,7 +438,9 @@ func (l *List) applyWith(watching bool, ops []ListOp, absorbed *[]ListOp) (bool,
 	}
 	if !watching {
 		for _, op := range ops {
-			l.admit(op, absorbed)
+			if err := l.admit(op, absorbed); err != nil {
+				return false, err
+			}
 		}
 		return false, nil
 	}
@@ -441,7 +451,9 @@ func (l *List) applyWith(watching bool, ops []ListOp, absorbed *[]ListOp) (bool,
 	// nothing for a comparison it will not make.
 	before := l.vv.Clone()
 	for _, op := range ops {
-		l.admit(op, absorbed)
+		if err := l.admit(op, absorbed); err != nil {
+			return false, err
+		}
 	}
 	return !before.Equal(l.vv), nil
 }
@@ -450,7 +462,7 @@ func (l *List) applyWith(watching bool, ops []ListOp, absorbed *[]ListOp) (bool,
 // then does the same for everything that was waiting on what it integrated.
 // admit takes an optional place to record what it integrates; see
 // [Doc.admit] on why it is a parameter and not a field.
-func (l *List) admit(op ListOp, absorbed *[]ListOp) {
+func (l *List) admit(op ListOp, absorbed *[]ListOp) error {
 	queue := []ListOp{op}
 	for len(queue) > 0 {
 		next := queue[len(queue)-1]
@@ -459,6 +471,9 @@ func (l *List) admit(op ListOp, absorbed *[]ListOp) {
 			continue
 		}
 		if !l.ready(next) {
+			if l.strandedBy(next) {
+				return ErrStranded
+			}
 			l.park(next)
 			continue
 		}
@@ -472,6 +487,7 @@ func (l *List) admit(op ListOp, absorbed *[]ListOp) {
 			queue = append(queue, woken...)
 		}
 	}
+	return nil
 }
 
 // ready reports whether an operation can be integrated now.
@@ -676,7 +692,10 @@ func (l *List) OpsSince(vv VersionVector) []ListOp {
 // is refused rather than misread.
 var listMagic = [...]byte{'c', 'r', 'd', 'l'}
 
-const listVersion = 1
+const (
+	listVersion   = 2
+	listVersionV1 = 1
+)
 
 // Snapshot encodes the whole list — every value, present or removed, in order,
 // plus the version vector. It is what a server sends a client joining, and what
@@ -695,6 +714,27 @@ func (l *List) Snapshot() []byte {
 	for _, site := range sites {
 		out = binary.AppendUvarint(out, uint64(site))
 		out = binary.AppendUvarint(out, l.vv[site])
+	}
+
+	// Version 2: what collection has taken away. The floor says how far back
+	// this replica can still be read, and the per-site tallies are what keeps
+	// the accounting exact — a loader counts what it reads and these are the
+	// ones it will not find. Two bytes for a list nobody has collected.
+	floorSites := l.floor.sites()
+	out = binary.AppendUvarint(out, uint64(len(floorSites)))
+	for _, site := range floorSites {
+		out = binary.AppendUvarint(out, uint64(site))
+		out = binary.AppendUvarint(out, l.floor[site])
+	}
+	goneSites := make([]SiteID, 0, len(l.collected))
+	for site := range l.collected {
+		goneSites = append(goneSites, site)
+	}
+	sort.Slice(goneSites, func(i, j int) bool { return goneSites[i] < goneSites[j] })
+	out = binary.AppendUvarint(out, uint64(len(goneSites)))
+	for _, site := range goneSites {
+		out = binary.AppendUvarint(out, uint64(site))
+		out = binary.AppendUvarint(out, l.collected[site])
 	}
 
 	out = binary.AppendUvarint(out, uint64(len(l.elements)))
@@ -733,9 +773,11 @@ func LoadList(site SiteID, snapshot []byte) (*List, error) {
 	if !ok || string(magic) != string(listMagic[:]) {
 		return nil, ErrMalformed
 	}
-	if v, ok := r.bytes(1); !ok || v[0] != listVersion {
+	v, ok := r.bytes(1)
+	if !ok || (v[0] != listVersion && v[0] != listVersionV1) {
 		return nil, ErrMalformed
 	}
+	version := v[0]
 
 	l := NewList(site)
 	nSites, ok := r.uvarint()
@@ -763,8 +805,14 @@ func LoadList(site SiteID, snapshot []byte) (*List, error) {
 	// back runs the same integration an operation would and that advances the
 	// list's vector as it goes. The snapshot's vector is the authority, and is
 	// put back once everything is in.
+	if version >= listVersion {
+		if err := readCollected(r, l.vv, &l.floor, &l.collected); err != nil {
+			return nil, err
+		}
+	}
+
 	promised := l.vv.Clone()
-	ledger := &ledger{vv: promised, seen: map[ID]struct{}{}, counts: map[SiteID]uint64{}}
+	ledger := &ledger{vv: promised, seen: map[ID]struct{}{}, counts: map[SiteID]uint64{}, gone: l.collected}
 
 	count, ok := r.uvarint()
 	if !ok || count > uint64(len(r.buf)) {

@@ -391,7 +391,12 @@ quarter of a million edits at positions a person chose — 104 852 characters an
 stay are the ones a survivor still names.
 
 `Collect` takes a version every replica has delivered and drops the runs that
-are entirely deleted at or below it. Three things make that safe:
+are entirely deleted at or below it. A list collects on the same terms and is
+simpler to collect, because every element carries its own origin where a
+character's is implicit in the run it belongs to: there is no rule that an
+element goes only together with its neighbours, and the only extra care is that
+a deletion two replicas made at once goes with the element it removed, and so
+has to be stable as well. Three things make that safe:
 
 - **A run goes whole or not at all.** A character's origin is the character
   before it in its own run, so collecting a prefix would leave the survivor

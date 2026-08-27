@@ -252,6 +252,8 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 		s = uv(s, 1)
 		s = uv(s, 1)
 		s = uv(s, vvSeq)
+		s = uv(s, 0)     // version 2: an empty collection floor
+		s = uv(s, 0)     // and nothing collected
 		s = uv(s, 1)     // one element
 		s = uv(s, 1)     // its site
 		s = uv(s, vvSeq) // its sequence number

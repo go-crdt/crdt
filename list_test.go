@@ -747,13 +747,17 @@ func TestLoadListRejectsRubbish(t *testing.T) {
 // decoder can be provoked directly rather than by corrupting good bytes and
 // hoping the corruption lands where it is needed.
 type listBuilder struct {
-	version  byte
-	sites    [][2]uint64
-	elements []encodedElement
-	count    int // overrides the encoded number of elements
-	dups     [][4]uint64
-	dupCount int
-	tail     []byte
+	version byte
+	sites   [][2]uint64
+	floor   [][2]uint64 // the collection floor: site, sequence
+	gone    [][2]uint64 // what collection took away: site, count
+	// counts override the encoded lengths of the two, to build a header that lies.
+	floorCount, goneCount int
+	elements              []encodedElement
+	count                 int // overrides the encoded number of elements
+	dups                  [][4]uint64
+	dupCount              int
+	tail                  []byte
 }
 
 type encodedElement struct {
@@ -773,6 +777,28 @@ func (b listBuilder) build() []byte {
 	for _, s := range b.sites {
 		out = binary.AppendUvarint(out, s[0])
 		out = binary.AppendUvarint(out, s[1])
+	}
+	if version >= listVersion {
+		// Version 2: the collection floor and the per-site tallies of what
+		// collection took away, both empty unless a case says otherwise.
+		nFloor := b.floorCount
+		if nFloor == 0 {
+			nFloor = len(b.floor)
+		}
+		out = binary.AppendUvarint(out, uint64(nFloor))
+		for _, f := range b.floor {
+			out = binary.AppendUvarint(out, f[0])
+			out = binary.AppendUvarint(out, f[1])
+		}
+		nGone := b.goneCount
+		if nGone == 0 {
+			nGone = len(b.gone)
+		}
+		out = binary.AppendUvarint(out, uint64(nGone))
+		for _, g := range b.gone {
+			out = binary.AppendUvarint(out, g[0])
+			out = binary.AppendUvarint(out, g[1])
+		}
 	}
 	n := b.count
 	if n == 0 {

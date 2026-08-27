@@ -226,7 +226,7 @@ func TestValuesAtEachStepOfItsOwnHistory(t *testing.T) {
 
 	for i, v := range marks {
 		var got []string
-		for _, b := range l.ValuesAt(v) {
+		for _, b := range valuesAt(t, l, v) {
 			got = append(got, string(b))
 		}
 		if len(got) != len(want[i]) {
@@ -237,15 +237,15 @@ func TestValuesAtEachStepOfItsOwnHistory(t *testing.T) {
 				t.Fatalf("at mark %d the list held %v, want %v", i, got, want[i])
 			}
 		}
-		if n := l.LenAt(v); n != len(want[i]) {
+		if n := listLenAt(t, l, v); n != len(want[i]) {
 			t.Fatalf("at mark %d the length was %d, want %d", i, n, len(want[i]))
 		}
 	}
 	// An element the caller gets back is its own: changing it does not reach
 	// into the list, as Values already promises.
-	at := l.ValuesAt(marks[1])
+	at := valuesAt(t, l, marks[1])
 	at[0][0] = 'Z'
-	if got := string(l.ValuesAt(marks[1])[0]); got != "a" {
+	if got := string(valuesAt(t, l, marks[1])[0]); got != "a" {
 		t.Fatalf("the list handed out its own storage: %q", got)
 	}
 }
@@ -275,6 +275,24 @@ func changesSince(t *testing.T, d *Doc, v VersionVector) []Change {
 	got, err := d.ChangesSince(v)
 	if err != nil {
 		t.Fatalf("ChangesSince: %v", err)
+	}
+	return got
+}
+
+func valuesAt(t *testing.T, l *List, v VersionVector) [][]byte {
+	t.Helper()
+	got, err := l.ValuesAt(v)
+	if err != nil {
+		t.Fatalf("ValuesAt: %v", err)
+	}
+	return got
+}
+
+func listLenAt(t *testing.T, l *List, v VersionVector) int {
+	t.Helper()
+	got, err := l.LenAt(v)
+	if err != nil {
+		t.Fatalf("List.LenAt: %v", err)
 	}
 	return got
 }
