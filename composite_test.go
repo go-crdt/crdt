@@ -1579,6 +1579,7 @@ func TestLoadCompositeHoldsTheClockCeiling(t *testing.T) {
 	// A map snapshot whose vector promises a sequence number past the ceiling.
 	beyond := append([]byte{}, mapMagic[:]...)
 	beyond = append(beyond, mapVersion)
+	beyond = binary.AppendUvarint(beyond, 0) // version 2: nothing collected
 	beyond = binary.AppendUvarint(beyond, 1)
 	beyond = binary.AppendUvarint(beyond, 1)
 	beyond = binary.AppendUvarint(beyond, MaxClock+1)
@@ -1790,8 +1791,17 @@ func FuzzLoadComposite(f *testing.F) {
 		if err := replayed.Apply(loaded.OpsSince(nil)...); err != nil {
 			t.Fatalf("replaying a loaded document's history was rejected: %v", err)
 		}
-		if !bytes.Equal(replayed.Snapshot(), encoded) {
-			t.Fatal("replaying the history did not reproduce the state")
+		// The bytes, but only for a document that has given nothing back. What
+		// collection dropped is in the snapshot and in no operation — nothing
+		// on the wire says "and I have forgotten some of this" — so a newcomer
+		// rebuilds what the document says while remembering no collection of
+		// its own, and its snapshot differs there and only there.
+		if !loaded.collected() {
+			if !bytes.Equal(replayed.Snapshot(), encoded) {
+				t.Fatal("replaying the history did not reproduce the state")
+			}
+		} else if replayed.collected() {
+			t.Fatal("a newcomer inherited a collection nothing sent it")
 		}
 	})
 }

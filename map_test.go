@@ -1090,6 +1090,10 @@ func TestMapOpDecoderRejects(t *testing.T) {
 func encodeMapSnapshot(parts ...any) []byte {
 	out := append([]byte{}, mapMagic[:]...)
 	out = append(out, mapVersion)
+	// Version 2: the clock tombstones were collected under. Nothing built here
+	// has ever been collected, so it is zero — and a case that wants to say
+	// otherwise passes it as the first part.
+	out = binary.AppendUvarint(out, 0)
 	for _, part := range parts {
 		switch v := part.(type) {
 		case uint64:
@@ -1316,8 +1320,20 @@ func FuzzLoadMap(f *testing.F) {
 		if replayed.Pending() != 0 {
 			t.Fatalf("%d operations never became applicable", replayed.Pending())
 		}
-		if !bytes.Equal(replayed.Snapshot(), encoded) {
-			t.Fatal("replaying a loaded map's history did not reproduce it")
+		// The state, not the bytes: a replica that replays another's history
+		// does not inherit its collection. What the sending map collected
+		// under is in its snapshot and in no operation — nothing on the wire
+		// says "and I have forgotten some tombstones" — so a newcomer rebuilds
+		// the same keys and values while remembering no clock of its own.
+		if replayed.CollectedBelow() != 0 {
+			t.Fatalf("a newcomer inherited a collection clock of %d", replayed.CollectedBelow())
+		}
+		if m.CollectedBelow() == 0 {
+			if !bytes.Equal(replayed.Snapshot(), encoded) {
+				t.Fatal("replaying a loaded map's history did not reproduce it")
+			}
+		} else if !sameContents(replayed, m) {
+			t.Fatal("replaying a collected map's history did not reproduce what it holds")
 		}
 		// A key must not be able to smuggle in a byte sequence a browser peer
 		// could not hold as a string.
@@ -1371,4 +1387,24 @@ func TestMapSiteAndStamp(t *testing.T) {
 	if _, _, ok := m.Stamp("k"); ok {
 		t.Fatal("a deleted key still reports a stamp")
 	}
+}
+
+// sameContents reports whether two maps hold the same keys with the same
+// values, which is what survives a replay when one of them has collected.
+func sameContents(a, b *Map) bool {
+	ka, kb := a.Keys(), b.Keys()
+	if len(ka) != len(kb) {
+		return false
+	}
+	for i := range ka {
+		if ka[i] != kb[i] {
+			return false
+		}
+		va, _ := a.Get(ka[i])
+		vb, _ := b.Get(kb[i])
+		if !bytes.Equal(va, vb) {
+			return false
+		}
+	}
+	return true
 }

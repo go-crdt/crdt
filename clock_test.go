@@ -269,6 +269,7 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 	mapRec := func(vvSeq, clock uint64) []byte {
 		s := append([]byte{}, mapMagic[:]...)
 		s = append(s, mapVersion)
+		s = uv(s, 0) // version 2: nothing collected
 		s = uv(s, 1)
 		s = uv(s, 1)
 		s = uv(s, vvSeq)
