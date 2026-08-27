@@ -123,3 +123,51 @@ func (c *Composite) Collect(stable CompositeVersion) int {
 	}
 	return n
 }
+
+// CanReplay reports whether [Composite.OpsSince] would hand back a complete
+// history from v, for every part of this document.
+//
+// It is false when any text or list part has collected below what v holds; see
+// [Doc.CanReplay]. A peer it is false for has to be sent a snapshot rather than
+// a difference.
+//
+// A map part never makes it false. A map gives back a sequence number without
+// its operation as a matter of course — a second write to a key overwrites the
+// first — so the span that stands in for one collected tombstone is the same
+// span that already stood in for an overwritten value, and a peer applying it
+// catches up either way.
+func (c *Composite) CanReplay(v CompositeVersion) bool {
+	for name, d := range c.texts {
+		if !d.CanReplay(v[Part{Kind: PartText, Name: name}]) {
+			return false
+		}
+	}
+	for name, l := range c.lists {
+		if !l.CanReplay(v[Part{Kind: PartList, Name: name}]) {
+			return false
+		}
+	}
+	return true
+}
+
+// collected reports whether any part has given something back, which is what
+// makes this document's bytes something a newcomer replaying its history cannot
+// reproduce: what was collected is in the snapshot and in no operation.
+func (c *Composite) collected() bool {
+	for _, d := range c.texts {
+		if len(d.floor) > 0 {
+			return true
+		}
+	}
+	for _, l := range c.lists {
+		if len(l.floor) > 0 {
+			return true
+		}
+	}
+	for _, m := range c.maps {
+		if m.collectedBelow > 0 {
+			return true
+		}
+	}
+	return false
+}

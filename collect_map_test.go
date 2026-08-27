@@ -263,3 +263,124 @@ func TestLoadMapStillAcceptsVersionOne(t *testing.T) {
 		t.Fatalf("re-encoding wrote version %d, want %d", fresh[len(mapMagic)], mapVersion)
 	}
 }
+
+// A composite can say whether a peer can be caught up with a difference, and it
+// is the text and list parts that decide: a map part never makes it false,
+// because a map gives back a sequence number without its operation as a matter
+// of course and the span that stands in for one collected tombstone is the same
+// span that already stood in for an overwritten value.
+func TestACompositeSaysWhetherAPeerCanBeCaughtUp(t *testing.T) {
+	c := NewComposite(1)
+	body, err := c.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes, err := c.List("notes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	props, err := c.Map("props")
+	if err != nil {
+		t.Fatal(err)
+	}
+	peer := NewComposite(2)
+	exchange := func(batches []PartOps) {
+		t.Helper()
+		if err := peer.Apply(batches...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ops, err := body.Insert(0, "AAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange([]PartOps{{Part: Part{Kind: PartText, Name: "body"}, Text: ops}})
+	lops, err := notes.Insert(0, []byte("one"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange([]PartOps{{Part: Part{Kind: PartList, Name: "notes"}, List: lops}})
+	mop, err := props.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	exchange([]PartOps{{Part: Part{Kind: PartMap, Name: "props"}, Map: []MapOp{mop}}})
+
+	behind := peer.Version()
+	if !c.CanReplay(behind) {
+		t.Fatal("a document that has collected nothing said a peer could not be caught up")
+	}
+	if c.collected() {
+		t.Fatal("a document that has collected nothing says it has")
+	}
+
+	// A map that collects does not change the answer.
+	if _, err := props.Delete("k"); err != nil {
+		t.Fatal(err)
+	}
+	if n := props.Collect(props.Version()); n != 1 {
+		t.Fatalf("collected %d map tombstones, want 1", n)
+	}
+	if !c.CanReplay(behind) {
+		t.Fatal("collecting a map tombstone stopped a peer being caught up")
+	}
+	if !c.collected() {
+		t.Fatal("a document whose map collected says it has not")
+	}
+
+	// A text that collects does. The peer writes the second run, so the first
+	// one is a run of its own and can die whole — a site typing straight on
+	// extends the run it is already in.
+	peerBody, err := peer.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := peerBody.Insert(peerBody.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Apply(PartOps{Part: Part{Kind: PartText, Name: "body"}, Text: theirs}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := body.Collect(body.Version()); n != 3 {
+		t.Fatalf("collected %d characters, want 3", n)
+	}
+	if c.CanReplay(behind) {
+		t.Fatal("a document whose text collected still offers a peer a difference")
+	}
+	if !c.CanReplay(c.Version()) {
+		t.Fatal("a document refuses to catch up a peer that is level with it")
+	}
+	if !c.collected() {
+		t.Fatal("a document whose text collected says it has not")
+	}
+
+	// And a list that collects does too, on its own.
+	fresh := NewComposite(3)
+	items, err := fresh.List("items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := items.Insert(0, []byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	early := fresh.Version()
+	if _, err := items.Insert(items.Len(), []byte("b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := items.Delete(0, 1); err != nil {
+		t.Fatal(err)
+	}
+	if n := items.Collect(items.Version()); n != 1 {
+		t.Fatalf("collected %d elements, want 1", n)
+	}
+	if fresh.CanReplay(early) {
+		t.Fatal("a document whose list collected still offers a peer a difference")
+	}
+	if !fresh.collected() {
+		t.Fatal("a document whose list collected says it has not")
+	}
+}
