@@ -376,6 +376,60 @@ a tombstone is load-bearing until every replica that might anchor to it is
 accounted for — which needs causal stability, and causal stability needs to know
 the set of replicas. That is a different design, not a tuning of this one.
 
+### Collecting what nothing can name any more
+
+A rewrite gives back what was deleted at the price of every identity. Collection
+gives back the same thing at a much smaller price, and the two are worth stating
+side by side: on the same revised document, a rewrite is 2.2x smaller and
+collection 2.07x — but a collected replica still merges with the replicas it
+came from, and a rewritten one does not.
+
+`Collect` takes a version every replica has delivered and drops the runs that
+are entirely deleted at or below it. Three things make that safe:
+
+- **A run goes whole or not at all.** A character's origin is the character
+  before it in its own run, so collecting a prefix would leave the survivor
+  behind it naming something that is gone.
+- **Every deletion in it is below the given version.** An insertion names as its
+  origin a character that was visible to whoever issued it; once no replica has
+  the character visible, no operation naming it can still be written, and
+  anything already written naming it has by the same argument already arrived.
+- **Survivors that named it are re-pointed** at the nearest character still alive
+  before it. This is not an optimisation. Without it nothing is ever collected:
+  a run appended to a document names the last character of the run before it, so
+  an entirely deleted run is almost always named by its successor. Measured on a
+  document written and revised the ordinary way, 332 runs of 667 were entirely
+  deleted and stable — and every single one was named by a survivor.
+
+That the re-pointing does not move any text is the claim the design rests on, so
+it is tested rather than argued: four hundred random histories, collected on one
+replica and not on the other, then eighty concurrent edits each delivered in a
+shuffled order, and the two must agree.
+
+#### What it costs
+
+**The past.** `TextAt`, `LenAt` and `ChangesSince` return `ErrCollected` below
+`Floor` instead of a text with characters missing from it — a wrong answer about
+the past being worse than none, since nothing downstream could tell the two
+apart. A document that never collects has an empty floor and is unaffected.
+
+**A format version.** A collected document has gaps where operations used to be,
+and the snapshot's central integrity check counts a site's operations against
+what the version vector promises. Version 6 writes the floor and, per site, how
+many operations collection took away, so that check stays *exact* rather than
+being relaxed to let a gap through. Versions 1 through 5 still load.
+
+**A precondition somebody has to meet.** The version handed to `Collect` must be
+one every replica has delivered. A server that fans operations out and collects
+acknowledgements knows such a version; a replica on its own does not. Given a
+version some replica has not reached, that replica's work arrives naming
+characters that are gone — and is refused with `ErrStranded` rather than parked
+for ever, because parking it is the silent version of the same failure.
+
+What is deliberately still not done is collecting a tombstone that a survivor
+*does* name by re-pointing across a replica that might yet appear. That is the
+same trade as a rewrite, and it belongs to whoever decides a replica is gone.
+
 ## Counting in UTF-16
 
 The document counts characters. CodeMirror, the DOM, the Language Server

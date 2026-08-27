@@ -1,6 +1,9 @@
 package crdt
 
-import "strings"
+import (
+	"errors"
+	"strings"
+)
 
 // Reading a document as it stood, and what has happened to it since.
 //
@@ -26,6 +29,24 @@ import "strings"
 // map — and so anything built on one — can say when its current value was
 // written, and cannot say what the value was before that.
 
+// ErrCollected reports a question about a version this replica can no longer
+// answer, because [Doc.Collect] has dropped the operations that would decide it.
+// The alternative to refusing is a past text with characters missing from it,
+// which is worse than no answer: nothing downstream could tell the two apart.
+var ErrCollected = errors.New("crdt: history below the collection floor")
+
+// readable reports whether v is at or above everything collection has taken
+// away. A document that has never collected has an empty floor, so every
+// version is readable and nothing below changes for it.
+func (d *Doc) readable(v VersionVector) bool {
+	for site, seq := range d.floor {
+		if v[site] < seq {
+			return false
+		}
+	}
+	return true
+}
+
 // TextAt returns the text as it stood at version v: every character whose
 // insertion v had seen, less every character whose deletion v had seen.
 //
@@ -33,7 +54,10 @@ import "strings"
 // seen simply are not in the document to be counted, so the answer is the text
 // as of everything the two have in common — which is what a replica can honestly
 // say about a version it does not hold.
-func (d *Doc) TextAt(v VersionVector) string {
+func (d *Doc) TextAt(v VersionVector) (string, error) {
+	if !d.readable(v) {
+		return "", ErrCollected
+	}
 	var b strings.Builder
 	for blk := d.head.next; blk != nil; blk = blk.next {
 		for i, ch := range blk.text {
@@ -46,12 +70,15 @@ func (d *Doc) TextAt(v VersionVector) string {
 			b.WriteRune(ch)
 		}
 	}
-	return b.String()
+	return b.String(), nil
 }
 
 // LenAt returns how many characters the text held at version v, without
 // building it.
-func (d *Doc) LenAt(v VersionVector) int {
+func (d *Doc) LenAt(v VersionVector) (int, error) {
+	if !d.readable(v) {
+		return 0, ErrCollected
+	}
 	n := 0
 	for blk := d.head.next; blk != nil; blk = blk.next {
 		for i := range blk.text {
@@ -64,7 +91,7 @@ func (d *Doc) LenAt(v VersionVector) int {
 			n++
 		}
 	}
-	return n
+	return n, nil
 }
 
 // ChangesSince returns the edits that turn the text as it stood at v into the
@@ -77,7 +104,10 @@ func (d *Doc) LenAt(v VersionVector) int {
 // says whether it arrived since v and every deletion says whether it did.
 // Text that was written and then removed, both since v, is in neither the old
 // text nor the new one and is reported in neither.
-func (d *Doc) ChangesSince(v VersionVector) []Change {
+func (d *Doc) ChangesSince(v VersionVector) ([]Change, error) {
+	if !d.readable(v) {
+		return nil, ErrCollected
+	}
 	var out []Change
 	pos := 0         // where we are in the text as it stood at v
 	var added []rune // characters arrived since, not yet reported
@@ -114,7 +144,7 @@ func (d *Doc) ChangesSince(v VersionVector) []Change {
 		}
 	}
 	flush()
-	return out
+	return out, nil
 }
 
 // ValuesAt returns the elements the list held at version v, in order: every
