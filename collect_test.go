@@ -423,3 +423,40 @@ func TestCollectingAcrossTwoSites(t *testing.T) {
 		t.Fatalf("the reloaded floor names %d sites, want %d", len(back.Floor()), len(a.Floor()))
 	}
 }
+
+// What collection is worth on a real editing history rather than a made-up one:
+// the automerge paper, a quarter of a million edits at positions a person chose.
+// A synthetic document can be built to make any answer look right, and this one
+// cannot.
+func TestCollectionOnTheRealEditingTrace(t *testing.T) {
+	patches, _ := loadTrace(t)
+	d := New(1)
+	replay(t, d, patches)
+
+	before, tombs, text := len(d.Snapshot()), d.Tombstones(), d.String()
+	n := d.Collect(d.Version())
+	after := len(d.Snapshot())
+
+	if d.String() != text {
+		t.Fatal("collection changed a real document's text")
+	}
+	if n == 0 {
+		t.Fatal("nothing was collected from a document three fifths of which is tombstones")
+	}
+	back, err := Load(2, d.Snapshot())
+	if err != nil {
+		t.Fatalf("a real collected document did not reload: %v", err)
+	}
+	if back.String() != text {
+		t.Fatal("the reloaded document says something else")
+	}
+	t.Logf("%d characters, %d tombstones; collected %d of them (%.1f%%)",
+		len([]rune(text)), tombs, n, 100*float64(n)/float64(tombs))
+	t.Logf("snapshot %d -> %d bytes (%.2fx)", before, after, float64(before)/float64(after))
+
+	// The number this exists to defend: most of a real document's tombstones can
+	// go, and the ones that stay are the ones a survivor still needs.
+	if share := float64(n) / float64(tombs); share < 0.5 {
+		t.Fatalf("only %.1f%% of the tombstones were collectible; the rule has stopped working", 100*share)
+	}
+}

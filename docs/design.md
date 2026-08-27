@@ -380,9 +380,15 @@ the set of replicas. That is a different design, not a tuning of this one.
 
 A rewrite gives back what was deleted at the price of every identity. Collection
 gives back the same thing at a much smaller price, and the two are worth stating
-side by side: on the same revised document, a rewrite is 2.2x smaller and
+side by side: on the same revised document a rewrite is 2.2x smaller and
 collection 2.07x — but a collected replica still merges with the replicas it
 came from, and a rewritten one does not.
+
+On a real editing history rather than a made-up one — the automerge paper, a
+quarter of a million edits at positions a person chose — 104 852 characters and
+77 463 tombstones, of which **87% are collectible**: the snapshot falls from
+478 474 to 194 203 bytes and opens in 16ms instead of 39ms. The tombstones that
+stay are the ones a survivor still names.
 
 `Collect` takes a version every replica has delivered and drops the runs that
 are entirely deleted at or below it. Three things make that safe:
