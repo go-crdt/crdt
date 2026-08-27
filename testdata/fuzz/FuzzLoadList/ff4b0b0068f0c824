@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("crdl\x02\x020010\x00\x020010\x00\x00")

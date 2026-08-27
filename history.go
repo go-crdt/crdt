@@ -152,7 +152,10 @@ func (d *Doc) ChangesSince(v VersionVector) ([]Change, error) {
 // seen. It reads the list the way [Doc.TextAt] reads the text, and for the same
 // reason — an element carries the identity of what made it and of what removed
 // it, so the list is its own history.
-func (l *List) ValuesAt(v VersionVector) [][]byte {
+func (l *List) ValuesAt(v VersionVector) ([][]byte, error) {
+	if !l.readable(v) {
+		return nil, ErrCollected
+	}
 	out := [][]byte{}
 	for _, e := range l.elements {
 		if !v.Includes(e.id) {
@@ -163,12 +166,15 @@ func (l *List) ValuesAt(v VersionVector) [][]byte {
 		}
 		out = append(out, append([]byte(nil), e.value...))
 	}
-	return out
+	return out, nil
 }
 
 // LenAt returns how many elements the list held at version v, without building
 // them.
-func (l *List) LenAt(v VersionVector) int {
+func (l *List) LenAt(v VersionVector) (int, error) {
+	if !l.readable(v) {
+		return 0, ErrCollected
+	}
 	n := 0
 	for _, e := range l.elements {
 		if !v.Includes(e.id) {
@@ -179,5 +185,5 @@ func (l *List) LenAt(v VersionVector) int {
 		}
 		n++
 	}
-	return n
+	return n, nil
 }

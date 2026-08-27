@@ -751,6 +751,13 @@ func (c *columns) empty() bool {
 // site's operations than that site ever issued, describes no document a replica
 // could have produced, and is refused rather than believed.
 func (d *Doc) readCollected(r *reader) error {
+	return readCollected(r, d.vv, &d.floor, &d.collected)
+}
+
+// readCollected is shared by the text and the list, whose headers say the same
+// thing in the same shape: a text that refused what a list accepted would be a
+// difference nobody meant to write.
+func readCollected(r *reader, vv VersionVector, floor *VersionVector, collected *map[SiteID]uint64) error {
 	nFloor, ok := r.uvarint()
 	if !ok || nFloor > uint64(len(r.buf)) {
 		return ErrMalformed
@@ -762,18 +769,18 @@ func (d *Doc) readCollected(r *reader) error {
 			return ErrMalformed
 		}
 		site := SiteID(s)
-		if _, dup := d.floor[site]; dup {
+		if _, dup := (*floor)[site]; dup {
 			return ErrMalformed
 		}
 		// The floor is a version this replica reached, so it cannot name an
 		// operation the version vector does not cover.
-		if seq > d.vv[site] {
+		if seq > vv[site] {
 			return ErrMalformed
 		}
-		if d.floor == nil {
-			d.floor = VersionVector{}
+		if *floor == nil {
+			*floor = VersionVector{}
 		}
-		d.floor[site] = seq
+		(*floor)[site] = seq
 	}
 
 	nGone, ok := r.uvarint()
@@ -787,16 +794,24 @@ func (d *Doc) readCollected(r *reader) error {
 			return ErrMalformed
 		}
 		site := SiteID(s)
-		if _, dup := d.collected[site]; dup {
+		if _, dup := (*collected)[site]; dup {
 			return ErrMalformed
 		}
-		if n > d.vv[site] {
+		if n > vv[site] {
 			return ErrMalformed
 		}
-		if d.collected == nil {
-			d.collected = map[SiteID]uint64{}
+		// Everything collection dropped sits at or below the floor, so a site
+		// cannot have had more operations taken away than the floor covers. A
+		// snapshot claiming otherwise has holes it does not admit to, and
+		// [Doc.CanReplay] would tell a caller its history was complete when it
+		// is not — which is how a peer is sent a difference it can only park.
+		if n > (*floor)[site] {
+			return ErrMalformed
 		}
-		d.collected[site] = n
+		if *collected == nil {
+			*collected = map[SiteID]uint64{}
+		}
+		(*collected)[site] = n
 	}
 	return nil
 }
