@@ -952,7 +952,10 @@ func idLess(a, b ID) bool {
 //
 // A deletion's Lamport timestamp is not retained — it never affects ordering —
 // so replayed deletions carry their sequence number as their clock.
-func (d *Doc) OpsSince(vv VersionVector) []Op {
+func (d *Doc) OpsSince(vv VersionVector) ([]Op, error) {
+	if !d.readable(vv) {
+		return nil, ErrCollected
+	}
 	var ops []Op
 	for b := d.head.next; b != nil; b = b.next {
 		cursor := delCursor{b: b}
@@ -982,7 +985,7 @@ func (d *Doc) OpsSince(vv VersionVector) []Op {
 	for _, delID := range dups {
 		ops = append(ops, deleteOp(delID, d.dupDeletes[delID]))
 	}
-	return ops
+	return ops, nil
 }
 
 // deleteOp rebuilds a deletion from the two IDs a document retains.

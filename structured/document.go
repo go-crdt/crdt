@@ -159,7 +159,9 @@ func (d *Document) Version() crdt.CompositeVersion { return d.doc.Version() }
 
 // OpsSince returns the operations this replica holds that v does not, batched by
 // part and covering all five families. Pass a nil version for everything.
-func (d *Document) OpsSince(v crdt.CompositeVersion) []crdt.PartOps { return d.doc.OpsSince(v) }
+func (d *Document) OpsSince(v crdt.CompositeVersion) ([]crdt.PartOps, error) {
+	return d.doc.OpsSince(v)
+}
 
 // Apply integrates batches of operations from peers, tolerating duplicates and
 // reordering, across every family at once.

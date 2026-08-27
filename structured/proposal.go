@@ -155,7 +155,13 @@ func (d *Draft) Composite() *crdt.Composite { return d.doc }
 func (d *Draft) Base() crdt.CompositeVersion { return d.base }
 
 // Changed reports whether the draft has anything in it the document did not.
-func (d *Draft) Changed() bool { return len(d.doc.OpsSince(d.base)) > 0 }
+func (d *Draft) Changed() bool {
+	// A draft's replica is one this package made and handed nothing but
+	// operations, so it has never collected and cannot refuse to say what it
+	// holds.
+	ops, _ := d.doc.OpsSince(d.base)
+	return len(ops) > 0
+}
 
 // NewProposals returns an empty document with proposals on it, this site can
 // edit.
@@ -199,13 +205,23 @@ func (p *Proposals) Draft(site crdt.SiteID) (*Draft, error) {
 	if site == p.doc.Site() {
 		return nil, crdt.ErrInvalidOp
 	}
-	doc := crdt.NewComposite(site)
 	// A replica that holds nothing, handed everything this one holds. That is
-	// what a draft is, said in operations rather than described. The error is
-	// dropped because these operations validated when they were made and Apply
-	// makes the same check, so it is not a branch any test could reach — the
-	// composite drops the same one for the same reason.
-	_ = doc.Apply(p.doc.OpsSince(nil)...)
+	// what a draft is, said in operations rather than described.
+	//
+	// Which is why a document that has collected cannot be drafted from: a
+	// draft is its history replayed, and what collection dropped is not in that
+	// history any more. [crdt.ErrCollected] says so rather than handing back a
+	// draft that is quietly missing what everybody had already agreed was
+	// gone — which would look right until somebody proposed against it.
+	ops, err := p.doc.OpsSince(nil)
+	if err != nil {
+		return nil, err
+	}
+	doc := crdt.NewComposite(site)
+	// The error is dropped because these operations validated when they were
+	// made and Apply makes the same check, so it is not a branch any test could
+	// reach — the composite drops the same one for the same reason.
+	_ = doc.Apply(ops...)
 	return &Draft{doc: doc, base: doc.Version()}, nil
 }
 
@@ -217,7 +233,8 @@ func (p *Proposals) Put(title string, d *Draft) (ProposalID, []crdt.PartOps, err
 	if !validName(title) || d == nil {
 		return ProposalID{}, nil, crdt.ErrInvalidOp
 	}
-	ops := d.doc.OpsSince(d.base)
+	// A draft's replica has never collected; see [Draft.Changed].
+	ops, _ := d.doc.OpsSince(d.base)
 	if len(ops) == 0 {
 		return ProposalID{}, nil, ErrNoChange
 	}
@@ -371,13 +388,20 @@ func (p *Proposals) Preview(id ProposalID, site crdt.SiteID) (*crdt.Composite, e
 	if !ok {
 		return nil, crdt.ErrInvalidOp
 	}
+	// A preview is this document's history with the proposal laid over it, so a
+	// document that has collected cannot be previewed either, and for the same
+	// reason [Proposals.Draft] cannot be drafted from.
+	history, err := p.doc.OpsSince(nil)
+	if err != nil {
+		return nil, err
+	}
 	doc := crdt.NewComposite(site)
 	// Neither error is reachable. The first is the one [Proposals.Draft]
 	// drops. The second is refused only for a batch that does not validate,
 	// and the operations came back through ParsePartOps, which refuses a part
 	// that could not name anything and fills the one slice its kind allows —
 	// which is the whole of what Apply checks.
-	_ = doc.Apply(p.doc.OpsSince(nil)...)
+	_ = doc.Apply(history...)
 	_ = doc.Apply(proposal.Ops...)
 	return doc, nil
 }
@@ -455,7 +479,9 @@ func (p *Proposals) Snapshot() []byte { return p.doc.Snapshot() }
 func (p *Proposals) Version() crdt.CompositeVersion { return p.doc.Version() }
 
 // OpsSince returns the operations a peer at v has not seen.
-func (p *Proposals) OpsSince(v crdt.CompositeVersion) []crdt.PartOps { return p.doc.OpsSince(v) }
+func (p *Proposals) OpsSince(v crdt.CompositeVersion) ([]crdt.PartOps, error) {
+	return p.doc.OpsSince(v)
+}
 
 // Apply takes operations from a peer.
 func (p *Proposals) Apply(batches ...crdt.PartOps) error { return p.doc.Apply(batches...) }

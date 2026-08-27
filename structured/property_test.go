@@ -437,7 +437,7 @@ func (r *documentReplica) Snapshot() []byte               { return r.d.Snapshot(
 func (r *documentReplica) Version() crdt.CompositeVersion { return r.d.Version() }
 func (r *documentReplica) Pending() int                   { return r.d.Pending() }
 func (r *documentReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.d.OpsSince(v)
+	return must(r.d.OpsSince(v))
 }
 
 // docFields is a small fixed pool of field names so that replicas collide on the
@@ -486,7 +486,7 @@ func (r *sheetReplica) Snapshot() []byte               { return r.s.Snapshot() }
 func (r *sheetReplica) Version() crdt.CompositeVersion { return r.s.Version() }
 func (r *sheetReplica) Pending() int                   { return r.s.Pending() }
 func (r *sheetReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.s.OpsSince(v)
+	return must(r.s.OpsSince(v))
 }
 
 func (r *sheetReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
@@ -551,7 +551,7 @@ func (r *diagramReplica) Snapshot() []byte               { return r.d.Snapshot()
 func (r *diagramReplica) Version() crdt.CompositeVersion { return r.d.Version() }
 func (r *diagramReplica) Pending() int                   { return r.d.Pending() }
 func (r *diagramReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.d.OpsSince(v)
+	return must(r.d.OpsSince(v))
 }
 
 func (r *diagramReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
@@ -624,7 +624,7 @@ func (r *blocksReplica) Snapshot() []byte               { return r.b.Snapshot() 
 func (r *blocksReplica) Version() crdt.CompositeVersion { return r.b.Version() }
 func (r *blocksReplica) Pending() int                   { return r.b.Pending() }
 func (r *blocksReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.b.OpsSince(v)
+	return must(r.b.OpsSince(v))
 }
 
 // A small fixed pool, so that two replicas collide on the same block, the same

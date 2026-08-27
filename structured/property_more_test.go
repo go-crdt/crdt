@@ -86,7 +86,7 @@ func (r *treeReplica) Snapshot() []byte               { return r.doc.Snapshot() 
 func (r *treeReplica) Version() crdt.CompositeVersion { return r.doc.Version() }
 func (r *treeReplica) Pending() int                   { return r.doc.Pending() }
 func (r *treeReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.doc.OpsSince(v)
+	return must(r.doc.OpsSince(v))
 }
 
 // edit makes one random change. Nodes are picked from what this replica can see,
@@ -173,7 +173,7 @@ func (r *sequenceReplica) Snapshot() []byte               { return r.doc.Snapsho
 func (r *sequenceReplica) Version() crdt.CompositeVersion { return r.doc.Version() }
 func (r *sequenceReplica) Pending() int                   { return r.doc.Pending() }
 func (r *sequenceReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.doc.OpsSince(v)
+	return must(r.doc.OpsSince(v))
 }
 
 func (r *sequenceReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
@@ -233,7 +233,7 @@ func (r *counterReplica) Snapshot() []byte               { return r.doc.Snapshot
 func (r *counterReplica) Version() crdt.CompositeVersion { return r.doc.Version() }
 func (r *counterReplica) Pending() int                   { return r.doc.Pending() }
 func (r *counterReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.doc.OpsSince(v)
+	return must(r.doc.OpsSince(v))
 }
 
 func (r *counterReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
@@ -270,7 +270,7 @@ func (r *setReplica) Snapshot() []byte               { return r.doc.Snapshot() }
 func (r *setReplica) Version() crdt.CompositeVersion { return r.doc.Version() }
 func (r *setReplica) Pending() int                   { return r.doc.Pending() }
 func (r *setReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.doc.OpsSince(v)
+	return must(r.doc.OpsSince(v))
 }
 
 // A tiny pool of names, so the replicas collide on the same one — which is the
@@ -317,7 +317,7 @@ func (r *multiReplica) Snapshot() []byte               { return r.doc.Snapshot()
 func (r *multiReplica) Version() crdt.CompositeVersion { return r.doc.Version() }
 func (r *multiReplica) Pending() int                   { return r.doc.Pending() }
 func (r *multiReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.doc.OpsSince(v)
+	return must(r.doc.OpsSince(v))
 }
 
 func (r *multiReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
@@ -349,7 +349,7 @@ func (r *richReplica) Snapshot() []byte               { return r.r.Snapshot() }
 func (r *richReplica) Version() crdt.CompositeVersion { return r.r.Version() }
 func (r *richReplica) Pending() int                   { return r.r.Pending() }
 func (r *richReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.r.OpsSince(v)
+	return must(r.r.OpsSince(v))
 }
 
 var markNames = []string{"bold", "italic", "link"}
@@ -398,7 +398,7 @@ func (r *inkReplica) Snapshot() []byte               { return r.ink.Snapshot() }
 func (r *inkReplica) Version() crdt.CompositeVersion { return r.ink.Version() }
 func (r *inkReplica) Pending() int                   { return r.ink.Pending() }
 func (r *inkReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.ink.OpsSince(v)
+	return must(r.ink.OpsSince(v))
 }
 
 func (r *inkReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
@@ -444,7 +444,7 @@ func (r *blobReplica) Snapshot() []byte               { return r.b.Snapshot() }
 func (r *blobReplica) Version() crdt.CompositeVersion { return r.b.Version() }
 func (r *blobReplica) Pending() int                   { return r.b.Pending() }
 func (r *blobReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.b.OpsSince(v)
+	return must(r.b.OpsSince(v))
 }
 
 // A small pool of names and of contents, so two replicas store the same bytes
@@ -502,7 +502,7 @@ func (r *proposalReplica) Snapshot() []byte               { return r.p.Snapshot(
 func (r *proposalReplica) Version() crdt.CompositeVersion { return r.p.Version() }
 func (r *proposalReplica) Pending() int                   { return r.p.Pending() }
 func (r *proposalReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.p.OpsSince(v)
+	return must(r.p.OpsSince(v))
 }
 
 func (r *proposalReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {
@@ -585,7 +585,7 @@ func (r *undoReplica) Snapshot() []byte               { return r.doc.Snapshot() 
 func (r *undoReplica) Version() crdt.CompositeVersion { return r.doc.Version() }
 func (r *undoReplica) Pending() int                   { return r.doc.Pending() }
 func (r *undoReplica) OpsSince(v crdt.CompositeVersion) []crdt.PartOps {
-	return r.doc.OpsSince(v)
+	return must(r.doc.OpsSince(v))
 }
 
 func (r *undoReplica) edit(t *testing.T, rng *rand.Rand) []crdt.PartOps {

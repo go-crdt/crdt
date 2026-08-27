@@ -208,7 +208,7 @@ func TestAnHonestHistoryNeverTies(t *testing.T) {
 		t.Fatal(err)
 	}
 	seen := map[uint64]ID{}
-	for _, op := range d.OpsSince(nil) {
+	for _, op := range must(d.OpsSince(nil)) {
 		if prev, dup := seen[op.Clock]; dup && prev.Site == op.ID.Site {
 			t.Fatalf("site %d issued %v and %v with the same clock %d",
 				op.ID.Site, prev, op.ID, op.Clock)

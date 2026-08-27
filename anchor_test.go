@@ -222,7 +222,7 @@ func TestAuthorRunsAreJoinedAndSkipWhatIsGone(t *testing.T) {
 	fromB := insert(t, b, 5, "XX")
 	apply(t, a, fromB)
 	remove(t, a, 5, 2)
-	apply(t, b, a.OpsSince(b.Version()))
+	apply(t, b, must(a.OpsSince(b.Version())))
 
 	if got, want := a.String(), "0123456789"; got != want {
 		t.Fatalf("String() = %q, want %q", got, want)

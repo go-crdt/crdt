@@ -255,10 +255,10 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 			case disconnected:
 				// It comes back and reconciles with the hub both ways: what it
 				// missed, and what it wrote while nobody could hear it.
-				if err := r.doc.Apply(hub.doc.OpsSince(r.doc.Version())...); err != nil {
+				if err := r.doc.Apply(must(hub.doc.OpsSince(r.doc.Version()))...); err != nil {
 					t.Fatalf("seed %d round %d: client %d catching up: %v", seed, round, r.site, err)
 				}
-				if err := hub.doc.Apply(r.doc.OpsSince(hub.doc.Version())...); err != nil {
+				if err := hub.doc.Apply(must(r.doc.OpsSince(hub.doc.Version()))...); err != nil {
 					t.Fatalf("seed %d round %d: client %d pushing back: %v", seed, round, r.site, err)
 				}
 				r.state = connected
@@ -338,7 +338,7 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 			if r.state == connected && rng.IntN(3) == 0 {
 				j := rng.IntN(replicas)
 				if j != i && all[j].state == connected && group[j] == group[i] {
-					if err := r.doc.Apply(all[j].doc.OpsSince(r.doc.Version())...); err != nil {
+					if err := r.doc.Apply(must(all[j].doc.OpsSince(r.doc.Version()))...); err != nil {
 						t.Fatalf("seed %d round %d: gossip %d<-%d: %v", seed, round, r.site, all[j].site, err)
 					}
 					gossips++
@@ -363,7 +363,7 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 			if r.state != connected || r.doc == nil {
 				continue
 			}
-			if err := r.doc.Apply(hub.doc.OpsSince(r.doc.Version())...); err != nil {
+			if err := r.doc.Apply(must(hub.doc.OpsSince(r.doc.Version()))...); err != nil {
 				t.Fatalf("seed %d round %d: client %d pulling: %v", seed, round, r.site, err)
 			}
 			gossips++
@@ -409,12 +409,12 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 	// holds, and after the second everyone holds what the collector does.
 	collector := here[0]
 	for _, r := range here[1:] {
-		if err := collector.doc.Apply(r.doc.OpsSince(collector.doc.Version())...); err != nil {
+		if err := collector.doc.Apply(must(r.doc.OpsSince(collector.doc.Version()))...); err != nil {
 			t.Fatalf("seed %d: collecting from %d: %v", seed, r.site, err)
 		}
 	}
 	for _, r := range here[1:] {
-		if err := r.doc.Apply(collector.doc.OpsSince(r.doc.Version())...); err != nil {
+		if err := r.doc.Apply(must(collector.doc.OpsSince(r.doc.Version()))...); err != nil {
 			t.Fatalf("seed %d: handing back to %d: %v", seed, r.site, err)
 		}
 	}

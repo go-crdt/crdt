@@ -361,3 +361,73 @@ func TestASweepReportsAnExhaustedClock(t *testing.T) {
 		})
 	}
 }
+
+// A proposal is the document's history replayed with a change laid over it, so
+// a document that has collected can be neither drafted from nor previewed.
+//
+// This is worth a test rather than a note, because the alternative is worse than
+// an error: a draft quietly missing what everybody had already agreed was gone
+// would look right until somebody proposed against it.
+func TestADocumentThatHasCollectedCannotBeDraftedFrom(t *testing.T) {
+	p := NewProposals(1)
+	body, err := p.Composite().Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := body.Insert(0, "AAA"); err != nil {
+		t.Fatal(err)
+	}
+	// A second site writes, so the first run is one of its own and can die
+	// whole.
+	peer := crdt.NewComposite(2)
+	if err := peer.Apply(must(p.Composite().OpsSince(nil))...); err != nil {
+		t.Fatal(err)
+	}
+	peerBody, err := peer.Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	theirs, err := peerBody.Insert(peerBody.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.Composite().Apply(crdt.PartOps{
+		Part: crdt.Part{Kind: crdt.PartText, Name: "body"}, Text: theirs,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Draftable and previewable while it has given nothing back.
+	draft, err := p.Draft(3)
+	if err != nil {
+		t.Fatalf("Draft before collecting: %v", err)
+	}
+	draftBody, err := draft.Composite().Text("body")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := draftBody.Insert(0, "X"); err != nil {
+		t.Fatal(err)
+	}
+	id, _, err := p.Put("a change", draft)
+	if err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, err := p.Preview(id, 4); err != nil {
+		t.Fatalf("Preview before collecting: %v", err)
+	}
+
+	if _, err := body.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := p.Composite().Collect(p.Composite().Version()); n == 0 {
+		t.Fatal("nothing was collected, so nothing below is being tested")
+	}
+
+	if _, err := p.Draft(5); !errors.Is(err, crdt.ErrCollected) {
+		t.Fatalf("Draft from a collected document = %v, want ErrCollected", err)
+	}
+	if _, err := p.Preview(id, 6); !errors.Is(err, crdt.ErrCollected) {
+		t.Fatalf("Preview of a collected document = %v, want ErrCollected", err)
+	}
+}

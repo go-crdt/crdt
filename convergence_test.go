@@ -193,7 +193,7 @@ func TestOrderIndependence(t *testing.T) {
 		}
 		source.settle()
 	}
-	all := source.docs[0].OpsSince(nil)
+	all := must(source.docs[0].OpsSince(nil))
 	if len(all) < 20 {
 		t.Fatalf("only %d operations to permute; the fixture is too small to be a test", len(all))
 	}
