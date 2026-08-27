@@ -322,10 +322,18 @@ func TestSnapshotCarriesDuplicateDeletions(t *testing.T) {
 // runBuilder assembles snapshots field by field, so that every
 // rejection in the run reader can be provoked directly.
 type runBuilder struct {
-	sites [][2]uint64
-	runs  []encodedRun
-	count int // overrides the encoded number of runs
-	tail  []byte
+	// asVersion writes an older format instead of the current one, so that the
+	// readers for versions this package still accepts keep being exercised after
+	// the current version moves on. Zero means the current version.
+	asVersion byte
+	sites     [][2]uint64
+	floor     [][2]uint64 // the collection floor: site, sequence
+	gone      [][2]uint64 // what collection took away: site, count
+	// counts override the encoded lengths of the two, to build a header that lies.
+	floorCount, goneCount int
+	runs                  []encodedRun
+	count                 int // overrides the encoded number of runs
+	tail                  []byte
 }
 
 type encodedRun struct {
@@ -338,7 +346,10 @@ type encodedRun struct {
 
 func (b runBuilder) build() []byte {
 	out := append([]byte{}, "crdt"...)
-	const version = snapshotVersion
+	version := byte(snapshotVersion)
+	if b.asVersion != 0 {
+		version = b.asVersion
+	}
 	lastDel := map[SiteID]uint64{}
 	lastRun := map[SiteID]uint64{}
 	lastOrigin := map[SiteID]uint64{}
@@ -347,6 +358,29 @@ func (b runBuilder) build() []byte {
 	for _, s := range b.sites {
 		out = binary.AppendUvarint(out, s[0])
 		out = binary.AppendUvarint(out, s[1])
+	}
+	if version >= snapshotVersion {
+		// Version 6: the collection floor and the per-site tallies of what
+		// collection took away. Nothing here has ever been collected, so both
+		// are empty, which is what a document that never calls Collect writes.
+		nFloor := b.floorCount
+		if nFloor == 0 {
+			nFloor = len(b.floor)
+		}
+		out = binary.AppendUvarint(out, uint64(nFloor))
+		for _, f := range b.floor {
+			out = binary.AppendUvarint(out, f[0])
+			out = binary.AppendUvarint(out, f[1])
+		}
+		nGone := b.goneCount
+		if nGone == 0 {
+			nGone = len(b.gone)
+		}
+		out = binary.AppendUvarint(out, uint64(nGone))
+		for _, g := range b.gone {
+			out = binary.AppendUvarint(out, g[0])
+			out = binary.AppendUvarint(out, g[1])
+		}
 	}
 	n := b.count
 	if n == 0 {
@@ -715,6 +749,20 @@ func TestLoadRejectsMalformedColumns(t *testing.T) {
 		r.uvarint()
 		r.uvarint()
 	}
+	// Version 6 puts the collection floor and the per-site tallies here, both
+	// empty for this fixture. Walking past them is not optional: a byte counted
+	// wrong lands every alteration below in the wrong field, and the loader then
+	// refuses for a reason none of these cases is about.
+	nFloor, _ := r.uvarint()
+	for range nFloor {
+		r.uvarint()
+		r.uvarint()
+	}
+	nGone, _ := r.uvarint()
+	for range nGone {
+		r.uvarint()
+		r.uvarint()
+	}
 	r.uvarint() // the run count
 	colsAt := len(good) - len(r.buf)
 
@@ -808,5 +856,77 @@ func TestLoadRejectsADeletionCutOffMidField(t *testing.T) {
 	cut = binary.AppendUvarint(cut, 0) // no duplicate deletions
 	if _, err := Load(2, cut); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("Load() = %v, want ErrMalformed", err)
+	}
+}
+
+// A version 5 snapshot — the format before collection was written down — still
+// loads, and says the same thing as the same document written today. Without
+// this the readers for it stop being exercised the moment the current version
+// moves on, which is how a format that claims to accept an older one quietly
+// stops doing so.
+func TestLoadStillAcceptsVersionFive(t *testing.T) {
+	old := wellFormedRun()
+	old.asVersion = snapshotVersionV5
+	raw := old.build()
+	if raw[4] != snapshotVersionV5 {
+		t.Fatalf("the fixture wrote version %d, want %d", raw[4], snapshotVersionV5)
+	}
+	was, err := Load(2, raw)
+	if err != nil {
+		t.Fatalf("a version 5 snapshot did not load: %v", err)
+	}
+	now, err := Load(2, wellFormedRun().build())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if was.String() != now.String() {
+		t.Fatalf("version 5 reads %q, the current version %q", was.String(), now.String())
+	}
+	if was.Tombstones() != now.Tombstones() {
+		t.Fatalf("version 5 keeps %d tombstones, the current version %d",
+			was.Tombstones(), now.Tombstones())
+	}
+	// Re-encoding an old snapshot writes the current version, and nothing was
+	// collected in it, so its floor is empty.
+	if fresh := was.Snapshot(); fresh[4] != snapshotVersion {
+		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersion)
+	}
+	if len(was.Floor()) != 0 {
+		t.Fatal("a document loaded from version 5 came back with a floor")
+	}
+}
+
+// The version 6 header is a trust boundary like every other field here. A floor
+// or a tally that no document could have produced is refused rather than
+// believed, because both are what the accounting below them is measured against.
+func TestLoadRejectsAMalformedCollectionHeader(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		break_ func(b *runBuilder)
+	}{
+		{"a floor at sequence zero", func(b *runBuilder) { b.floor = [][2]uint64{{1, 0}} }},
+		{"a floor above the clock ceiling", func(b *runBuilder) { b.floor = [][2]uint64{{1, MaxClock + 1}} }},
+		{"a floor naming operations the document has not seen", func(b *runBuilder) { b.floor = [][2]uint64{{1, 6}} }},
+		{"a site in the floor twice", func(b *runBuilder) { b.floor = [][2]uint64{{1, 2}, {1, 3}} }},
+		{"more floor entries than there are bytes", func(b *runBuilder) {
+			b.floor = [][2]uint64{{1, 2}}
+			b.floorCount = 1 << 20
+		}},
+		{"a tally of nothing", func(b *runBuilder) { b.gone = [][2]uint64{{1, 0}} }},
+		{"a tally larger than the site ever issued", func(b *runBuilder) { b.gone = [][2]uint64{{1, 6}} }},
+		{"a site tallied twice", func(b *runBuilder) { b.gone = [][2]uint64{{1, 1}, {1, 2}} }},
+		{"more tallies than there are bytes", func(b *runBuilder) {
+			b.gone = [][2]uint64{{1, 1}}
+			b.goneCount = 1 << 20
+		}},
+		{"a tally the runs do not account for", func(b *runBuilder) { b.gone = [][2]uint64{{1, 1}} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			b := wellFormedRun()
+			c.break_(&b)
+			if _, err := Load(2, b.build()); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Load = %v, want ErrMalformed", err)
+			}
+		})
 	}
 }

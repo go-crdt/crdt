@@ -57,7 +57,9 @@ func (d *Doc) applyWith(watching bool, ops []Op, absorbed *[]Op) ([]Change, erro
 		defer func() { d.collect = nil }()
 	}
 	for _, op := range ops {
-		d.admit(op, absorbed)
+		if err := d.admit(op, absorbed); err != nil {
+			return nil, err
+		}
 	}
 	if !watching {
 		return nil, nil

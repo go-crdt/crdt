@@ -44,22 +44,22 @@ func TestTextAtEachStepOfItsOwnHistory(t *testing.T) {
 	note()
 
 	for i, v := range marks {
-		if got := d.TextAt(v); got != texts[i] {
+		if got := textAt(t, d, v); got != texts[i] {
 			t.Errorf("at mark %d the document read %q, want %q", i, got, texts[i])
 		}
-		if got := d.LenAt(v); got != len([]rune(texts[i])) {
+		if got := lenAt(t, d, v); got != len([]rune(texts[i])) {
 			t.Errorf("at mark %d the length was %d, want %d", i, got, len([]rune(texts[i])))
 		}
 		// And what has happened since that mark turns that text into this one.
-		if got := replayChanges(texts[i], d.ChangesSince(v)); got != d.String() {
+		if got := replayChanges(texts[i], changesSince(t, d, v)); got != d.String() {
 			t.Errorf("replaying from mark %d gave %q, want %q", i, got, d.String())
 		}
 	}
 	// The current version is the document itself, and nothing has happened since.
-	if got := d.TextAt(d.Version()); got != d.String() {
+	if got := textAt(t, d, d.Version()); got != d.String() {
 		t.Fatalf("at the current version: %q", got)
 	}
-	if got := d.ChangesSince(d.Version()); len(got) != 0 {
+	if got := changesSince(t, d, d.Version()); len(got) != 0 {
 		t.Fatalf("since the current version: %v", got)
 	}
 }
@@ -83,10 +83,10 @@ func TestWhatCameAndWentSinceIsInNeither(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := d.TextAt(mark); got != "keep" {
+	if got := textAt(t, d, mark); got != "keep" {
 		t.Fatalf("the mark reads %q", got)
 	}
-	changes := d.ChangesSince(mark)
+	changes := changesSince(t, d, mark)
 	if got := replayChanges("keep", changes); got != "keep!" {
 		t.Fatalf("replaying gave %q, want %q", got, "keep!")
 	}
@@ -129,13 +129,13 @@ func TestAMarkFromOneReplicaReadOnAnother(t *testing.T) {
 	}
 
 	// The mark reads the same on both, and so does what has happened since.
-	if a.TextAt(mark) != "shared" || b.TextAt(mark) != "shared" {
-		t.Fatalf("the mark reads %q on a and %q on b", a.TextAt(mark), b.TextAt(mark))
+	if textAt(t, a, mark) != "shared" || textAt(t, b, mark) != "shared" {
+		t.Fatalf("the mark reads %q on a and %q on b", textAt(t, a, mark), textAt(t, b, mark))
 	}
-	if got := replayChanges("shared", a.ChangesSince(mark)); got != a.String() {
+	if got := replayChanges("shared", changesSince(t, a, mark)); got != a.String() {
 		t.Fatalf("replaying on a gave %q, want %q", got, a.String())
 	}
-	if got := replayChanges("shared", b.ChangesSince(mark)); got != b.String() {
+	if got := replayChanges("shared", changesSince(t, b, mark)); got != b.String() {
 		t.Fatalf("replaying on b gave %q, want %q", got, b.String())
 	}
 }
@@ -150,10 +150,10 @@ func TestAVersionFromTheFuture(t *testing.T) {
 	ahead := d.Version()
 	ahead[SiteID(9)] = 100 // a site this document has never heard of
 
-	if got := d.TextAt(ahead); got != "here" {
+	if got := textAt(t, d, ahead); got != "here" {
 		t.Fatalf("a version from the future read %q", got)
 	}
-	if got := d.ChangesSince(ahead); len(got) != 0 {
+	if got := changesSince(t, d, ahead); len(got) != 0 {
 		t.Fatalf("since a version from the future: %v", got)
 	}
 }
@@ -187,10 +187,10 @@ func TestReplayingTheReportAlwaysArrives(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if got := d.TextAt(mark); got != was {
+		if got := textAt(t, d, mark); got != was {
 			t.Fatalf("round %d: the mark reads %q, want %q", round, got, was)
 		}
-		if got := replayChanges(was, d.ChangesSince(mark)); got != d.String() {
+		if got := replayChanges(was, changesSince(t, d, mark)); got != d.String() {
 			t.Fatalf("round %d: replaying gave %q, want %q", round, got, d.String())
 		}
 	}
@@ -248,4 +248,33 @@ func TestValuesAtEachStepOfItsOwnHistory(t *testing.T) {
 	if got := string(l.ValuesAt(marks[1])[0]); got != "a" {
 		t.Fatalf("the list handed out its own storage: %q", got)
 	}
+}
+
+// The three readers refuse below the collection floor, so a test that has never
+// collected asks through these and treats a refusal as the failure it would be.
+func textAt(t *testing.T, d *Doc, v VersionVector) string {
+	t.Helper()
+	got, err := d.TextAt(v)
+	if err != nil {
+		t.Fatalf("TextAt: %v", err)
+	}
+	return got
+}
+
+func lenAt(t *testing.T, d *Doc, v VersionVector) int {
+	t.Helper()
+	got, err := d.LenAt(v)
+	if err != nil {
+		t.Fatalf("LenAt: %v", err)
+	}
+	return got
+}
+
+func changesSince(t *testing.T, d *Doc, v VersionVector) []Change {
+	t.Helper()
+	got, err := d.ChangesSince(v)
+	if err != nil {
+		t.Fatalf("ChangesSince: %v", err)
+	}
+	return got
 }

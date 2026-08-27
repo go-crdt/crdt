@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"encoding/binary"
+	"sort"
 	"unicode/utf8"
 )
 
@@ -27,7 +28,8 @@ var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 // record per character. All four are readable; version 1's note
 // still read, so a document stored by an older build still opens.
 const (
-	snapshotVersion   = 5
+	snapshotVersion   = 6
+	snapshotVersionV5 = 5
 	snapshotVersionV4 = 4
 	snapshotVersionV3 = 3
 	snapshotVersionV2 = 2
@@ -63,6 +65,29 @@ func (d *Doc) Snapshot() []byte {
 	for _, site := range sites {
 		out = binary.AppendUvarint(out, uint64(site))
 		out = binary.AppendUvarint(out, d.vv[site])
+	}
+
+	// What collection has taken away, which a loader needs on two counts: the
+	// floor says how far back this replica can still be read, and the per-site
+	// tallies are what keeps the accounting below exact rather than merely
+	// relaxed — a loader counts the operations it reads and these are the ones
+	// it will not find. Both are empty for a document nobody has collected,
+	// which costs two bytes.
+	floorSites := d.floor.sites()
+	out = binary.AppendUvarint(out, uint64(len(floorSites)))
+	for _, site := range floorSites {
+		out = binary.AppendUvarint(out, uint64(site))
+		out = binary.AppendUvarint(out, d.floor[site])
+	}
+	goneSites := make([]SiteID, 0, len(d.collected))
+	for site := range d.collected {
+		goneSites = append(goneSites, site)
+	}
+	sort.Slice(goneSites, func(i, j int) bool { return goneSites[i] < goneSites[j] })
+	out = binary.AppendUvarint(out, uint64(len(goneSites)))
+	for _, site := range goneSites {
+		out = binary.AppendUvarint(out, uint64(site))
+		out = binary.AppendUvarint(out, d.collected[site])
 	}
 
 	runs := d.runs()
@@ -208,7 +233,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV4 &&
+	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
 		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
 		return nil, ErrMalformed
 	}
@@ -236,11 +261,17 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		d.vv[SiteID(s)] = seq
 	}
 
+	if version >= snapshotVersion {
+		if err := d.readCollected(r); err != nil {
+			return nil, err
+		}
+	}
+
 	// A snapshot has to account for every operation its version vector claims,
 	// exactly once. Anything less and the document could not reproduce its own
 	// history: a peer replaying it would stall on the missing sequence number, or
 	// silently drop a deletion two characters both claimed.
-	ledger := &ledger{vv: d.vv, seen: map[ID]struct{}{}, counts: map[SiteID]uint64{}}
+	ledger := &ledger{vv: d.vv, seen: map[ID]struct{}{}, counts: map[SiteID]uint64{}, gone: d.collected}
 
 	count, ok := r.uvarint()
 	if !ok || count > uint64(len(r.buf)) {
@@ -264,7 +295,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	// past in the same order either way, so there is one decoder rather than
 	// two, and the older format is exercised by every test the newer one is.
 	cols := sameStream(r)
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV5 {
 		var err error
 		if cols, err = readColumns(r); err != nil {
 			return nil, err
@@ -281,7 +312,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 			return nil, err
 		}
 	}
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV5 {
 		// Every column must have been consumed exactly. A column with bytes
 		// left over describes runs the count did not claim, which is a second
 		// encoding of the same document and so not one this format allows.
@@ -484,6 +515,10 @@ type ledger struct {
 	vv     VersionVector
 	seen   map[ID]struct{}
 	counts map[SiteID]uint64
+	// gone is how many of each site's operations collection has taken away, so
+	// that what is missing is a number the snapshot stated rather than a gap the
+	// loader is asked to tolerate.
+	gone map[SiteID]uint64
 }
 
 // claim records one operation identity, rejecting anything the version vector
@@ -504,7 +539,7 @@ func (l *ledger) claim(id ID) bool {
 // claimed. Sequence numbers have no gaps, so counting them is enough.
 func (l *ledger) complete() bool {
 	for site, seq := range l.vv {
-		if l.counts[site] != seq {
+		if l.counts[site]+l.gone[site] != seq {
 			return false
 		}
 	}
@@ -706,4 +741,62 @@ func (c *columns) empty() bool {
 		}
 	}
 	return true
+}
+
+// readCollected reads what version 6 added: the floor this replica can still be
+// read back to, and how many of each site's operations collection took away.
+//
+// Loading is a trust boundary here as everywhere else in this file. A floor
+// naming operations the document has not seen, or a tally claiming more of a
+// site's operations than that site ever issued, describes no document a replica
+// could have produced, and is refused rather than believed.
+func (d *Doc) readCollected(r *reader) error {
+	nFloor, ok := r.uvarint()
+	if !ok || nFloor > uint64(len(r.buf)) {
+		return ErrMalformed
+	}
+	for range nFloor {
+		s, ok1 := r.uvarint()
+		seq, ok2 := r.uvarint()
+		if !ok1 || !ok2 || seq == 0 || seq > MaxClock {
+			return ErrMalformed
+		}
+		site := SiteID(s)
+		if _, dup := d.floor[site]; dup {
+			return ErrMalformed
+		}
+		// The floor is a version this replica reached, so it cannot name an
+		// operation the version vector does not cover.
+		if seq > d.vv[site] {
+			return ErrMalformed
+		}
+		if d.floor == nil {
+			d.floor = VersionVector{}
+		}
+		d.floor[site] = seq
+	}
+
+	nGone, ok := r.uvarint()
+	if !ok || nGone > uint64(len(r.buf)) {
+		return ErrMalformed
+	}
+	for range nGone {
+		s, ok1 := r.uvarint()
+		n, ok2 := r.uvarint()
+		if !ok1 || !ok2 || n == 0 {
+			return ErrMalformed
+		}
+		site := SiteID(s)
+		if _, dup := d.collected[site]; dup {
+			return ErrMalformed
+		}
+		if n > d.vv[site] {
+			return ErrMalformed
+		}
+		if d.collected == nil {
+			d.collected = map[SiteID]uint64{}
+		}
+		d.collected[site] = n
+	}
+	return nil
 }

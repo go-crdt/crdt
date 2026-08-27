@@ -24,9 +24,11 @@ var ErrInvalidText = errors.New("crdt: invalid UTF-8")
 //	clock      clock + k
 //	origin     character k-1, or originID for k == 0
 //
-// Blocks are never unlinked — a concurrent insertion may still name a deleted
-// character as its origin — and they are only ever split, by an insertion
-// landing inside one, or extended, by the next character of the same run.
+// Blocks are split, by an insertion landing inside one, and extended, by the
+// next character of the same run. They are unlinked only by [Doc.Collect], and
+// only once no operation can still name what they hold: a concurrent insertion
+// may name a deleted character as its origin, which is what keeps a tombstone
+// alive until every replica has seen it go.
 type block struct {
 	id       ID     // identity of the first character
 	clock    uint64 // Lamport clock of the first character
@@ -253,6 +255,17 @@ type Doc struct {
 
 	head *block // sentinel for the root ID; head.next is the first block
 	vv   VersionVector
+
+	// floor is the version below which this replica can no longer say what the
+	// document held, because [Doc.Collect] has dropped operations at or under
+	// it. Empty until somebody collects, which is what makes collection a thing
+	// a document opts into rather than a thing that happens to it.
+	floor VersionVector
+	// collected counts, per site, the operations that were dropped. A snapshot
+	// says how many operations a version vector promises and a loader counts
+	// what it reads; these are exactly the difference between the two, so the
+	// count stays exact rather than merely being relaxed.
+	collected map[SiteID]uint64
 
 	// tree is the root of the index over the same blocks; see tree.go. dirty
 	// holds the one block whose visible-character count the tree has not been
@@ -700,7 +713,7 @@ func (d *Doc) Delete(pos, length int) ([]Op, error) {
 // by the hundred thousand in a test and by the million in a document, and
 // twenty-four bytes each is how a suite that fits in a browser's four gigabytes
 // stops fitting.
-func (d *Doc) admit(op Op, absorbed *[]Op) {
+func (d *Doc) admit(op Op, absorbed *[]Op) error {
 	queue := []Op{op}
 	for len(queue) > 0 {
 		next := queue[len(queue)-1]
@@ -709,6 +722,9 @@ func (d *Doc) admit(op Op, absorbed *[]Op) {
 			continue // already applied; applying twice must not change anything
 		}
 		if !d.ready(next) {
+			if d.strandedBy(next) {
+				return ErrStranded
+			}
 			d.park(next)
 			continue
 		}
@@ -722,6 +738,7 @@ func (d *Doc) admit(op Op, absorbed *[]Op) {
 			queue = append(queue, woken...)
 		}
 	}
+	return nil
 }
 
 // parkChunk is how many parked operations one allocation serves.
@@ -971,4 +988,34 @@ func (d *Doc) OpsSince(vv VersionVector) []Op {
 // deleteOp rebuilds a deletion from the two IDs a document retains.
 func deleteOp(delID, target ID) Op {
 	return Op{Kind: OpDelete, ID: delID, Clock: delID.Seq, Target: target}
+}
+
+// ErrStranded reports an operation that can never be applied, because the
+// character it names was dropped by [Doc.Collect].
+//
+// Parking it instead would be the silent version of the same failure: the
+// operation would wait for something that is never coming, and the work it
+// carries would be lost with nothing said. It means collection was given a
+// version some replica had not reached — the one precondition [Doc.Collect]
+// asks for — and the replica this operation came from is the one that was left
+// behind.
+var ErrStranded = errors.New("crdt: operation names a collected character")
+
+// strandedBy reports whether an operation is waiting for a character this
+// replica has seen and no longer holds, which is what collection leaves behind.
+// A document that has never collected has an empty floor, so this is false for
+// every operation and nothing about waiting changes.
+func (d *Doc) strandedBy(op Op) bool {
+	if len(d.floor) == 0 {
+		return false
+	}
+	named := op.Origin
+	if op.Kind != OpInsert {
+		named = op.Target
+	}
+	if named.IsRoot() || !d.floor.Includes(named) {
+		return false
+	}
+	_, _, held := d.lookupChar(named)
+	return !held
 }
