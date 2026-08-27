@@ -914,12 +914,19 @@ func TestLoadRejectsAMalformedCollectionHeader(t *testing.T) {
 		}},
 		{"a tally of nothing", func(b *runBuilder) { b.gone = [][2]uint64{{1, 0}} }},
 		{"a tally larger than the site ever issued", func(b *runBuilder) { b.gone = [][2]uint64{{1, 6}} }},
-		{"a site tallied twice", func(b *runBuilder) { b.gone = [][2]uint64{{1, 1}, {1, 2}} }},
+		{"a site tallied twice", func(b *runBuilder) {
+			b.floor = [][2]uint64{{1, 3}}
+			b.gone = [][2]uint64{{1, 1}, {1, 2}}
+		}},
 		{"more tallies than there are bytes", func(b *runBuilder) {
 			b.gone = [][2]uint64{{1, 1}}
 			b.goneCount = 1 << 20
 		}},
-		{"a tally the runs do not account for", func(b *runBuilder) { b.gone = [][2]uint64{{1, 1}} }},
+		{"a tally the runs do not account for", func(b *runBuilder) {
+			b.floor = [][2]uint64{{1, 2}}
+			b.gone = [][2]uint64{{1, 1}}
+		}},
+		{"a tally the floor does not cover", func(b *runBuilder) { b.gone = [][2]uint64{{1, 1}} }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := wellFormedRun()

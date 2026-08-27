@@ -318,13 +318,19 @@ func FuzzLoadList(f *testing.F) {
 		if !bytes.Equal(again.Snapshot(), loaded.Snapshot()) {
 			t.Fatal("re-encoding a loaded snapshot is not a fixed point")
 		}
-		// And the history has to replay into a fresh replica.
-		replayed := NewList(2)
-		if err := replayed.Apply(loaded.OpsSince(nil)...); err != nil {
-			t.Fatalf("replaying a loaded list's history was rejected: %v", err)
-		}
-		if !bytes.Equal(replayed.Snapshot(), loaded.Snapshot()) {
-			t.Fatal("replaying the history did not reproduce the state")
+		// And the history has to replay into a fresh replica — for a replica
+		// that has collected nothing, which is what CanReplay is asking. One
+		// that has collected cannot: the operations it dropped are gone, so
+		// what OpsSince hands back has holes and a fresh replica would park
+		// everything after the first one. Such a peer is sent a snapshot.
+		if loaded.CanReplay(nil) {
+			replayed := NewList(2)
+			if err := replayed.Apply(loaded.OpsSince(nil)...); err != nil {
+				t.Fatalf("replaying a loaded list's history was rejected: %v", err)
+			}
+			if !bytes.Equal(replayed.Snapshot(), loaded.Snapshot()) {
+				t.Fatal("replaying the history did not reproduce the state")
+			}
 		}
 	})
 }

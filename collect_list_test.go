@@ -332,12 +332,19 @@ func TestLoadListRejectsAMalformedCollectionHeader(t *testing.T) {
 		}},
 		{"a tally of nothing", func(b *listBuilder) { b.gone = [][2]uint64{{1, 0}} }},
 		{"a tally larger than the site ever issued", func(b *listBuilder) { b.gone = [][2]uint64{{1, 4}} }},
-		{"a site tallied twice", func(b *listBuilder) { b.gone = [][2]uint64{{1, 1}, {1, 2}} }},
+		{"a site tallied twice", func(b *listBuilder) {
+			b.floor = [][2]uint64{{1, 3}}
+			b.gone = [][2]uint64{{1, 1}, {1, 2}}
+		}},
 		{"more tallies than there are bytes", func(b *listBuilder) {
 			b.gone = [][2]uint64{{1, 1}}
 			b.goneCount = 1 << 20
 		}},
-		{"a tally the elements do not account for", func(b *listBuilder) { b.gone = [][2]uint64{{1, 1}} }},
+		{"a tally the elements do not account for", func(b *listBuilder) {
+			b.floor = [][2]uint64{{1, 2}}
+			b.gone = [][2]uint64{{1, 1}}
+		}},
+		{"a tally the floor does not cover", func(b *listBuilder) { b.gone = [][2]uint64{{1, 1}} }},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			b := wellFormedList()

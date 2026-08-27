@@ -460,3 +460,48 @@ func TestCollectionOnTheRealEditingTrace(t *testing.T) {
 		t.Fatalf("only %.1f%% of the tombstones were collectible; the rule has stopped working", 100*share)
 	}
 }
+
+// A peer whose version is below the floor cannot be caught up with a difference:
+// what OpsSince has left has holes, and holes park. CanReplay is what a caller
+// asks before choosing between a difference and a snapshot.
+func TestCanReplayIsFalseBelowTheFloor(t *testing.T) {
+	a, b := New(1), New(2)
+	mine, err := a.Insert(0, "AAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Apply(mine...); err != nil {
+		t.Fatal(err)
+	}
+	behind := b.Version()
+	theirs, err := b.Insert(b.Len(), "BBB")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(theirs...); err != nil {
+		t.Fatal(err)
+	}
+	if !a.CanReplay(behind) {
+		t.Fatal("a replica that has collected nothing said it could not replay")
+	}
+	if _, err := a.Delete(0, 3); err != nil {
+		t.Fatal(err)
+	}
+	if n := a.Collect(a.Version()); n != 3 {
+		t.Fatalf("collected %d characters, want 3", n)
+	}
+	if a.CanReplay(behind) {
+		t.Fatal("a collected replica claimed it could still replay from below its floor")
+	}
+	if !a.CanReplay(a.Version()) {
+		t.Fatal("a collected replica refused to replay from its own version")
+	}
+	// The peer is re-seeded from a snapshot instead, and the two then agree.
+	fresh, err := Load(2, a.Snapshot())
+	if err != nil {
+		t.Fatalf("re-seeding from a snapshot: %v", err)
+	}
+	if fresh.String() != a.String() {
+		t.Fatalf("re-seeded to %q, want %q", fresh.String(), a.String())
+	}
+}

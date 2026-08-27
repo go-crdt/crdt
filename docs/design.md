@@ -419,6 +419,16 @@ shuffled order, and the two must agree.
 
 #### What it costs
 
+**A peer that is behind.** `OpsSince` on a collected replica cannot hand back a
+complete history from a version below the floor: the operations it dropped are
+gone, so what it returns has holes in its sequence numbers, and a replica
+applying them parks everything after the first hole rather than catching up —
+silently, because nothing in the batch is wrong on its own. `CanReplay` is what a
+caller asks before choosing between a difference and a snapshot, and a peer below
+the floor is sent the snapshot. A snapshot that tallies more collected operations
+for a site than its floor covers is refused on load, so the question cannot be
+answered wrongly; a fuzzer found that one.
+
 **The past.** `TextAt`, `LenAt` and `ChangesSince` return `ErrCollected` below
 `Floor` instead of a text with characters missing from it — a wrong answer about
 the past being worse than none, since nothing downstream could tell the two

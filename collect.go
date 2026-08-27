@@ -176,3 +176,16 @@ func (v VersionVector) join(other VersionVector) VersionVector {
 	}
 	return out
 }
+
+// CanReplay reports whether [Doc.OpsSince] would hand back a complete history
+// from v.
+//
+// It is false when v is below [Doc.Floor]: collection dropped operations that v
+// has not seen, so what OpsSince returns has holes in its sequence numbers, and
+// a replica applying them parks everything after the first hole instead of
+// catching up — silently, since nothing in the batch is wrong on its own. A peer
+// below the floor has to be sent a snapshot rather than a difference.
+//
+// It is true for every version of a replica that has never collected, which is
+// every replica until somebody asks.
+func (d *Doc) CanReplay(v VersionVector) bool { return d.readable(v) }

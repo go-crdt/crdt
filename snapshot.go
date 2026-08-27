@@ -800,6 +800,14 @@ func readCollected(r *reader, vv VersionVector, floor *VersionVector, collected 
 		if n > vv[site] {
 			return ErrMalformed
 		}
+		// Everything collection dropped sits at or below the floor, so a site
+		// cannot have had more operations taken away than the floor covers. A
+		// snapshot claiming otherwise has holes it does not admit to, and
+		// [Doc.CanReplay] would tell a caller its history was complete when it
+		// is not — which is how a peer is sent a difference it can only park.
+		if n > (*floor)[site] {
+			return ErrMalformed
+		}
 		if *collected == nil {
 			*collected = map[SiteID]uint64{}
 		}
