@@ -82,40 +82,27 @@ func (m *Map) resurrects(op MapOp) bool {
 	return !held
 }
 
-// Collect drops what every part of this document can spare, given what every
-// replica has delivered, and reports how many characters, elements and
-// tombstones went.
+// Collect drops what every map part of this document can spare, given what
+// every replica has delivered, and reports how many tombstones went.
+//
+// Only the maps. A text and a list had one too and it was withdrawn — see the
+// note in text.go — so a document made of them gives nothing back for now. A
+// map is unaffected because it re-points nothing, which is exactly what the
+// other two got wrong.
 //
 // A part not named in stable is left alone. That is not a nicety: collecting a
 // part against a version nobody vouched for is exactly the mistake the other
 // [Doc.Collect] guards against, and the guard cannot see a part the caller
 // forgot.
 //
-// # Why this exists here and a rewrite does not
-//
 // There is deliberately no rewrite for a [Composite] — see [Doc.Rewritten] —
-// because rewriting mints new identities, and the structured layer keeps rich
+// because rewriting mints new identities and the structured layer keeps rich
 // text marks, tree parents and sequence positions against the identities of the
-// characters they describe. A rewrite would silently empty every one of those.
-//
-// Collection is the opposite: it keeps every identity it does not drop, and
-// drops only what is already invisible and already agreed to be gone. A mark on
-// a character that is collected was a mark on text nobody could see, and it
-// stays exactly as inert as it was. So a composite may be collected where it
-// may not be rewritten, and that difference is the whole reason this one is
-// offered.
+// characters they describe. Collecting a map keeps every identity it does not
+// drop, and drops only records that are already invisible and already agreed to
+// be gone.
 func (c *Composite) Collect(stable CompositeVersion) int {
 	n := 0
-	for name, d := range c.texts {
-		if held, named := stable[Part{Kind: PartText, Name: name}]; named {
-			n += d.Collect(held)
-		}
-	}
-	for name, l := range c.lists {
-		if held, named := stable[Part{Kind: PartList, Name: name}]; named {
-			n += l.Collect(held)
-		}
-	}
 	for name, m := range c.maps {
 		if held, named := stable[Part{Kind: PartMap, Name: name}]; named {
 			n += m.Collect(held)
@@ -124,46 +111,11 @@ func (c *Composite) Collect(stable CompositeVersion) int {
 	return n
 }
 
-// CanReplay reports whether [Composite.OpsSince] would hand back a complete
-// history from v, for every part of this document.
-//
-// It is false when any text or list part has collected below what v holds; see
-// [Doc.CanReplay]. A peer it is false for has to be sent a snapshot rather than
-// a difference.
-//
-// A map part never makes it false. A map gives back a sequence number without
-// its operation as a matter of course — a second write to a key overwrites the
-// first — so the span that stands in for one collected tombstone is the same
-// span that already stood in for an overwritten value, and a peer applying it
-// catches up either way.
-func (c *Composite) CanReplay(v CompositeVersion) bool {
-	for name, d := range c.texts {
-		if !d.CanReplay(v[Part{Kind: PartText, Name: name}]) {
-			return false
-		}
-	}
-	for name, l := range c.lists {
-		if !l.CanReplay(v[Part{Kind: PartList, Name: name}]) {
-			return false
-		}
-	}
-	return true
-}
-
-// collected reports whether any part has given something back, which is what
-// makes this document's bytes something a newcomer replaying its history cannot
-// reproduce: what was collected is in the snapshot and in no operation.
+// collected reports whether any map part has given something back, which is
+// what makes this document's bytes something a newcomer replaying its history
+// cannot reproduce: the clock a map collected under is in its snapshot and in
+// no operation.
 func (c *Composite) collected() bool {
-	for _, d := range c.texts {
-		if len(d.floor) > 0 {
-			return true
-		}
-	}
-	for _, l := range c.lists {
-		if len(l.floor) > 0 {
-			return true
-		}
-	}
 	for _, m := range c.maps {
 		if m.collectedBelow > 0 {
 			return true

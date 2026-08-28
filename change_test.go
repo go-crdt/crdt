@@ -101,7 +101,7 @@ func TestChangesCoalesceAStretch(t *testing.T) {
 
 	// Edits that are not adjacent stay separate, and both are reported.
 	writer2 := New(3)
-	apply(t, writer2, must(watcher.OpsSince(nil)))
+	apply(t, writer2, watcher.OpsSince(nil))
 	var scattered []Op
 	scattered = append(scattered, insert(t, writer2, 0, "A")...)
 	scattered = append(scattered, insert(t, writer2, 2, "B")...)

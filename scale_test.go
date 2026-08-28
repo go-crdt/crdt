@@ -61,7 +61,7 @@ func TestWhatGrowsWithTheNumberOfClients(t *testing.T) {
 		const calls = 200
 		start := time.Now()
 		for range calls {
-			if owed := must(d.OpsSince(v)); len(owed) != 0 {
+			if owed := d.OpsSince(v); len(owed) != 0 {
 				t.Fatalf("%d owed when nothing should be", len(owed))
 			}
 		}

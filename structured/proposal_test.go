@@ -376,7 +376,7 @@ func TestProposalsTravelWithTheDocument(t *testing.T) {
 	if got := grace.Version(); len(got) == 0 {
 		t.Fatal("the reloaded document promises nothing")
 	}
-	if got := must(grace.OpsSince(grace.Version())); len(got) != 0 {
+	if got := grace.OpsSince(grace.Version()); len(got) != 0 {
 		t.Fatalf("%d operations owed to itself", len(got))
 	}
 	// And grace can accept one Ada raised.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -172,15 +173,20 @@ func TestAHundredClientsAndABrokenNetwork(t *testing.T) {
 	editors := chaosSize(t, "CRDT_CHAOS_EDITORS", min(replicas, 100))
 	fanout := chaosSize(t, "CRDT_CHAOS_FANOUT", min(replicas-1, 8))
 	churn := chaosSize(t, "CRDT_CHAOS_CHURN", max(1, replicas/50))
+	// How often everybody gives back what everybody has certainly seen. Only
+	// the maps give anything back — see the note in text.go — and this is here
+	// so that the next attempt at the other two has something to fail against
+	// rather than a harness that has never collected anything.
+	collectEvery := chaosSize(t, "CRDT_CHAOS_COLLECT_EVERY", 15)
 
 	for seed := range uint64(seeds) {
 		t.Run(fmt.Sprintf("seed %d", seed), func(t *testing.T) {
-			runChaos(t, seed, replicas, rounds, editors, fanout, churn)
+			runChaos(t, seed, replicas, rounds, editors, fanout, churn, collectEvery)
 		})
 	}
 }
 
-func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, churn int) {
+func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, churn, collectEvery int) {
 	t.Helper()
 	rng := rand.New(rand.NewPCG(seed, 0xc4a05))
 	start := time.Now()
@@ -209,6 +215,7 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 
 	var edits, delivered, lost, duplicated, gossips int
 	var joins, disconnects, reconnects, departures int
+	var collections, collected int
 
 	for round := range rounds {
 		if round >= partitionUntil && rng.IntN(6) == 0 {
@@ -255,10 +262,10 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 			case disconnected:
 				// It comes back and reconciles with the hub both ways: what it
 				// missed, and what it wrote while nobody could hear it.
-				if err := r.doc.Apply(must(hub.doc.OpsSince(r.doc.Version()))...); err != nil {
+				if err := r.doc.Apply(hub.doc.OpsSince(r.doc.Version())...); err != nil {
 					t.Fatalf("seed %d round %d: client %d catching up: %v", seed, round, r.site, err)
 				}
-				if err := hub.doc.Apply(must(r.doc.OpsSince(hub.doc.Version()))...); err != nil {
+				if err := hub.doc.Apply(r.doc.OpsSince(hub.doc.Version())...); err != nil {
 					t.Fatalf("seed %d round %d: client %d pushing back: %v", seed, round, r.site, err)
 				}
 				r.state = connected
@@ -338,7 +345,7 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 			if r.state == connected && rng.IntN(3) == 0 {
 				j := rng.IntN(replicas)
 				if j != i && all[j].state == connected && group[j] == group[i] {
-					if err := r.doc.Apply(must(all[j].doc.OpsSince(r.doc.Version()))...); err != nil {
+					if err := r.doc.Apply(all[j].doc.OpsSince(r.doc.Version())...); err != nil {
 						t.Fatalf("seed %d round %d: gossip %d<-%d: %v", seed, round, r.site, all[j].site, err)
 					}
 					gossips++
@@ -363,7 +370,7 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 			if r.state != connected || r.doc == nil {
 				continue
 			}
-			if err := r.doc.Apply(must(hub.doc.OpsSince(r.doc.Version()))...); err != nil {
+			if err := r.doc.Apply(hub.doc.OpsSince(r.doc.Version())...); err != nil {
 				t.Fatalf("seed %d round %d: client %d pulling: %v", seed, round, r.site, err)
 			}
 			gossips++
@@ -382,6 +389,26 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 				t.Fatalf("seed %d round %d: client %d catching up: %v", seed, round, r.site, err)
 			}
 			delivered += len(batch)
+		}
+
+		// --- everybody gives back what everybody has certainly seen
+		//
+		// The meet is taken over every replica that will be asked to agree at
+		// the end. A floor at the meet is at or below every one of their
+		// versions, so none of them can be below it. A replica that has not
+		// joined is left out: it is welcomed with a snapshot and inherits
+		// whatever the hub has given back with it.
+		if collectEvery > 0 && round%collectEvery == collectEvery-1 {
+			if stable, ok := chaosMeet(all, hub); ok {
+				collections++
+				for _, r := range all {
+					if r.state == unborn {
+						continue
+					}
+					collected += r.doc.Collect(stable)
+				}
+				collected += hub.doc.Collect(stable)
+			}
 		}
 	}
 
@@ -409,22 +436,41 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 	// holds, and after the second everyone holds what the collector does.
 	collector := here[0]
 	for _, r := range here[1:] {
-		if err := collector.doc.Apply(must(r.doc.OpsSince(collector.doc.Version()))...); err != nil {
+		if err := collector.doc.Apply(r.doc.OpsSince(collector.doc.Version())...); err != nil {
 			t.Fatalf("seed %d: collecting from %d: %v", seed, r.site, err)
 		}
 	}
 	for _, r := range here[1:] {
-		if err := r.doc.Apply(must(collector.doc.OpsSince(r.doc.Version()))...); err != nil {
+		if err := r.doc.Apply(collector.doc.OpsSince(r.doc.Version())...); err != nil {
 			t.Fatalf("seed %d: handing back to %d: %v", seed, r.site, err)
 		}
 	}
 
 	// --- what all of that has to have left behind
-	want := here[0].doc.Snapshot()
-	for _, r := range here[1:] {
-		if got := r.doc.Snapshot(); !bytes.Equal(got, want) {
-			t.Fatalf("seed %d: replica %d holds a different document: %d bytes against %d",
-				seed, r.site, len(got), len(want))
+	// The bytes when nobody collected, the contents when somebody did.
+	//
+	// A snapshot is canonical for a replica that has only ever been told
+	// things, which is why this compares bytes at all. A map that collects
+	// remembers the highest clock it collected under, and two replicas reach
+	// that moment holding different records — one of them was disconnected and
+	// had not heard a deletion yet — so they collect a little differently and
+	// remember a different clock. What they hold is the same; the bookkeeping
+	// of what they gave back is not, and that is what this stops comparing.
+	if collectEvery > 0 {
+		want := chaosContents(t, here[0])
+		for _, r := range here[1:] {
+			if got := chaosContents(t, r); got != want {
+				t.Fatalf("seed %d: replica %d holds a different document: %d against %d",
+					seed, r.site, len(got), len(want))
+			}
+		}
+	} else {
+		want := here[0].doc.Snapshot()
+		for _, r := range here[1:] {
+			if got := r.doc.Snapshot(); !bytes.Equal(got, want) {
+				t.Fatalf("seed %d: replica %d holds a different document: %d bytes against %d",
+					seed, r.site, len(got), len(want))
+			}
 		}
 	}
 	for _, r := range here {
@@ -455,6 +501,12 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 		"%d duplicated, %d reconciliations, %d restarts, %d operations dropped while parked",
 		replicas, rounds, time.Since(start).Round(time.Millisecond),
 		edits, delivered, lost, duplicated, gossips, restarts, drops)
+	if collectEvery > 0 {
+		if collections == 0 {
+			t.Fatal("collection was asked for and never happened, so nothing about it was tested")
+		}
+		t.Logf("collected %d times, giving back %d records", collections, collected)
+	}
 	version, err := here[0].doc.Version().MarshalBinary()
 	if err != nil {
 		t.Fatal(err)
@@ -464,7 +516,7 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 		joins, disconnects, reconnects, departures, offline, len(here))
 	t.Logf("the document they agree on: %d characters, %d tombstones, %d bytes as a snapshot, "+
 		"%d bytes of version over %d sites; heap %d MiB; %d text deletions were made",
-		d.Len(), d.Tombstones(), len(want), len(version), len(here[0].doc.Version()[chaosText]),
+		d.Len(), d.Tombstones(), len(here[0].doc.Snapshot()), len(version), len(here[0].doc.Version()[chaosText]),
 		mem.HeapAlloc>>20, deletes)
 	if lost == 0 || duplicated == 0 || restarts == 0 || gossips == 0 {
 		t.Errorf("the network was not broken enough: lost=%d duplicated=%d restarts=%d gossips=%d",
@@ -482,4 +534,79 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 		t.Errorf("nobody deleted anything: %d deletions, %d tombstones. A document "+
 			"only ever added to is the easy half", deletes, d.Tombstones())
 	}
+}
+
+// chaosMeet is what every replica that will be asked to agree has certainly
+// seen: the element-wise minimum of their versions.
+//
+// A replica that has not joined is left out, because it holds nothing and the
+// meet with nothing is nothing. It reports false when the answer is empty,
+// which is a room where somebody has just arrived and nothing can be collected
+// yet.
+func chaosMeet(all []*chaosReplica, hub *chaosReplica) (CompositeVersion, bool) {
+	out := hub.doc.Version()
+	if len(out) == 0 {
+		return nil, false
+	}
+	for _, r := range all {
+		if r.state == unborn {
+			continue
+		}
+		theirs := r.doc.Version()
+		next := CompositeVersion{}
+		for part, mine := range out {
+			other, known := theirs[part]
+			if !known {
+				continue
+			}
+			shared := VersionVector{}
+			for site, seq := range mine {
+				if o := other[site]; o < seq {
+					seq = o
+				}
+				if seq > 0 {
+					shared[site] = seq
+				}
+			}
+			if len(shared) > 0 {
+				next[part] = shared
+			}
+		}
+		out = next
+		if len(out) == 0 {
+			return nil, false
+		}
+	}
+	return out, true
+}
+
+// chaosContents is everything a replica says, in one string: the text, the list
+// and the map. It is what two replicas have to agree about once collecting has
+// stopped their bytes from agreeing.
+func chaosContents(t *testing.T, r *chaosReplica) string {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString(r.text(t).String())
+	b.WriteByte(0)
+	l, err := r.doc.List(chaosList.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range l.Values() {
+		b.Write(v)
+		b.WriteByte(1)
+	}
+	b.WriteByte(0)
+	m, err := r.doc.Map(chaosMap.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range m.Keys() {
+		b.WriteString(k)
+		b.WriteByte(2)
+		v, _ := m.Get(k)
+		b.Write(v)
+		b.WriteByte(1)
+	}
+	return b.String()
 }

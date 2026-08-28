@@ -2,7 +2,6 @@ package crdt
 
 import (
 	"encoding/binary"
-	"sort"
 	"unicode/utf8"
 )
 
@@ -67,28 +66,12 @@ func (d *Doc) Snapshot() []byte {
 		out = binary.AppendUvarint(out, d.vv[site])
 	}
 
-	// What collection has taken away, which a loader needs on two counts: the
-	// floor says how far back this replica can still be read, and the per-site
-	// tallies are what keeps the accounting below exact rather than merely
-	// relaxed — a loader counts the operations it reads and these are the ones
-	// it will not find. Both are empty for a document nobody has collected,
-	// which costs two bytes.
-	floorSites := d.floor.sites()
-	out = binary.AppendUvarint(out, uint64(len(floorSites)))
-	for _, site := range floorSites {
-		out = binary.AppendUvarint(out, uint64(site))
-		out = binary.AppendUvarint(out, d.floor[site])
-	}
-	goneSites := make([]SiteID, 0, len(d.collected))
-	for site := range d.collected {
-		goneSites = append(goneSites, site)
-	}
-	sort.Slice(goneSites, func(i, j int) bool { return goneSites[i] < goneSites[j] })
-	out = binary.AppendUvarint(out, uint64(len(goneSites)))
-	for _, site := range goneSites {
-		out = binary.AppendUvarint(out, uint64(site))
-		out = binary.AppendUvarint(out, d.collected[site])
-	}
+	// Version 6 carries two tables here, both of them always empty: they were
+	// written for a collection that was withdrawn because it left two replicas
+	// holding different documents. Reading refuses a snapshot whose tables are
+	// not empty, because nothing sound could have produced one.
+	out = binary.AppendUvarint(out, 0)
+	out = binary.AppendUvarint(out, 0)
 
 	runs := d.runs()
 	out = binary.AppendUvarint(out, uint64(len(runs)))
@@ -262,7 +245,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	}
 
 	if version >= snapshotVersion {
-		if err := d.readCollected(r); err != nil {
+		if err := readCollected(r); err != nil {
 			return nil, err
 		}
 	}
@@ -271,7 +254,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	// exactly once. Anything less and the document could not reproduce its own
 	// history: a peer replaying it would stall on the missing sequence number, or
 	// silently drop a deletion two characters both claimed.
-	ledger := &ledger{vv: d.vv, seen: map[ID]struct{}{}, counts: map[SiteID]uint64{}, gone: d.collected}
+	ledger := &ledger{vv: d.vv, seen: map[ID]struct{}{}, counts: map[SiteID]uint64{}}
 
 	count, ok := r.uvarint()
 	if !ok || count > uint64(len(r.buf)) {
@@ -515,10 +498,6 @@ type ledger struct {
 	vv     VersionVector
 	seen   map[ID]struct{}
 	counts map[SiteID]uint64
-	// gone is how many of each site's operations collection has taken away, so
-	// that what is missing is a number the snapshot stated rather than a gap the
-	// loader is asked to tolerate.
-	gone map[SiteID]uint64
 }
 
 // claim records one operation identity, rejecting anything the version vector
@@ -539,7 +518,7 @@ func (l *ledger) claim(id ID) bool {
 // claimed. Sequence numbers have no gaps, so counting them is enough.
 func (l *ledger) complete() bool {
 	for site, seq := range l.vv {
-		if l.counts[site]+l.gone[site] != seq {
+		if l.counts[site] != seq {
 			return false
 		}
 	}
@@ -750,68 +729,20 @@ func (c *columns) empty() bool {
 // naming operations the document has not seen, or a tally claiming more of a
 // site's operations than that site ever issued, describes no document a replica
 // could have produced, and is refused rather than believed.
-func (d *Doc) readCollected(r *reader) error {
-	return readCollected(r, d.vv, &d.floor, &d.collected)
-}
-
-// readCollected is shared by the text and the list, whose headers say the same
-// thing in the same shape: a text that refused what a list accepted would be a
-// difference nobody meant to write.
-func readCollected(r *reader, vv VersionVector, floor *VersionVector, collected *map[SiteID]uint64) error {
-	nFloor, ok := r.uvarint()
-	if !ok || nFloor > uint64(len(r.buf)) {
-		return ErrMalformed
-	}
-	for range nFloor {
-		s, ok1 := r.uvarint()
-		seq, ok2 := r.uvarint()
-		if !ok1 || !ok2 || seq == 0 || seq > MaxClock {
+// readCollected reads the two tables version 6 of a text and version 2 of a
+// list carry, and refuses a snapshot whose tables are not empty.
+//
+// They were written for a collection that has been withdrawn, so nothing that
+// could be trusted has ever filled them. A snapshot that has them filled came
+// from a replica that collected the way that turned out to leave two replicas
+// holding different documents, and reading it back would carry that
+// disagreement in rather than leave it outside.
+func readCollected(r *reader) error {
+	for range 2 {
+		n, ok := r.uvarint()
+		if !ok || n != 0 {
 			return ErrMalformed
 		}
-		site := SiteID(s)
-		if _, dup := (*floor)[site]; dup {
-			return ErrMalformed
-		}
-		// The floor is a version this replica reached, so it cannot name an
-		// operation the version vector does not cover.
-		if seq > vv[site] {
-			return ErrMalformed
-		}
-		if *floor == nil {
-			*floor = VersionVector{}
-		}
-		(*floor)[site] = seq
-	}
-
-	nGone, ok := r.uvarint()
-	if !ok || nGone > uint64(len(r.buf)) {
-		return ErrMalformed
-	}
-	for range nGone {
-		s, ok1 := r.uvarint()
-		n, ok2 := r.uvarint()
-		if !ok1 || !ok2 || n == 0 {
-			return ErrMalformed
-		}
-		site := SiteID(s)
-		if _, dup := (*collected)[site]; dup {
-			return ErrMalformed
-		}
-		if n > vv[site] {
-			return ErrMalformed
-		}
-		// Everything collection dropped sits at or below the floor, so a site
-		// cannot have had more operations taken away than the floor covers. A
-		// snapshot claiming otherwise has holes it does not admit to, and
-		// [Doc.CanReplay] would tell a caller its history was complete when it
-		// is not — which is how a peer is sent a difference it can only park.
-		if n > (*floor)[site] {
-			return ErrMalformed
-		}
-		if *collected == nil {
-			*collected = map[SiteID]uint64{}
-		}
-		(*collected)[site] = n
 	}
 	return nil
 }

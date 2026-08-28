@@ -376,136 +376,83 @@ a tombstone is load-bearing until every replica that might anchor to it is
 accounted for — which needs causal stability, and causal stability needs to know
 the set of replicas. That is a different design, not a tuning of this one.
 
-### Collecting what nothing can name any more
+### Collecting what nothing can name any more, and why a text cannot
 
-A rewrite gives back what was deleted at the price of every identity. Collection
-gives back the same thing at a much smaller price, and the two are worth stating
-side by side: on the same revised document a rewrite is 2.2x smaller and
-collection 2.07x — but a collected replica still merges with the replicas it
-came from, and a rewritten one does not.
+A tombstone is kept because a concurrent insertion may still name the character
+it stands for. Once every replica has delivered the deletion, no operation that
+could name it can still be written — so the tombstone looks collectible, and for
+a map it is.
 
-On a real editing history rather than a made-up one — the automerge paper, a
-quarter of a million edits at positions a person chose — 104 852 characters and
-77 463 tombstones, of which **87% are collectible**: the snapshot falls from
-478 474 to 194 203 bytes and opens in 16ms instead of 39ms. The tombstones that
-stay are the ones a survivor still names.
+For a text and a list it is not, and finding that out cost a released version.
 
-`Collect` takes a version every replica has delivered and drops the runs that
-are entirely deleted at or below it. A list collects on the same terms and is
-simpler to collect, because every element carries its own origin where a
-character's is implicit in the run it belongs to: there is no rule that an
-element goes only together with its neighbours, and the only extra care is that
-a deletion two replicas made at once goes with the element it removed, and so
-has to be stable as well. Three things make that safe:
+`Doc.Collect` and `List.Collect` shipped in v0.33.0. They dropped runs that were
+entirely deleted below a version every replica had, and re-pointed the survivors
+that named them at **the nearest character still alive before them**. That
+phrase is the bug. *Still alive* is relative to what a replica happens to hold:
+two replicas collecting against the same version hold different characters
+*above* it, re-point the same survivor at different anchors, and disagree from
+then on about what it was inserted after. A chaos harness diverged them on every
+seed it was given. Collecting against a meet does not save it — the meet bounds
+what is below, and the characters that differ are above.
 
-- **A run goes whole or not at all.** A character's origin is the character
-  before it in its own run, so collecting a prefix would leave the survivor
-  behind it naming something that is gone.
-- **Every deletion in it is below the given version.** An insertion names as its
-  origin a character that was visible to whoever issued it; once no replica has
-  the character visible, no operation naming it can still be written, and
-  anything already written naming it has by the same argument already arrived.
-- **Survivors that named it are re-pointed** at the nearest character still alive
-  before it. This is not an optimisation. Without it nothing is ever collected:
-  a run appended to a document names the last character of the run before it, so
-  an entirely deleted run is almost always named by its successor. Measured on a
-  document written and revised the ordinary way, 332 runs of 667 were entirely
-  deleted and stable — and every single one was named by a survivor.
+The obvious repair is to re-point at the dead run's own origin, which every
+replica reads the same because the operation carries it. That makes the survivor
+sort earlier than it does in the live document, so replaying the snapshot in
+document order stops being an append and `Load` refuses it. So one anchor is
+agreed and cannot be written down; the other can be written down and is not
+agreed. Both were tried.
 
-That the re-pointing does not move any text is the claim the design rests on, so
-it is tested rather than argued: four hundred random histories, collected on one
-replica and not on the other, then eighty concurrent edits each delivered in a
-shuffled order, and the two must agree.
+Both are withdrawn. What is left of that work is `Map.Collect`, which re-points
+nothing and which the same harness leaves alone on every seed.
 
-#### A list, a map, and a document of parts
+#### What the field does instead
 
-A list collects on the same terms and is simpler to collect: every element
-carries its own origin, so there is no rule that one goes only with its
-neighbours. The only extra care is a removal two replicas made at once, which is
-recorded against the element it removed and so has to be stable as well.
+Yjs does not remove the item. `Item.gc` replaces it in place with
+`GC(this.id, this.length)` — same identity, same length, contents discarded —
+and nothing is re-pointed, because the marker still answers to the identity that
+named it. Adjacent GC structs merge. No causal stability is required, because
+nothing has to be certain that no operation will name it: an operation that does
+finds the marker.
 
-A map is different in kind, and easier. It keeps one record per key rather than
-one per edit, so what accumulates is not the history of a key but the keys that
-were deleted — and a tombstone is kept for exactly one reason, which
-`Map.integrate` states: it stops an older set resurrecting a key somebody has
-since deleted. It may go once no such write can still arrive. Nothing on the wire
-changes, because a map *already* gives back a sequence number without its
-operation — a second write to a key overwrites the first, and `OpsSince` reports
-the gap as `MapSuperseded` rather than pretending the operation is still here.
-Collecting frees a sequence number the same way and the same span covers it, so
-there is no format version and no floor to persist.
+Seph Gentle, who wrote the editing trace this repository measures against, names
+exactly two ways to shed this data — Yjs's GC, and Antimatter, which is a
+protocol with extra messages between peers rather than a local operation. He
+also says the thing worth quoting here: *"Git repositories only ever grow over
+time and nobody seems to mind too much. Maybe it doesn't matter so long as the
+underlying system is fast enough?"*
 
-What a map needs instead is a different guard. Misused, it does not strand an
-operation, it **resurrects a key** — silently, and on one replica only. And the
-mistake cannot be recognised by identity: the offending write is one this
-replica has never seen, so it is above its version vector and above any floor.
-So a map remembers the highest *clock* it collected under and refuses a write at
-or below it for a key it does not hold. Under correct use no such write can
-arrive, so the guard never fires; when it does, it is naming the mistake.
+Measured here, that shape is worth **16.2%** of a real document's snapshot,
+against the 59.4% the wrong answer promised and the 5.2% it would add to a
+document that had already collected. Smaller, and sound. It is what a next
+attempt should build, and it is not built yet.
 
-`Composite.Collect` collects every part the caller vouches for, and a part it
-does not name is left alone. This is where the difference between collecting and
-rewriting is worth stating plainly, because it is why one is offered on a
-composite and the other is refused. A rewrite mints new identities, and the
-structured layer keeps rich text marks, tree parents and sequence positions
-against the identities of the characters they describe — so a rewrite would
-empty every one of them. Collection keeps every identity it does not drop, and
-drops only what is already invisible and already agreed to be gone: a mark on a
-character that is collected was a mark on text nobody could see, and it stays
-exactly as inert as it was. Tested rather than argued, on rich text with a mark
-over the run that gets collected.
+#### A map is different in kind
 
-#### Two steps for a diagram, and why
+A map keeps one record per key rather than one per edit, so what accumulates is
+the keys that were deleted, and a tombstone is kept for exactly one reason,
+which `Map.integrate` states: it stops an older set resurrecting a key somebody
+has since deleted. There is no origin, nothing points at anything, and nothing
+is re-pointed — which is why it survives what the other two did not.
 
-A diagram is where compaction has to be asked for by hand, and where asking once
-is not enough. `RemoveNode` takes a node out of the list of what exists and
-leaves its label, its colour and its position in the map, keyed by a node nothing
-can reach. That is deliberate — a removal should be one operation, not one per
-property somebody happened to set — and it means a worked-on diagram carries
-every node it ever held, as live records rather than tombstones. Collection
-cannot touch live records.
+Nothing on the wire changes for it either. A map already gives back a sequence
+number without its operation — a second write to a key overwrites the first —
+and `OpsSince` reports the gap as `MapSuperseded` rather than pretending the
+operation is still here. Collecting frees a sequence number the same way and the
+same span covers it.
 
-So there are two deliberate actions, and they do different work. `Diagram.Sweep`
-turns the unreachable records into tombstones; `Diagram.Collect` gives the
-tombstones back. Measured on a diagram of two hundred nodes, half of them tried
-and removed, each placed, labelled, coloured and moved five times: 16 420 bytes,
-14 734 after sweeping, **8 197 after collecting — 2.0x**. Sweeping alone is worth
-almost nothing, which is the point: it converts one kind of weight into another,
-and only the second step is a saving.
+What it needs instead is a different guard. Misused, a map does not strand an
+operation, it **resurrects a key** — silently, on one replica. And the mistake
+cannot be recognised by identity: the offending write is one this replica has
+never seen, so it is above its version vector. The guard is therefore a *clock*:
+a map remembers the highest one it collected under, and refuses a write at or
+below it for a key it does not hold.
 
-#### What it costs
+#### Two steps for a diagram
 
-**A peer that is behind.** `OpsSince` on a collected replica cannot hand back a
-complete history from a version below the floor: the operations it dropped are
-gone, so what it returns has holes in its sequence numbers, and a replica
-applying them parks everything after the first hole rather than catching up —
-silently, because nothing in the batch is wrong on its own. `CanReplay` is what a
-caller asks before choosing between a difference and a snapshot, and a peer below
-the floor is sent the snapshot. A snapshot that tallies more collected operations
-for a site than its floor covers is refused on load, so the question cannot be
-answered wrongly; a fuzzer found that one.
-
-**The past.** `TextAt`, `LenAt` and `ChangesSince` return `ErrCollected` below
-`Floor` instead of a text with characters missing from it — a wrong answer about
-the past being worse than none, since nothing downstream could tell the two
-apart. A document that never collects has an empty floor and is unaffected.
-
-**A format version.** A collected document has gaps where operations used to be,
-and the snapshot's central integrity check counts a site's operations against
-what the version vector promises. Version 6 writes the floor and, per site, how
-many operations collection took away, so that check stays *exact* rather than
-being relaxed to let a gap through. Versions 1 through 5 still load.
-
-**A precondition somebody has to meet.** The version handed to `Collect` must be
-one every replica has delivered. A server that fans operations out and collects
-acknowledgements knows such a version; a replica on its own does not. Given a
-version some replica has not reached, that replica's work arrives naming
-characters that are gone — and is refused with `ErrStranded` rather than parked
-for ever, because parking it is the silent version of the same failure.
-
-What is deliberately still not done is collecting a tombstone that a survivor
-*does* name by re-pointing across a replica that might yet appear. That is the
-same trade as a rewrite, and it belongs to whoever decides a replica is gone.
+`Diagram.Sweep` turns the records of removed nodes — live, unreachable, keyed by
+a node that is gone — into tombstones, and `Diagram.Collect` gives the
+tombstones back. Sweeping alone is worth almost nothing: it converts one kind of
+weight into another, and only the second step is a saving.
 
 ## Counting in UTF-16
 

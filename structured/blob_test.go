@@ -220,10 +220,10 @@ func TestTwoReplicasReplaceTheSameFile(t *testing.T) {
 	mustPut(t, a, "f", fromA)
 	mustPut(t, b, "f", fromB)
 
-	if err := a.Apply(must(b.OpsSince(a.Version()))...); err != nil {
+	if err := a.Apply(b.OpsSince(a.Version())...); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Apply(must(a.OpsSince(b.Version()))...); err != nil {
+	if err := b.Apply(a.OpsSince(b.Version())...); err != nil {
 		t.Fatal(err)
 	}
 	got, ok := a.Get("f")

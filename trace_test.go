@@ -162,7 +162,7 @@ func TestEditingTraceConverges(t *testing.T) {
 
 	d := New(1)
 	replay(t, d, patches)
-	ops := must(d.OpsSince(nil))
+	ops := d.OpsSince(nil)
 
 	reversed := make([]Op, len(ops))
 	for i, op := range ops {
@@ -200,7 +200,7 @@ func BenchmarkEditingTraceRemote(b *testing.B) {
 	patches, _ := loadTrace(b)
 	d := New(1)
 	replay(b, d, patches)
-	ops := must(d.OpsSince(nil))
+	ops := d.OpsSince(nil)
 	b.ResetTimer()
 	for range b.N {
 		peer := New(2)

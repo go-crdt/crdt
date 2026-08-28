@@ -71,7 +71,7 @@ func TestDroppingWhatIsParkedLosesNothing(t *testing.T) {
 	if _, err := ada.Insert(0, "hello world"); err != nil {
 		t.Fatal(err)
 	}
-	ops := must(ada.OpsSince(nil))
+	ops := ada.OpsSince(nil)
 
 	// Grace receives them back to front, so every one but the last parks.
 	grace := New(2)
@@ -94,7 +94,7 @@ func TestDroppingWhatIsParkedLosesNothing(t *testing.T) {
 
 	// Ada owes her all of them, the dropped ones included, because none was
 	// ever in grace's version.
-	owed := must(ada.OpsSince(grace.Version()))
+	owed := ada.OpsSince(grace.Version())
 	if len(owed) != len(ops) {
 		t.Fatalf("ada owes %d operations of %d", len(owed), len(ops))
 	}

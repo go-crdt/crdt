@@ -90,14 +90,7 @@ func ExampleDoc_OpsSince() {
 		panic(err)
 	}
 
-	// OpsSince refuses a version below what this replica has collected, because
-	// what it gave back is not in the difference any more. Nothing here has
-	// collected, so this cannot happen; a caller that does collect sends a
-	// snapshot instead. See [crdt.Doc.CanReplay].
-	missed, err := online.OpsSince(offline.Version())
-	if err != nil {
-		panic(err)
-	}
+	missed := online.OpsSince(offline.Version())
 	fmt.Println(len(missed), "operations missed")
 	if err := offline.Apply(missed...); err != nil {
 		panic(err)

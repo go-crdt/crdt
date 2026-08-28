@@ -741,9 +741,7 @@ func (b *Blocks) Snapshot() []byte { return b.doc.Snapshot() }
 func (b *Blocks) Version() crdt.CompositeVersion { return b.doc.Version() }
 
 // OpsSince returns the operations a peer at v has not seen.
-func (b *Blocks) OpsSince(v crdt.CompositeVersion) ([]crdt.PartOps, error) {
-	return b.doc.OpsSince(v)
-}
+func (b *Blocks) OpsSince(v crdt.CompositeVersion) []crdt.PartOps { return b.doc.OpsSince(v) }
 
 // Apply takes operations from a peer.
 func (b *Blocks) Apply(batches ...crdt.PartOps) error { return b.doc.Apply(batches...) }
