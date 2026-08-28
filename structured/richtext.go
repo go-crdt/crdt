@@ -487,9 +487,7 @@ func (r *RichText) Snapshot() []byte { return r.doc.Snapshot() }
 func (r *RichText) Version() crdt.CompositeVersion { return r.doc.Version() }
 
 // OpsSince returns the operations a peer at v has not seen.
-func (r *RichText) OpsSince(v crdt.CompositeVersion) ([]crdt.PartOps, error) {
-	return r.doc.OpsSince(v)
-}
+func (r *RichText) OpsSince(v crdt.CompositeVersion) []crdt.PartOps { return r.doc.OpsSince(v) }
 
 // Apply integrates operations from peers.
 func (r *RichText) Apply(batches ...crdt.PartOps) error { return r.doc.Apply(batches...) }

@@ -37,8 +37,8 @@ func read(b *Blocks) string {
 
 func syncBlocks(t *testing.T, a, b *Blocks) {
 	t.Helper()
-	fromA := must(a.OpsSince(b.Version()))
-	fromB := must(b.OpsSince(a.Version()))
+	fromA := a.OpsSince(b.Version())
+	fromB := b.OpsSince(a.Version())
 	if err := b.Apply(fromA...); err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestTwoPeopleEditTheSameSeamAndMeanDifferentThings(t *testing.T) {
 	mustType(t, a, second, 0, "two")
 
 	b := NewBlocks(2)
-	if err := b.Apply(must(a.OpsSince(nil))...); err != nil {
+	if err := b.Apply(a.OpsSince(nil)...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -125,7 +125,7 @@ func TestTwoPeopleTypeAtTheSameSideOfASeam(t *testing.T) {
 	two := mustOpen(t, a, one, "paragraph")
 
 	b := NewBlocks(2)
-	if err := b.Apply(must(a.OpsSince(nil))...); err != nil {
+	if err := b.Apply(a.OpsSince(nil)...); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.InsertText(two, 0, "a"); err != nil {
@@ -236,7 +236,7 @@ func TestTypeAndDepthAreOneFieldEach(t *testing.T) {
 	mustType(t, a, p, 0, "text")
 
 	b := NewBlocks(2)
-	if err := b.Apply(must(a.OpsSince(nil))...); err != nil {
+	if err := b.Apply(a.OpsSince(nil)...); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := a.SetType(p, "heading"); err != nil {
@@ -741,7 +741,7 @@ func TestEveryOrderOfArrivalReadsTheSame(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ops := must(source.OpsSince(nil))
+	ops := source.OpsSince(nil)
 	want := read(source)
 
 	// Every rotation of the batch, which is enough to exercise arrival in an
@@ -774,7 +774,7 @@ func TestApplyingTwiceChangesNothing(t *testing.T) {
 	mustType(t, source, p, 0, "once")
 
 	replica := NewBlocks(2)
-	ops := must(source.OpsSince(nil))
+	ops := source.OpsSince(nil)
 	if err := replica.Apply(ops...); err != nil {
 		t.Fatal(err)
 	}

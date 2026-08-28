@@ -914,10 +914,7 @@ func mergeKeys(a, b []string) []string {
 // to send is a part whose version the peer already covers. A part that has been
 // reached for and left empty needs no case of its own — the empty vector is
 // covered by everything, this one included.
-func (c *Composite) OpsSince(v CompositeVersion) ([]PartOps, error) {
-	if !c.CanReplay(v) {
-		return nil, ErrCollected
-	}
+func (c *Composite) OpsSince(v CompositeVersion) []PartOps {
 	var out []PartOps
 	for name, d := range c.texts {
 		p := Part{Kind: PartText, Name: name}
@@ -925,9 +922,7 @@ func (c *Composite) OpsSince(v CompositeVersion) ([]PartOps, error) {
 		if held.covers(d.vv) {
 			continue
 		}
-		// The part can replay from held, because CanReplay said so above.
-		ops, _ := d.OpsSince(held)
-		out = append(out, PartOps{Part: p, Text: ops})
+		out = append(out, PartOps{Part: p, Text: d.OpsSince(held)})
 	}
 	for name, l := range c.lists {
 		p := Part{Kind: PartList, Name: name}
@@ -935,8 +930,7 @@ func (c *Composite) OpsSince(v CompositeVersion) ([]PartOps, error) {
 		if held.covers(l.vv) {
 			continue
 		}
-		ops, _ := l.OpsSince(held)
-		out = append(out, PartOps{Part: p, List: ops})
+		out = append(out, PartOps{Part: p, List: l.OpsSince(held)})
 	}
 	for name, m := range c.maps {
 		p := Part{Kind: PartMap, Name: name}
@@ -951,7 +945,7 @@ func (c *Composite) OpsSince(v CompositeVersion) ([]PartOps, error) {
 	// of three hundred. Asking [Composite.Parts] for them in order first would
 	// spend more on the sort than on the answer.
 	sort.Slice(out, func(i, j int) bool { return partLess(out[i].Part, out[j].Part) })
-	return out, nil
+	return out
 }
 
 // compositeMagic prefixes every composite snapshot, followed by a one-byte

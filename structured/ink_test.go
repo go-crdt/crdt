@@ -87,10 +87,10 @@ func TestTwoPeopleDrawAtOnce(t *testing.T) {
 		mustExtend(t, a, mine, at(float32(n), 0))
 		mustExtend(t, b, theirs, at(0, float32(n)))
 	}
-	if err := a.Apply(must(b.OpsSince(a.Version()))...); err != nil {
+	if err := a.Apply(b.OpsSince(a.Version())...); err != nil {
 		t.Fatal(err)
 	}
-	if err := b.Apply(must(a.OpsSince(b.Version()))...); err != nil {
+	if err := b.Apply(a.OpsSince(b.Version())...); err != nil {
 		t.Fatal(err)
 	}
 
@@ -414,7 +414,7 @@ func TestRandomisedDrawingConverges(t *testing.T) {
 					}
 					pending[n] = append(pending[n], ops)
 				}
-				pending[n] = append(pending[n], must(ink.OpsSince(crdt.CompositeVersion(nil)))...)
+				pending[n] = append(pending[n], ink.OpsSince(crdt.CompositeVersion(nil))...)
 			}
 
 			for n, ink := range inks {

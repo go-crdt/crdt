@@ -282,9 +282,7 @@ func (i *Ink) Snapshot() []byte { return i.doc.Snapshot() }
 func (i *Ink) Version() crdt.CompositeVersion { return i.doc.Version() }
 
 // OpsSince returns the operations a peer at v has not seen.
-func (i *Ink) OpsSince(v crdt.CompositeVersion) ([]crdt.PartOps, error) {
-	return i.doc.OpsSince(v)
-}
+func (i *Ink) OpsSince(v crdt.CompositeVersion) []crdt.PartOps { return i.doc.OpsSince(v) }
 
 // Apply integrates operations from peers.
 func (i *Ink) Apply(batches ...crdt.PartOps) error { return i.doc.Apply(batches...) }

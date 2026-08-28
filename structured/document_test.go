@@ -307,7 +307,7 @@ func TestDocumentTransportAndSnapshotRoundTrip(t *testing.T) {
 	}
 	// A late joiner built from OpsSince(nil) reaches the same state.
 	joiner := NewDocument(2)
-	applyDocument(t, joiner, must(d.OpsSince(nil))...)
+	applyDocument(t, joiner, d.OpsSince(nil)...)
 	if joiner.Pending() != 0 {
 		t.Fatalf("joiner has %d pending", joiner.Pending())
 	}

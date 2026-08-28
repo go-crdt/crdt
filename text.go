@@ -256,17 +256,6 @@ type Doc struct {
 	head *block // sentinel for the root ID; head.next is the first block
 	vv   VersionVector
 
-	// floor is the version below which this replica can no longer say what the
-	// document held, because [Doc.Collect] has dropped operations at or under
-	// it. Empty until somebody collects, which is what makes collection a thing
-	// a document opts into rather than a thing that happens to it.
-	floor VersionVector
-	// collected counts, per site, the operations that were dropped. A snapshot
-	// says how many operations a version vector promises and a loader counts
-	// what it reads; these are exactly the difference between the two, so the
-	// count stays exact rather than merely being relaxed.
-	collected map[SiteID]uint64
-
 	// tree is the root of the index over the same blocks; see tree.go. dirty
 	// holds the one block whose visible-character count the tree has not been
 	// told about yet, which is what keeps typing from paying for the index on
@@ -722,9 +711,6 @@ func (d *Doc) admit(op Op, absorbed *[]Op) error {
 			continue // already applied; applying twice must not change anything
 		}
 		if !d.ready(next) {
-			if d.strandedBy(next) {
-				return ErrStranded
-			}
 			d.park(next)
 			continue
 		}
@@ -952,10 +938,7 @@ func idLess(a, b ID) bool {
 //
 // A deletion's Lamport timestamp is not retained — it never affects ordering —
 // so replayed deletions carry their sequence number as their clock.
-func (d *Doc) OpsSince(vv VersionVector) ([]Op, error) {
-	if !d.readable(vv) {
-		return nil, ErrCollected
-	}
+func (d *Doc) OpsSince(vv VersionVector) []Op {
 	var ops []Op
 	for b := d.head.next; b != nil; b = b.next {
 		cursor := delCursor{b: b}
@@ -985,7 +968,7 @@ func (d *Doc) OpsSince(vv VersionVector) ([]Op, error) {
 	for _, delID := range dups {
 		ops = append(ops, deleteOp(delID, d.dupDeletes[delID]))
 	}
-	return ops, nil
+	return ops
 }
 
 // deleteOp rebuilds a deletion from the two IDs a document retains.
@@ -993,32 +976,11 @@ func deleteOp(delID, target ID) Op {
 	return Op{Kind: OpDelete, ID: delID, Clock: delID.Seq, Target: target}
 }
 
-// ErrStranded reports an operation that can never be applied, because the
-// character it names was dropped by [Doc.Collect].
+// ErrStranded reports an operation that can never be applied, because what it
+// names was dropped by a collection.
 //
 // Parking it instead would be the silent version of the same failure: the
 // operation would wait for something that is never coming, and the work it
-// carries would be lost with nothing said. It means collection was given a
-// version some replica had not reached — the one precondition [Doc.Collect]
-// asks for — and the replica this operation came from is the one that was left
-// behind.
+// carries would be lost with nothing said. Only [Map.Collect] can produce it;
+// see the note there.
 var ErrStranded = errors.New("crdt: operation names a collected character")
-
-// strandedBy reports whether an operation is waiting for a character this
-// replica has seen and no longer holds, which is what collection leaves behind.
-// A document that has never collected has an empty floor, so this is false for
-// every operation and nothing about waiting changes.
-func (d *Doc) strandedBy(op Op) bool {
-	if len(d.floor) == 0 {
-		return false
-	}
-	named := op.Origin
-	if op.Kind != OpInsert {
-		named = op.Target
-	}
-	if named.IsRoot() || !d.floor.Includes(named) {
-		return false
-	}
-	_, _, held := d.lookupChar(named)
-	return !held
-}

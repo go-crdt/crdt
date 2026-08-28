@@ -66,8 +66,8 @@ func mustMark(t *testing.T, r *RichText, from, to int, name string, value []byte
 
 func syncRich(t *testing.T, a, b *RichText) {
 	t.Helper()
-	fromA := must(a.OpsSince(b.Version()))
-	fromB := must(b.OpsSince(a.Version()))
+	fromA := a.OpsSince(b.Version())
+	fromB := b.OpsSince(a.Version())
 	if err := b.Apply(fromA...); err != nil {
 		t.Fatal(err)
 	}

@@ -78,18 +78,10 @@ func TestSnapshotBudget(t *testing.T) {
 	for _, site := range sites {
 		header += uvarint(uint64(site)) + uvarint(d.vv[site])
 	}
-	// Version 6: the collection floor and the per-site tallies of what
-	// collection took away. This document has never been collected, so both are
-	// an empty table, one byte each — and one byte unaccounted for here is the
-	// whole of what this test exists to catch.
-	header += uvarint(uint64(len(d.floor)))
-	for site, seq := range d.floor {
-		header += uvarint(uint64(site)) + uvarint(seq)
-	}
-	header += uvarint(uint64(len(d.collected)))
-	for site, n := range d.collected {
-		header += uvarint(uint64(site)) + uvarint(n)
-	}
+	// Version 6 carries two tables here, both of them always empty: they were
+	// written for a collection that was withdrawn. One byte each, and one byte
+	// unaccounted for here is the whole of what this test exists to catch.
+	header += uvarint(0) + uvarint(0)
 
 	runs := d.runs()
 	runCount += uvarint(uint64(len(runs)))

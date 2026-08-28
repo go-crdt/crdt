@@ -39,7 +39,7 @@ func sessionOps(t *testing.T) []PartOps {
 			t.Fatal(err)
 		}
 	}
-	return must(peer.OpsSince(nil))
+	return peer.OpsSince(nil)
 }
 
 func TestApplyChangesReportsWhatEachKindNeeds(t *testing.T) {

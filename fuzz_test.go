@@ -125,7 +125,7 @@ func FuzzLoad(f *testing.F) {
 		}
 		// The history has to survive a round trip through the wire format too.
 		replayed := New(2)
-		if err := replayed.Apply(must(d.OpsSince(nil))...); err != nil {
+		if err := replayed.Apply(d.OpsSince(nil)...); err != nil {
 			t.Fatalf("replaying a loaded document's history was rejected: %v", err)
 		}
 		if got := replayed.String(); got != text {
@@ -166,7 +166,7 @@ func FuzzVersionVector(f *testing.F) {
 		if _, err := d.Insert(0, "text"); err != nil {
 			t.Fatal(err)
 		}
-		_ = must(d.OpsSince(v))
+		_ = d.OpsSince(v)
 	})
 }
 
@@ -242,7 +242,7 @@ func listCorpus(t *testing.T) (ops []byte, snapshot []byte) {
 	edits = append(edits, drop(t, a, 1, 1)...)
 	edits = append(edits, put(t, b, 0, "zero")...)
 	send(t, a, edits[len(edits)-1:])
-	encoded, err := AppendListOps(nil, must(a.OpsSince(nil)))
+	encoded, err := AppendListOps(nil, a.OpsSince(nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -318,19 +318,13 @@ func FuzzLoadList(f *testing.F) {
 		if !bytes.Equal(again.Snapshot(), loaded.Snapshot()) {
 			t.Fatal("re-encoding a loaded snapshot is not a fixed point")
 		}
-		// And the history has to replay into a fresh replica — for a replica
-		// that has collected nothing, which is what CanReplay is asking. One
-		// that has collected cannot: the operations it dropped are gone, so
-		// what OpsSince hands back has holes and a fresh replica would park
-		// everything after the first one. Such a peer is sent a snapshot.
-		if loaded.CanReplay(nil) {
-			replayed := NewList(2)
-			if err := replayed.Apply(must(loaded.OpsSince(nil))...); err != nil {
-				t.Fatalf("replaying a loaded list's history was rejected: %v", err)
-			}
-			if !bytes.Equal(replayed.Snapshot(), loaded.Snapshot()) {
-				t.Fatal("replaying the history did not reproduce the state")
-			}
+		// And the history has to replay into a fresh replica.
+		replayed := NewList(2)
+		if err := replayed.Apply(loaded.OpsSince(nil)...); err != nil {
+			t.Fatalf("replaying a loaded list's history was rejected: %v", err)
+		}
+		if !bytes.Equal(replayed.Snapshot(), loaded.Snapshot()) {
+			t.Fatal("replaying the history did not reproduce the state")
 		}
 	})
 }

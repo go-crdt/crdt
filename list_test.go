@@ -112,7 +112,7 @@ func TestListCopiesWhatItIsGiven(t *testing.T) {
 	assertList(t, l, "mine")
 
 	peer := NewList(2)
-	send(t, peer, must(l.OpsSince(nil)))
+	send(t, peer, l.OpsSince(nil))
 	assertList(t, peer, "mine")
 }
 
@@ -467,7 +467,7 @@ func TestListConcurrentRemovalOfOneValue(t *testing.T) {
 	}
 
 	c := NewList(3)
-	send(t, c, must(a.OpsSince(nil)))
+	send(t, c, a.OpsSince(nil))
 	assertList(t, c, "keep", "keep too")
 	if !c.Version().Equal(a.Version()) {
 		t.Fatalf("the third replica's version is %v, want %v: a removal was not replayed",
@@ -638,7 +638,7 @@ func TestListConvergence(t *testing.T) {
 
 		// The history replays into a fresh replica, and a snapshot round-trips.
 		fresh := NewList(99)
-		send(t, fresh, must(s.lists[0].OpsSince(nil)))
+		send(t, fresh, s.lists[0].OpsSince(nil))
 		if !bytes.Equal(fresh.Snapshot(), want) {
 			t.Fatalf("seed %d: replaying the history did not reproduce the state", seed)
 		}
