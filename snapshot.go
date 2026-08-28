@@ -27,7 +27,8 @@ var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 // record per character. All four are readable; version 1's note
 // still read, so a document stored by an older build still opens.
 const (
-	snapshotVersion   = 6
+	snapshotVersion   = 7
+	snapshotVersionV6 = 6
 	snapshotVersionV5 = 5
 	snapshotVersionV4 = 4
 	snapshotVersionV3 = 3
@@ -94,6 +95,7 @@ func (d *Doc) Snapshot() []byte {
 		text      []byte // the characters themselves, every run's after the last
 		delCounts []byte // how many deleted stretches each run has
 		delFields []byte // those stretches: gap, span, site, sequence step
+		purged    []byte // whether each run's characters were discarded
 	)
 	lastDelSeq := map[SiteID]uint64{}
 	lastRunSeq := map[SiteID]uint64{}
@@ -106,7 +108,8 @@ func (d *Doc) Snapshot() []byte {
 		oSites = binary.AppendUvarint(oSites, uint64(r.origin.Site))
 		oSeqs = binary.AppendUvarint(oSeqs, zigzag(int64(r.origin.Seq)-int64(lastOriginSeq[r.origin.Site])))
 		lastOriginSeq[r.origin.Site] = r.origin.Seq
-		lengths = binary.AppendUvarint(lengths, uint64(len(r.text)))
+		lengths = binary.AppendUvarint(lengths, r.size())
+		purged = binary.AppendUvarint(purged, boolByte(r.gone))
 		for _, ch := range r.text {
 			text = binary.AppendUvarint(text, uint64(ch))
 		}
@@ -126,7 +129,7 @@ func (d *Doc) Snapshot() []byte {
 	// knowing what is in them — which is also what lets whoever stores this
 	// compress them one at a time, which measured better than compressing the
 	// whole thing at once.
-	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields} {
+	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields, purged} {
 		out = binary.AppendUvarint(out, uint64(len(col)))
 		out = append(out, col...)
 	}
@@ -169,6 +172,12 @@ type run struct {
 	origin ID
 	text   []rune
 	dels   []delRange
+	// gone is a run whose characters were discarded by [Doc.Purge]. Its length
+	// is the one the deletions describe, and the text column holds nothing for
+	// it — which is the whole saving, and which a reader has to be told rather
+	// than left to infer, because a run that is merely deleted looks the same
+	// from every other column.
+	gone bool
 }
 
 // appendDel adds a deletion record, joining it to the one before when they touch
@@ -197,7 +206,7 @@ func appendDel(dels []delRange, r delRange) []delRange {
 func (d *Doc) runs() []run {
 	var out []run
 	for b := d.head.next; b != nil; b = b.next {
-		fresh := run{id: b.id, clock: b.clock, origin: b.originID, text: b.text}
+		fresh := run{id: b.id, clock: b.clock, origin: b.originID, text: b.text, gone: b.gone}
 		for _, del := range b.dels {
 			fresh.dels = appendDel(fresh.dels, del)
 		}
@@ -216,7 +225,8 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
+	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV6 &&
+		v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
 		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
 		return nil, ErrMalformed
 	}
@@ -244,7 +254,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		d.vv[SiteID(s)] = seq
 	}
 
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV6 {
 		if err := readCollected(r); err != nil {
 			return nil, err
 		}
@@ -280,7 +290,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	cols := sameStream(r)
 	if version >= snapshotVersionV5 {
 		var err error
-		if cols, err = readColumns(r); err != nil {
+		if cols, err = readColumns(r, version); err != nil {
 			return nil, err
 		}
 	}
@@ -357,6 +367,14 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 	clock, ok2 := c.clocks.uvarint()
 	origin, ok3 := steppedID(c.oSites, c.oSeqs, version, lastOriginSeq)
 	length, ok4 := c.lengths.uvarint()
+	gone := false
+	if c.purged != nil {
+		flag, ok := c.purged.uvarint()
+		if !ok || flag > 1 {
+			return ErrMalformed
+		}
+		gone = flag == 1
+	}
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return ErrMalformed
 	}
@@ -382,12 +400,35 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 	}
 	// A run of no characters says nothing and would let a snapshot claim any
 	// number of them; each character costs at least a byte still to be read.
-	if length == 0 || length > uint64(len(c.text.buf)) || clock > MaxClock ||
+	//
+	// A purged run costs nothing in the text column, so what holds its length
+	// is the version vector instead: every character is an operation the vector
+	// promises, so the run cannot reach past what its site has issued. That is
+	// a tighter bound than the bytes were, and it is what stops a crafted
+	// length from being allocated.
+	bound := uint64(len(c.text.buf))
+	if gone {
+		if promised := l.vv[id.Site]; promised >= id.Seq {
+			bound = promised - id.Seq + 1
+		} else {
+			bound = 0
+		}
+	}
+	if length == 0 || length > bound || clock > MaxClock ||
 		clock < id.Seq || !origin.wellFormed() || !id.wellFormed() {
 		return ErrMalformed
 	}
+	// A purged run is adopted with characters that are never read: it is
+	// entirely deleted, which is checked below, so nothing can see them, and
+	// they are dropped again once the run is in. Going through the ordinary
+	// path rather than around it is what keeps a purged run placed exactly
+	// where an unpurged one would be.
 	text := make([]rune, length)
 	for i := range text {
+		if gone {
+			text[i] = ' '
+			continue
+		}
 		ch, ok := c.text.uvarint()
 		if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
 			return ErrMalformed
@@ -440,6 +481,26 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 		if err := d.adopt(c, l); err != nil {
 			return err
 		}
+	}
+
+	if gone {
+		// A purged run must be entirely deleted, or a character with nothing in
+		// it would be visible. Nothing sound could have written one that is
+		// not, so this is refused rather than repaired.
+		covered := uint64(0)
+		for _, del := range dels {
+			covered += uint64(del.to - del.from)
+		}
+		if covered != length {
+			return ErrMalformed
+		}
+		b, _, known := d.lookupChar(ID{Site: id.Site, Seq: id.Seq + length - 1})
+		if !known || b.id != id || uint64(len(b.text)) != length {
+			return ErrMalformed
+		}
+		b.gone = true
+		b.text = nil
+		b.nsup = 0
 	}
 	return nil
 }
@@ -682,6 +743,10 @@ type columns struct {
 	sites, seqs, clocks     *reader
 	oSites, oSeqs, lengths  *reader
 	text, delCounts, delFld *reader
+	// purged is version 7's addition: whether each run's characters were
+	// discarded. It is nil for every earlier version, where no run could have
+	// been, and readRun asks only when it is there.
+	purged *reader
 }
 
 // sameStream is how every version before 5 is read: the fields go past in the
@@ -694,10 +759,14 @@ func sameStream(r *reader) *columns {
 // readColumns takes apart the nine length-prefixed streams a version 5 snapshot
 // writes. A length past the end of what is left is refused here rather than
 // discovered field by field later.
-func readColumns(r *reader) (*columns, error) {
+func readColumns(r *reader, version byte) (*columns, error) {
 	c := &columns{}
-	for _, into := range []**reader{&c.sites, &c.seqs, &c.clocks, &c.oSites,
-		&c.oSeqs, &c.lengths, &c.text, &c.delCounts, &c.delFld} {
+	into := []**reader{&c.sites, &c.seqs, &c.clocks, &c.oSites,
+		&c.oSeqs, &c.lengths, &c.text, &c.delCounts, &c.delFld}
+	if version >= snapshotVersion {
+		into = append(into, &c.purged)
+	}
+	for _, into := range into {
 		n, ok := r.uvarint()
 		if !ok || n > uint64(len(r.buf)) {
 			return nil, ErrMalformed
@@ -713,8 +782,12 @@ func readColumns(r *reader) (*columns, error) {
 
 // empty reports whether every column was consumed to its end.
 func (c *columns) empty() bool {
-	for _, r := range []*reader{c.sites, c.seqs, c.clocks, c.oSites, c.oSeqs,
-		c.lengths, c.text, c.delCounts, c.delFld} {
+	all := []*reader{c.sites, c.seqs, c.clocks, c.oSites, c.oSeqs,
+		c.lengths, c.text, c.delCounts, c.delFld}
+	if c.purged != nil {
+		all = append(all, c.purged)
+	}
+	for _, r := range all {
 		if len(r.buf) != 0 {
 			return false
 		}
@@ -745,4 +818,23 @@ func readCollected(r *reader) error {
 		}
 	}
 	return nil
+}
+
+// size is how many characters this run holds, whether or not it still has them.
+func (r run) size() uint64 {
+	if r.gone {
+		if n := len(r.dels); n > 0 {
+			return uint64(r.dels[n-1].to)
+		}
+		return 0
+	}
+	return uint64(len(r.text))
+}
+
+// boolByte is the one byte a flag column spends.
+func boolByte(b bool) uint64 {
+	if b {
+		return 1
+	}
+	return 0
 }
