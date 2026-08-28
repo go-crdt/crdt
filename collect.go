@@ -52,10 +52,21 @@ package crdt
 func (d *Doc) Collect(stable VersionVector) int {
 	d.flush()
 
-	// Candidates first, on the two conditions that look only at the run itself.
+	// The duplicate deletions are filed by the deletion, and the question below
+	// needs them the other way round: is everything that removed this character
+	// stable? Two replicas removing the same character concurrently leave one
+	// of these, it is recorded against the character, and it goes with it — so
+	// it has to be stable as well, or a replica could still be about to send
+	// one and would find nothing to record it against.
+	dupsOf := map[ID][]ID{}
+	for delID, target := range d.dupDeletes {
+		dupsOf[target] = append(dupsOf[target], delID)
+	}
+
+	// Candidates first, on the conditions that look only at the run itself.
 	candidate := map[*block]bool{}
 	for b := d.head.next; b != nil; b = b.next {
-		if collectible(b, stable) {
+		if collectible(b, stable) && dupsStable(b, dupsOf, stable) {
 			candidate[b] = true
 		}
 	}
@@ -63,7 +74,7 @@ func (d *Doc) Collect(stable VersionVector) int {
 		return 0
 	}
 
-	dropped := d.dropRuns(candidate)
+	dropped := d.dropRuns(candidate, dupsOf)
 	d.floor = d.floor.join(stable)
 	return dropped
 }
@@ -73,6 +84,26 @@ func (d *Doc) Collect(stable VersionVector) int {
 // for a document that has never collected, which is every document until
 // somebody asks.
 func (d *Doc) Floor() VersionVector { return d.floor.Clone() }
+
+// dupsStable reports whether every duplicate deletion recorded against a
+// character of b is one stable has.
+//
+// Collecting while one is not would leave the replica that made it with nothing
+// to record it against: the loader refuses a duplicate whose target is absent,
+// which is what a snapshot of such a document would be.
+func dupsStable(b *block, dupsOf map[ID][]ID, stable VersionVector) bool {
+	if len(dupsOf) == 0 {
+		return true
+	}
+	for i := range b.text {
+		for _, delID := range dupsOf[b.idAt(i)] {
+			if !stable.Includes(delID) {
+				return false
+			}
+		}
+	}
+	return true
+}
 
 // collectible reports whether every character of b is deleted and every one of
 // those deletions is one stable has.
@@ -96,7 +127,7 @@ func collectible(b *block, stable VersionVector) bool {
 // carry subMin, subVis and subSup correctly through a rebalance is the kind of
 // code whose mistakes are silent. Rebuilding uses the one path every document
 // is already built by.
-func (d *Doc) dropRuns(drop map[*block]bool) int {
+func (d *Doc) dropRuns(drop map[*block]bool, dupsOf map[ID][]ID) int {
 	// One walk in document order does both halves of the work: it separates the
 	// runs that stay from the ones that go, and it records, for every character
 	// about to go, the last character before it that is staying. That is what a
@@ -114,8 +145,16 @@ func (d *Doc) dropRuns(drop map[*block]bool) int {
 				}
 			}
 			for i := range b.text {
-				instead[b.idAt(i)] = lastKept
-				d.collectedOne(b.idAt(i).Site)
+				id := b.idAt(i)
+				instead[id] = lastKept
+				d.collectedOne(id.Site)
+				// A duplicate deletion is recorded against the character it
+				// removed. The character is going, so it goes too — and it is
+				// one more operation the snapshot will not be writing down.
+				for _, delID := range dupsOf[id] {
+					d.collectedOne(delID.Site)
+					delete(d.dupDeletes, delID)
+				}
 			}
 			continue
 		}

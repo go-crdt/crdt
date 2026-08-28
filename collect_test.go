@@ -617,3 +617,80 @@ func TestListAndCompositeOpsSinceRefuseBelowTheFloor(t *testing.T) {
 		t.Fatalf("Composite.OpsSince at the current version = %v, want an answer", err)
 	}
 }
+
+// Collecting a character two replicas removed at once takes their duplicate
+// deletion with it, and refuses to go while that deletion is one somebody might
+// not have.
+//
+// A duplicate is recorded against the character it removed, and the loader
+// refuses one whose target is absent — so collecting the character without it
+// makes a snapshot that cannot be read back. That is what a chaos harness found
+// after this shipped: a participant joining a document that had been collected
+// under concurrent deletions was handed bytes it could not load.
+func TestCollectingACharacterTwoReplicasRemovedAtOnce(t *testing.T) {
+	a, b := New(1), New(2)
+	mine, err := a.Insert(0, "doomed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Apply(mine...); err != nil {
+		t.Fatal(err)
+	}
+	// A second run, so the first can die whole.
+	theirs, err := b.Insert(b.Len(), "kept")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(theirs...); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both remove the same run without hearing the other first.
+	hers, err := a.Delete(0, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	his, err := b.Delete(0, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Apply(his...); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Apply(hers...); err != nil {
+		t.Fatal(err)
+	}
+	if a.String() != "kept" {
+		t.Fatalf("the document reads %q, want %q", a.String(), "kept")
+	}
+
+	// A version that has one removal but not the other: the run must stay,
+	// because the replica that made the other one has nowhere to put it.
+	partial := VersionVector{}
+	for site, seq := range a.Version() {
+		if site == 2 {
+			continue
+		}
+		partial[site] = seq
+	}
+	if n := a.Collect(partial); n != 0 {
+		t.Fatalf("collected %d characters while a removal of them was not stable", n)
+	}
+
+	// With both, it goes — and what is left can be read back, which is the
+	// whole point.
+	n := a.Collect(a.Version())
+	if n != 6 {
+		t.Fatalf("collected %d characters, want 6", n)
+	}
+	back, err := Load(3, a.Snapshot())
+	if err != nil {
+		t.Fatalf("a document collected under a duplicate deletion did not reload: %v", err)
+	}
+	if back.String() != "kept" {
+		t.Fatalf("the reloaded document reads %q, want %q", back.String(), "kept")
+	}
+	if back.Tombstones() != 0 {
+		t.Fatalf("%d tombstones survived", back.Tombstones())
+	}
+}
