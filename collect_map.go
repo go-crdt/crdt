@@ -39,6 +39,19 @@ package crdt
 // such operation can arrive at all, so the guard never fires; when it does, it
 // is naming the mistake.
 //
+// The guard catches half of that misuse. The other half arrives from the
+// opposite direction and nothing here can see it: the replica that has not
+// delivered the deletion is also the one that will ask for it. [Map.OpsSince]
+// answers for a collected stretch with [MapSuperseded], because under correct
+// use those sequence numbers are accounted for — so that replica's version
+// vector advances over the deletion without it ever learning what the operation
+// did, and it goes on holding a value every other replica removed. Its version
+// vector then equals theirs, which is what makes it permanent: there is nothing
+// left for a catch-up to send. Found this way in a server that collected against
+// the participants it had a connection to rather than every participant it had
+// ever had: two participants, one deletion, and the one that was away came back
+// still holding the key, with a version equal to the server's.
+//
 // Collect reports how many tombstones it dropped.
 func (m *Map) Collect(stable VersionVector) int {
 	dropped := 0
