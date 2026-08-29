@@ -154,6 +154,29 @@ func (r *MultiRegister) readings() []entry {
 			// Only the canonical spelling is a key this type writes.
 			continue
 		}
+		if _, wrote, live := r.m.Stamp(key); !live || wrote != crdt.SiteID(site) {
+			// The key claims whose reading this is; the stamp says who actually
+			// wrote it. They have to agree.
+			//
+			// The map underneath resolves two writes to one key by taking the
+			// later, so a peer writing to the key that names somebody else's
+			// site does not sit beside that replica's reading — it replaces it.
+			// Nothing in the reading it replaced was superseded: the vectors
+			// are not compared, the key simply changed hands. That is the one
+			// thing a register of this kind must not permit, and a two-byte
+			// value found by FuzzHostileReadings did it: an empty vector and an
+			// empty value, written to key "1", took site 1's own writing away.
+			//
+			// A reading is only ever written by the replica it names — see
+			// [MultiRegister.write], which spells the key from its own site and
+			// has no other spelling to offer — so this refuses nothing any
+			// replica of this type wrote. The one way to make an honest entry
+			// fail it is to re-author the map with [crdt.Map.Rewritten], which
+			// gives every record one new writer while the keys go on naming the
+			// old ones; that operation has no meaning for this type and it is
+			// not offered here.
+			continue
+		}
 		raw, _ := r.m.Get(key)
 		vector, value, cleared, ok := decodeReading(raw)
 		if !ok {
@@ -176,6 +199,21 @@ func (r *MultiRegister) readings() []entry {
 // One reading is the ordinary case. More than one is a disagreement: two or
 // more replicas wrote without seeing each other, and there is no fact anywhere
 // that says which of them is the answer. Nothing here invents one.
+//
+// # What a hand-made operation can do
+//
+// A reading lives at the map key that spells its site, and the map resolves two
+// writes to one key by taking the later. A participant that sends operations of
+// its own making can therefore write to the key naming another replica and take
+// that replica's reading with it. Nothing here can undo that: the value is gone
+// from the map before any rule in this file reads it.
+//
+// What is refused is the second half of it. An entry whose writer is not the
+// site its key names is not a reading of that site and is skipped, so a forgery
+// cannot be reported as its victim's own writing. Refusing the write itself is
+// a question about who may speak for whom, which this package cannot answer —
+// see collab's AuthorizeOperations, which is given the sending site and every
+// batch it sends.
 func (r *MultiRegister) Readings() []Reading {
 	all := r.readings()
 	out := make([]Reading, 0, len(all))

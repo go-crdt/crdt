@@ -1,0 +1,5 @@
+go test fuzz v1
+string("1.1")
+string("\x00depth")
+[]byte("\xff\xff\xff\xff\xff\xff\xff\xff\x02\x00")
+string("abc")
