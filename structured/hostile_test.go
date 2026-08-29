@@ -1,7 +1,11 @@
 package structured
 
 import (
+	"encoding/binary"
+	"errors"
+	"strconv"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/go-crdt/crdt"
@@ -90,23 +94,51 @@ func FuzzHostileReadings(f *testing.F) {
 		if _, err := r.Set([]byte("mine")); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := r.m.Set(key, value); err != nil {
+		// A peer, and a real one: the operation is authored by site 2 and
+		// applied here. Writing through r.m instead would have been this
+		// replica writing to its own map, which is allowed to supersede its own
+		// value and says nothing about what a peer can do.
+		peer := NewMultiRegister(2)
+		op, err := peer.Map().Set(key, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Apply(op); err != nil {
 			t.Fatal(err)
 		}
 		readings := r.Readings()
 		_ = r.Values()
 		_, _ = r.Value()
 		_ = r.Conflicted()
+		// No reading is ever attributed to a replica that did not write it. That
+		// is the guarantee this type can keep against hand-made bytes, and it
+		// is kept by checking the key against the stamp the map holds — see
+		// [MultiRegister.readings].
+		for _, reading := range readings {
+			if reading.Site != 1 && reading.Site != 2 {
+				t.Fatalf("a reading attributed to site %d, which wrote nothing: %v", reading.Site, readings)
+			}
+		}
+
 		// This replica's own writing is well formed and was written knowing
 		// nothing else, so nothing a peer can write makes it disappear without
-		// dominating it — and a malformed entry is not decodable, so it cannot.
+		// dominating it — with one exception, which is not a merge rule but the
+		// absence of one. A reading lives at the key that spells its site, the
+		// map underneath resolves two writes to one key by taking the later,
+		// and a peer is free to name that key. Then site 1's value is gone from
+		// the map before anything here reads it, and no rule applied afterwards
+		// brings it back: what this type can still refuse is to call the
+		// forgery site 1's, which is the check above. Refusing the write itself
+		// is a question about who may speak for whom, and it is answered a
+		// layer up, by collab's AuthorizeOperations.
+		forged := key == strconv.FormatUint(1, 10)
 		mine := false
 		for _, reading := range readings {
 			if reading.Site == 1 && string(reading.Value) == "mine" {
 				mine = true
 			}
 		}
-		if !mine && !dominatedByAnyDecodable(r) {
+		if !mine && !forged && !dominatedByAnyDecodable(r) {
 			t.Fatalf("a peer's bytes took this replica's own value away: %v", readings)
 		}
 	})
@@ -530,5 +562,110 @@ func TestATypeReadsBesideAPartItDoesNotKnow(t *testing.T) {
 	}
 	if txt, _ := b.Text(id); txt != "hello" {
 		t.Fatalf("the block reads %q", txt)
+	}
+}
+
+// A depth is a number a peer chooses, and [Blocks.Outline] used to build a
+// stack one entry deep per level of it. Ten bytes on the wire — the depth field
+// of one block, set to 1<<62 — therefore asked every replica that read the
+// document for an allocation it could not make, and Outline ran without ever
+// returning. Found by FuzzHostileBlocks, whose failing input is in testdata.
+//
+// The block still has to be there afterwards. Refusing it would be a second way
+// for one peer to remove another's work, which is the thing being defended
+// against here.
+func TestHostileDepthIsBounded(t *testing.T) {
+	b := NewBlocks(1)
+	first, _, err := b.Insert(DocStart, "paragraph")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Straight into the field, as an operation arriving from a peer does: the
+	// setter refuses this, and the wire cannot be made to.
+	if _, err := b.recs.SetField(first.key(), blockDepthField, binary.AppendUvarint(nil, 1<<62)); err != nil {
+		t.Fatal(err)
+	}
+
+	blocks := b.List()
+	if len(blocks) != 1 {
+		t.Fatalf("the block was dropped: %d left", len(blocks))
+	}
+	if got := blocks[0].Depth; got != maxBlockDepth {
+		t.Fatalf("depth read back as %d, want it clamped to %d", got, maxBlockDepth)
+	}
+
+	// The assertion is that this returns at all. A test that hangs reports
+	// nothing, so it is given a clock of its own and the failure is named.
+	done := make(chan []Outlined, 1)
+	go func() { done <- b.Outline() }()
+	select {
+	case out := <-done:
+		if len(out) != 1 {
+			t.Fatalf("Outline returned %d entries for one block", len(out))
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Outline did not return for a depth a peer can write")
+	}
+}
+
+// And the setter refuses what the reader has to clamp, so nothing in this
+// package can put such a depth on the wire in the first place.
+func TestSetDepthRefusesAbsurdDepth(t *testing.T) {
+	b := NewBlocks(1)
+	first, _, err := b.Insert(DocStart, "paragraph")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.SetDepth(first, maxBlockDepth+1); !errors.Is(err, crdt.ErrOutOfRange) {
+		t.Fatalf("SetDepth(%d) = %v, want ErrOutOfRange", maxBlockDepth+1, err)
+	}
+	if _, err := b.SetDepth(first, maxBlockDepth); err != nil {
+		t.Fatalf("SetDepth(%d) = %v, want it accepted", maxBlockDepth, err)
+	}
+}
+
+// A peer that writes to the key naming somebody else's site takes that site's
+// reading with it — the map resolves one key by taking the later write, and no
+// rule applied afterwards brings back what it replaced. What must not happen as
+// well is for the forgery to be reported as the victim's own writing, which
+// would make Readings say site 1 wrote something site 1 never wrote.
+//
+// Before the key was checked against the stamp the map holds, that is exactly
+// what it said.
+func TestForgedReadingIsNotAttributedToItsVictim(t *testing.T) {
+	mine := NewMultiRegister(1)
+	if _, err := mine.Set([]byte("mine")); err != nil {
+		t.Fatal(err)
+	}
+	peer := NewMultiRegister(2)
+	op, err := peer.Map().Set("1", []byte{0x00, 0x01})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mine.Apply(op); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range mine.Readings() {
+		if r.Site == 1 {
+			t.Fatalf("a value site 2 wrote is reported as site 1's: %v", mine.Readings())
+		}
+	}
+	// And the same bytes under the writer's own key are an ordinary reading,
+	// so the check refuses nothing honest.
+	own, err := peer.Map().Set("2", []byte{0x00, 0x01})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mine.Apply(own); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, r := range mine.Readings() {
+		if r.Site == 2 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("site 2's own reading was refused: %v", mine.Readings())
 	}
 }
