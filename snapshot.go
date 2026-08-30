@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"encoding/binary"
+	"slices"
 	"unicode/utf8"
 )
 
@@ -665,15 +666,45 @@ func (r *reader) character() (character, bool) {
 }
 
 // sortIDs orders IDs in place by site then sequence, keeping every derived
-// encoding deterministic. The lists are short — insertion sort avoids pulling in
-// a comparison closure for a handful of elements.
+// encoding deterministic.
+//
+// The lists are usually short, and for a handful of elements insertion sort
+// beats anything that has to be called through a closure. They are not always
+// short: every one of these holds the duplicate deletions a document is
+// carrying, and two replicas deleting the same character make one apiece. A
+// document being undone and redone makes a great many — measured, thirty-four
+// thousand of them in a room of twenty — and insertion sort is quadratic, so
+// [Doc.Snapshot] spent eighty-one per cent of a run in here and one type of
+// document became a hundred times slower than every other.
+//
+// So the short case keeps its insertion sort and the long one gets a real
+// sort. The order is the same either way, which is what the encodings depend
+// on.
 func sortIDs(ids []ID) {
+	if len(ids) > sortIDsInsertionMax {
+		slices.SortFunc(ids, func(a, b ID) int {
+			switch {
+			case idLess(a, b):
+				return -1
+			case idLess(b, a):
+				return 1
+			default:
+				return 0
+			}
+		})
+		return
+	}
 	for i := 1; i < len(ids); i++ {
 		for j := i; j > 0 && idLess(ids[j], ids[j-1]); j-- {
 			ids[j], ids[j-1] = ids[j-1], ids[j]
 		}
 	}
 }
+
+// sortIDsInsertionMax is where insertion sort stops being the cheaper of the
+// two. It is not a fine measurement: the point is that the quadratic branch
+// cannot be reached with a list long enough for quadratic to matter.
+const sortIDsInsertionMax = 32
 
 // columns is where each field of a run is read from. Version 5 gives every one
 // its own stream; earlier versions interleave them, which is this with all nine
