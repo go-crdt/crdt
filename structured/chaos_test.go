@@ -129,6 +129,11 @@ func TestChaosStructured(t *testing.T) {
 	// stream of their own, so switching one off moves no other draw.
 	churn := chaosSize0("CRDT_STRUCTURED_CHAOS_CHURN", 6)
 	join := chaosSize0("CRDT_STRUCTURED_CHAOS_JOIN", 10)
+	// One round in this many gives back the tombstones every replica has
+	// certainly seen. Zero is never, and never is the default: turning it on is
+	// what found that collecting a map is not sound, and it stays off until
+	// that is settled. See collect_soundness_test.go in the root package.
+	collect := chaosSize0("CRDT_STRUCTURED_CHAOS_COLLECT", 0)
 
 	for _, dt := range docTypes() {
 		t.Run(dt.name, func(t *testing.T) {
@@ -137,14 +142,14 @@ func TestChaosStructured(t *testing.T) {
 			// how the others fared, which is what a rate is read from.
 			for seed := range uint64(seeds) {
 				t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
-					chaosSession(t, dt, seed, replicas, rounds, churn, join)
+					chaosSession(t, dt, seed, replicas, rounds, churn, join, collect)
 				})
 			}
 		})
 	}
 }
 
-func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn, join int) {
+func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn, join, collect int) {
 	t.Helper()
 	rng := rand.New(rand.NewPCG(seed, 0xc4a05))
 	// Disorder draws from its own stream, so switching a source off leaves every
@@ -157,6 +162,7 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 	}
 	nw := newChaosNet(replicas)
 	site := crdt.SiteID(replicas + 1)
+	collections, collected := 0, 0
 
 	for round := range rounds {
 		// Cut a few replicas off, and readmit some of those already cut.
@@ -198,6 +204,32 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 			}
 		}
 
+		// Give back what every replica has certainly seen.
+		//
+		// The version is the meet over all of them, which is what
+		// [crdt.Map.Collect] asks for and what a replica on its own cannot
+		// know: this harness can, because it holds every replica. Every one of
+		// them is then collected with that same version, because the clock a
+		// map collected under is in its snapshot and in no operation — two
+		// replicas that collected differently hold different bytes and would
+		// fail the comparison at the end for a reason that is not a merge
+		// fault. A partitioned replica is collected too: it is a local
+		// operation on a version it has already delivered.
+		if collect > 0 && round > 0 && round%collect == 0 {
+			floor := docs[0].Version()
+			for _, d := range docs[1:] {
+				floor = meetOf(floor, d.Version())
+			}
+			for i, d := range docs {
+				held, ok := d.(holdsComposite)
+				if !ok {
+					t.Fatalf("%s: replica %d cannot be collected; give it a composite() method", dt.name, i)
+				}
+				collected += held.composite().Collect(floor)
+			}
+			collections++
+		}
+
 		// A participant joins late, seeded from a live peer.
 		joinRoll, joinFrom := dis.IntN(4) == 0, dis.IntN(len(docs))
 		if join > 0 && round > 0 && round < rounds-5 && joinRoll && len(docs) < 4*replicas {
@@ -222,7 +254,14 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 			t.Fatalf("%s seed %d: replica %d has a different version", dt.name, seed, i)
 		}
 	}
+	// Asking for collection and never getting any is not a pass: it is a run
+	// that tested nothing about it and said nothing either. The root package's
+	// chaos makes the same demand for the same reason.
+	if collect > 0 && collections == 0 {
+		t.Fatalf("%s seed %d: collection was asked for and never happened, so nothing about it was tested", dt.name, seed)
+	}
 	if testing.Verbose() {
-		fmt.Printf("%-12s seed %d: %d replicas converged on %d bytes\n", dt.name, seed, len(docs), len(want))
+		fmt.Printf("%-12s seed %d: %d replicas converged on %d bytes, collected %d times giving back %d records\n",
+			dt.name, seed, len(docs), len(want), collections, collected)
 	}
 }
