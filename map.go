@@ -937,6 +937,19 @@ func LoadMap(site SiteID, snapshot []byte) (*Map, error) {
 			m.clock = seq
 		}
 	}
+
+	// And what each site had reached, as far as this snapshot can say. It keeps
+	// the winning write per key and nothing about the ones that lost, so the
+	// answer is at or below the truth — which is the direction that refuses to
+	// collect rather than the one that collects too much. See [Map.LastClocks].
+	for _, rec := range m.records {
+		if m.lastClock == nil {
+			m.lastClock = map[SiteID]uint64{}
+		}
+		if rec.clock > m.lastClock[rec.id.Site] {
+			m.lastClock[rec.id.Site] = rec.clock
+		}
+	}
 	return m, nil
 }
 

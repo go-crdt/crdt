@@ -179,3 +179,47 @@ func TestACompositeReportsWhatAMapPartRefused(t *testing.T) {
 		t.Fatalf("Composite.ApplyChanges = %v, want the map part's %v passed on", err, ErrStranded)
 	}
 }
+
+// A map loaded from a snapshot can still say what each site had reached, or a
+// document that has been saved and reopened could never be collected again.
+//
+// The snapshot keeps the winning write per key and nothing of the ones that
+// lost, so what comes back is at or below the truth. That is the safe
+// direction: a floor built from it refuses more than it needs to and never
+// promises more than it can.
+func TestALoadedMapRemembersWhatEachSiteHadReached(t *testing.T) {
+	a, b := NewMap(1), NewMap(2)
+	first, err := a.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := a.Set("j", []byte("w"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Both, or the second parks on the first and nothing is integrated at all.
+	if err := b.Apply(first, second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Set("m", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+
+	before := b.LastClocks()
+	if len(before) != 2 {
+		t.Fatalf("LastClocks = %v, want one entry per site that has written", before)
+	}
+	loaded, err := LoadMap(2, b.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := loaded.LastClocks()
+	if len(after) != len(before) {
+		t.Fatalf("a loaded map says %v; before saving it said %v", after, before)
+	}
+	for site, clock := range after {
+		if clock > before[site] {
+			t.Fatalf("a loaded map claims site %d had reached %d, above the %d it had", site, clock, before[site])
+		}
+	}
+}
