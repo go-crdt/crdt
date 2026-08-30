@@ -129,6 +129,9 @@ func TestChaosStructured(t *testing.T) {
 	// stream of their own, so switching one off moves no other draw.
 	churn := chaosSize0("CRDT_STRUCTURED_CHAOS_CHURN", 6)
 	join := chaosSize0("CRDT_STRUCTURED_CHAOS_JOIN", 10)
+	// One round in this many gives back the tombstones every replica has
+	// certainly seen and can promise no later write will want. Zero is never.
+	collect := chaosSize0("CRDT_STRUCTURED_CHAOS_COLLECT", 12)
 
 	for _, dt := range docTypes() {
 		t.Run(dt.name, func(t *testing.T) {
@@ -137,14 +140,14 @@ func TestChaosStructured(t *testing.T) {
 			// how the others fared, which is what a rate is read from.
 			for seed := range uint64(seeds) {
 				t.Run(fmt.Sprintf("seed%d", seed), func(t *testing.T) {
-					chaosSession(t, dt, seed, replicas, rounds, churn, join)
+					chaosSession(t, dt, seed, replicas, rounds, churn, join, collect)
 				})
 			}
 		})
 	}
 }
 
-func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn, join int) {
+func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn, join, collect int) {
 	t.Helper()
 	rng := rand.New(rand.NewPCG(seed, 0xc4a05))
 	// Disorder draws from its own stream, so switching a source off leaves every
@@ -157,6 +160,7 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 	}
 	nw := newChaosNet(replicas)
 	site := crdt.SiteID(replicas + 1)
+	collections, collected, floorRefusals := 0, 0, 0
 
 	for round := range rounds {
 		// Cut a few replicas off, and readmit some of those already cut.
@@ -198,6 +202,45 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 			}
 		}
 
+		// Give back what every replica has certainly seen.
+		//
+		// The version is the meet over all of them, which is what
+		// [crdt.Map.Collect] asks for and what a replica on its own cannot
+		// know: this harness can, because it holds every replica. Every one of
+		// them is then collected with that same version, because the clock a
+		// map collected under is in its snapshot and in no operation — two
+		// replicas that collected differently hold different bytes and would
+		// fail the comparison at the end for a reason that is not a merge
+		// fault. A partitioned replica is collected too: it is a local
+		// operation on a version it has already delivered.
+		if collect > 0 && round > 0 && round%collect == 0 {
+			floor := docs[0].Version()
+			for _, d := range docs[1:] {
+				floor = meetOf(floor, d.Version())
+			}
+			composites := make([]*crdt.Composite, len(docs))
+			for i, d := range docs {
+				held, ok := d.(holdsComposite)
+				if !ok {
+					t.Fatalf("%s: replica %d cannot be collected; give it a composite() method", dt.name, i)
+				}
+				composites[i] = held.composite()
+			}
+			// And the clock floor, which is the other half of what Collect
+			// asks for: no operation at or under it can still arrive anywhere.
+			// A replica that has heard nothing from a site can be sent that
+			// site's first operation at any clock, so it takes the answer to
+			// nothing and nothing is given back that round.
+			if below, ok := clockFloor(composites, sitesOf(docs, replicas)); ok {
+				for _, c := range composites {
+					collected += c.Collect(floor, below)
+				}
+				collections++
+			} else {
+				floorRefusals++
+			}
+		}
+
 		// A participant joins late, seeded from a live peer.
 		joinRoll, joinFrom := dis.IntN(4) == 0, dis.IntN(len(docs))
 		if join > 0 && round > 0 && round < rounds-5 && joinRoll && len(docs) < 4*replicas {
@@ -216,13 +259,92 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 			t.Fatalf("%s seed %d: replica %d still has %d operations pending", dt.name, seed, i, d.Pending())
 		}
 		if !bytes.Equal(d.Snapshot(), want) {
+			if a, ok := d.(holdsComposite); ok {
+				if b, ok2 := docs[0].(holdsComposite); ok2 {
+					for _, part := range a.composite().Parts() {
+						if part.Kind != crdt.PartMap {
+							continue
+						}
+						ma, _ := a.composite().Map(part.Name)
+						mb, _ := b.composite().Map(part.Name)
+						t.Logf("  part %q: replica %d has %d keys %d tombstones, replica 0 has %d keys %d tombstones",
+							part.Name, i, len(ma.Keys()), ma.Tombstones(), len(mb.Keys()), mb.Tombstones())
+						for _, k := range ma.Keys() {
+							va, _ := ma.Get(k)
+							vb, held := mb.Get(k)
+							if !held || string(va) != string(vb) {
+								t.Logf("  first difference at %q: replica %d has %q, replica 0 has %q (held=%v)", k, i, va, vb, held)
+								break
+							}
+						}
+					}
+				}
+			}
 			t.Fatalf("%s seed %d: replica %d diverged (%d bytes vs %d)", dt.name, seed, i, len(d.Snapshot()), len(want))
 		}
 		if !d.Version().Equal(docs[0].Version()) {
 			t.Fatalf("%s seed %d: replica %d has a different version", dt.name, seed, i)
 		}
 	}
-	if testing.Verbose() {
-		fmt.Printf("%-12s seed %d: %d replicas converged on %d bytes\n", dt.name, seed, len(docs), len(want))
+	// Asking for collection and never getting any is not a pass: it is a run
+	// that tested nothing about it and said nothing either. The root package's
+	// chaos makes the same demand for the same reason.
+	// Refusing is an answer and not a fault. A round where somebody has heard
+	// nothing yet from somebody else bounds that site's next write by nothing,
+	// and the floor says so rather than promising what it cannot.
+	if collect > 0 && collections == 0 && floorRefusals == 0 {
+		t.Fatalf("%s seed %d: collection was asked for and never happened, and the clock floor did not refuse it either, so nothing about it was tested", dt.name, seed)
 	}
+	if testing.Verbose() {
+		fmt.Printf("%-12s seed %d: %d replicas converged on %d bytes, collected %d times giving back %d records, the floor refused %d\n",
+			dt.name, seed, len(docs), len(want), collections, collected, floorRefusals)
+	}
+}
+
+// sitesOf is every site in the session: the founders, and one for each
+// participant that joined later.
+func sitesOf(docs []editor, founders int) []crdt.SiteID {
+	out := make([]crdt.SiteID, 0, len(docs))
+	for i := range docs {
+		_ = founders
+		out = append(out, crdt.SiteID(i+1))
+	}
+	return out
+}
+
+// clockFloor is the least, over every replica and every site, of the clock of
+// the last operation that replica holds from that site — and nothing at all if
+// any replica has heard nothing from any of them, because that site's first
+// operation is bounded by nothing here.
+//
+// One floor for every map part, because every replica collects with the same
+// value: the clock a map collected under is in its snapshot, so two replicas
+// that collected differently hold different bytes and would fail the comparison
+// at the end for a reason that is not a merge fault.
+func clockFloor(cs []*crdt.Composite, sites []crdt.SiteID) (crdt.CompositeClocks, bool) {
+	out := crdt.CompositeClocks{}
+	for _, part := range cs[0].Parts() {
+		if part.Kind != crdt.PartMap {
+			continue
+		}
+		floor := ^uint64(0)
+		for _, c := range cs {
+			m, err := c.Map(part.Name)
+			if err != nil {
+				return nil, false
+			}
+			seen := m.LastClocks()
+			for _, site := range sites {
+				clock, heard := seen[site]
+				if !heard {
+					return nil, false
+				}
+				if clock < floor {
+					floor = clock
+				}
+			}
+		}
+		out[part] = floor
+	}
+	return out, len(out) > 0
 }
