@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -932,5 +933,35 @@ func TestLoadRejectsAMalformedCollectionHeader(t *testing.T) {
 				t.Fatalf("Load = %v, want ErrMalformed", err)
 			}
 		})
+	}
+}
+
+// The long branch of sortIDs orders exactly as the short one does. It has to:
+// the encodings depend on that order, and a document crosses the threshold
+// between them as it accumulates duplicate deletions.
+func TestBothSortsAgree(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 11))
+	for _, n := range []int{1, 2, 31, 32, 33, 200, 5000} {
+		ids := make([]ID, n)
+		for i := range ids {
+			ids[i] = ID{Site: SiteID(1 + r.IntN(9)), Seq: 1 + r.Uint64()%50}
+		}
+		mine := append([]ID(nil), ids...)
+		sortIDs(mine)
+
+		// The same list, ordered by the branch this one did not take: an
+		// insertion sort spelled out here rather than borrowed, so the two are
+		// not the same code agreeing with itself.
+		theirs := append([]ID(nil), ids...)
+		for i := 1; i < len(theirs); i++ {
+			for j := i; j > 0 && idLess(theirs[j], theirs[j-1]); j-- {
+				theirs[j], theirs[j-1] = theirs[j-1], theirs[j]
+			}
+		}
+		for i := range mine {
+			if mine[i] != theirs[i] {
+				t.Fatalf("%d ids: the two sorts disagree at %d: %v against %v", n, i, mine[i], theirs[i])
+			}
+		}
 	}
 }
