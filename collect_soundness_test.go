@@ -334,3 +334,64 @@ func TestClocksAndWhatTheyRefuse(t *testing.T) {
 		}
 	}
 }
+
+// FuzzCompositeClocks: the floors arrive from a peer, so their decoder is
+// somewhere hostile bytes reach and is fuzzed like every other one here.
+//
+// The guarantee asserted is that what this package encodes round-trips byte for
+// byte, not that every accepted input does: reader.uvarint accepts an overlong
+// encoding, which every decoder in this package inherits. See
+// FuzzCompositeVersion, which says the same thing at greater length.
+func FuzzCompositeClocks(f *testing.F) {
+	seed, err := CompositeClocks{
+		{Kind: PartMap, Name: "cells"}: 7,
+		{Kind: PartMap, Name: "notes"}: 1,
+	}.MarshalBinary()
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add(seed)
+	f.Add([]byte{0})
+	f.Add([]byte{})
+
+	f.Fuzz(func(t *testing.T, data []byte) {
+		var c CompositeClocks
+		if err := c.UnmarshalBinary(data); err != nil {
+			return
+		}
+		encoded, err := c.MarshalBinary()
+		if err != nil {
+			t.Fatalf("re-encoding accepted floors failed: %v", err)
+		}
+		var again CompositeClocks
+		if err := again.UnmarshalBinary(encoded); err != nil {
+			t.Fatalf("re-encoded floors no longer decode: %v", err)
+		}
+		if len(again) != len(c) {
+			t.Fatalf("round trip gave %v, want %v", again, c)
+		}
+		for part, clock := range c {
+			if again[part] != clock {
+				t.Fatalf("round trip gave %v, want %v", again, c)
+			}
+		}
+		twice, err := again.MarshalBinary()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(twice) != string(encoded) {
+			t.Fatal("what this package encodes did not re-encode to the same bytes")
+		}
+		// And a floor is something Collect can be asked with, whatever arrived.
+		m := NewMap(1)
+		if _, err := m.Set("k", []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+		for _, clock := range c {
+			m.Collect(m.Version(), clock)
+		}
+		if _, held := m.Get("k"); !held {
+			t.Fatal("a live key was collected")
+		}
+	})
+}
