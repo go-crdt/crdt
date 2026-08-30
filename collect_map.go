@@ -41,6 +41,27 @@ import (
 // it can offer somebody who does — a server, which everything passes through —
 // and the arithmetic is a minimum over every site that could still send.
 //
+// # What Yjs does instead
+//
+// It does not do this at all, and the difference is worth stating because it is
+// the whole reason a floor is needed here and nowhere in that codebase.
+//
+// Yjs collects a deleted item by replacing its *content* and keeping the item:
+// Item.gc, called with parentGCd false, sets this.content = new
+// ContentDeleted(this.length) and leaves the item in the store with its id, its
+// origins and its key. The other branch, for an item whose parent is going too,
+// is replaceStruct(store, this, new GC(this.id, this.length)) — which also keeps
+// the id. Either way the identity survives, so an operation arriving late still
+// finds something to lose to, and no precondition beyond causal delivery is
+// needed. (Read in yjs 13.6.32, src/structs/Item.js and
+// src/utils/Transaction.js.)
+//
+// What that reclaims is the content. A map's tombstone has none: the record is
+// the space, and giving it back means giving back the identity. So this is an
+// economy Yjs does not attempt, and the floor is its price rather than the
+// repair of a mistake. A diagram whose nodes come and go is what makes the
+// price worth paying; see [Diagram.Collect].
+//
 // # Why this one needs no format version and no floor
 //
 // A map already gives back a sequence number without its operation: a second
