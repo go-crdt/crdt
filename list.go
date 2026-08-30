@@ -45,6 +45,20 @@ type ListOp struct {
 	Value []byte
 	// Target is the element to remove. OpDelete only.
 	Target ID
+	// Span is how many consecutive sequence numbers this operation accounts for,
+	// ending at ID.Seq. OpSuperseded only. See [OpSuperseded], and the note
+	// there on which operations a run may stand in for: an insertion is named by
+	// what was inserted after it and is not one of them.
+	Span uint64
+}
+
+// first names the earliest sequence number this operation accounts for, which is
+// its own for everything but a superseded run.
+func (o ListOp) first() uint64 {
+	if o.Kind == OpSuperseded {
+		return o.ID.Seq - o.Span + 1
+	}
+	return o.ID.Seq
 }
 
 // validate reports why an operation cannot be applied, or nil.
@@ -59,7 +73,14 @@ func (o ListOp) validate() error {
 			return ErrInvalidOp
 		}
 	case OpDelete:
-		if o.Target.IsRoot() || !o.Origin.IsRoot() || o.Value != nil {
+		if o.Target.IsRoot() || !o.Origin.IsRoot() || o.Value != nil || o.Span != 0 {
+			return ErrInvalidOp
+		}
+	case OpSuperseded:
+		if !o.Origin.IsRoot() || !o.Target.IsRoot() || o.Value != nil {
+			return ErrInvalidOp
+		}
+		if o.Clock != o.ID.Seq || o.Span == 0 || o.Span > o.ID.Seq {
 			return ErrInvalidOp
 		}
 	default:
@@ -77,10 +98,14 @@ func (o ListOp) appendTo(dst []byte) []byte {
 	dst = binary.AppendUvarint(dst, uint64(o.ID.Site))
 	dst = binary.AppendUvarint(dst, o.ID.Seq)
 	dst = binary.AppendUvarint(dst, o.Clock)
-	if o.Kind == OpInsert {
+	switch o.Kind {
+	case OpInsert:
 		dst = binary.AppendUvarint(dst, uint64(o.Origin.Site))
 		dst = binary.AppendUvarint(dst, o.Origin.Seq)
 		return appendSized(dst, o.Value)
+	case OpSuperseded:
+		dst = binary.AppendUvarint(dst, o.Span)
+		return binary.AppendUvarint(dst, 0)
 	}
 	dst = binary.AppendUvarint(dst, uint64(o.Target.Site))
 	return binary.AppendUvarint(dst, o.Target.Seq)
@@ -115,7 +140,7 @@ func decodeListOp(data []byte) (ListOp, []byte, error) {
 		return ListOp{}, nil, ErrMalformed
 	}
 	op := ListOp{Kind: OpKind(data[0])}
-	if op.Kind != OpInsert && op.Kind != OpDelete {
+	if op.Kind != OpInsert && op.Kind != OpDelete && op.Kind != OpSuperseded {
 		return ListOp{}, nil, ErrInvalidOp
 	}
 	r := &reader{buf: data[1:]}
@@ -125,6 +150,18 @@ func decodeListOp(data []byte) (ListOp, []byte, error) {
 		return ListOp{}, nil, ErrMalformed
 	}
 	op.ID, op.Clock = id, clock
+	if op.Kind == OpSuperseded {
+		span, okSpan := r.uvarint()
+		unused, okUnused := r.uvarint()
+		if !okSpan || !okUnused || unused != 0 {
+			return ListOp{}, nil, ErrMalformed
+		}
+		op.Span = span
+		if err := op.validate(); err != nil {
+			return ListOp{}, nil, err
+		}
+		return op, r.buf, nil
+	}
 	if op.Kind == OpInsert {
 		origin, okOrigin := r.id()
 		value, okValue := r.sized()
@@ -476,8 +513,13 @@ func (l *List) admit(op ListOp, absorbed *[]ListOp) {
 
 // ready reports whether an operation can be integrated now.
 func (l *List) ready(op ListOp) bool {
-	if op.ID.Seq != l.vv[op.ID.Site]+1 {
+	if op.first() != l.vv[op.ID.Site]+1 {
 		return false
+	}
+	if op.Kind == OpSuperseded {
+		// It names nothing, so there is nothing to wait for beyond its own
+		// site's previous operation.
+		return true
 	}
 	if op.Kind == OpInsert {
 		return op.Origin.IsRoot() || l.known(op.Origin)
@@ -513,8 +555,8 @@ func (l *List) park(op ListOp) {
 // blockedOn names the operation that has to land before this one can be tried
 // again.
 func (l *List) blockedOn(op ListOp) ID {
-	if op.ID.Seq != l.vv[op.ID.Site]+1 {
-		return ID{Site: op.ID.Site, Seq: op.ID.Seq - 1}
+	if op.first() != l.vv[op.ID.Site]+1 {
+		return ID{Site: op.ID.Site, Seq: op.first() - 1}
 	}
 	if op.Kind == OpInsert {
 		return op.Origin
@@ -528,6 +570,10 @@ func (l *List) integrate(op ListOp) {
 		l.clock = op.Clock
 	}
 	l.vv[op.ID.Site] = op.ID.Seq
+	if op.Kind == OpSuperseded {
+		// Accounted for and nothing else, as in [Doc.integrate].
+		return
+	}
 	if op.Kind == OpDelete {
 		l.tombstone(op)
 		return
