@@ -274,3 +274,63 @@ func TestCompositeClocksRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// What a document says its clocks are, and what it refuses to say.
+func TestClocksAndWhatTheyRefuse(t *testing.T) {
+	doc := NewComposite(1)
+	cells, err := doc.Map("cells")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cells.Set("k", []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	text, err := doc.Text("prose")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := text.Insert(0, "hello"); err != nil {
+		t.Fatal(err)
+	}
+
+	got := doc.Clocks()
+	if len(got) != 1 {
+		t.Fatalf("Clocks = %v, want the map part and nothing else", got)
+	}
+	if got[Part{Kind: PartMap, Name: "cells"}] != cells.Clock() {
+		t.Fatalf("Clocks = %v, want the map's own clock %d", got, cells.Clock())
+	}
+
+	// A part that is not one, and a clock no replica could have issued: both
+	// are somebody else's mistake and neither goes on the wire.
+	if _, err := (CompositeClocks{{Kind: PartKind(9), Name: "x"}: 1}).MarshalBinary(); !errors.Is(err, ErrInvalidPart) {
+		t.Fatalf("MarshalBinary of an invalid part = %v, want ErrInvalidPart", err)
+	}
+	if _, err := (CompositeClocks{{Kind: PartMap, Name: "cells"}: MaxClock + 1}).MarshalBinary(); !errors.Is(err, ErrInvalidOp) {
+		t.Fatalf("MarshalBinary of an impossible clock = %v, want ErrInvalidOp", err)
+	}
+	// And a clock above MaxClock arriving is refused too.
+	raw, err := CompositeClocks{{Kind: PartMap, Name: "cells"}: MaxClock}.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw[len(raw)-1]++ // one past what MaxClock encodes to
+	var back CompositeClocks
+	if err := back.UnmarshalBinary(raw); err == nil {
+		t.Fatal("a clock above MaxClock was accepted")
+	}
+	// A count larger than the bytes allow is refused before anything is made
+	// for it, and a truncated header is refused rather than guessed at.
+	for _, bad := range [][]byte{
+		{0xff},
+		{200, byte(PartMap)},
+		{1, byte(PartMap)},         // a kind, and then no name
+		{1, byte(PartMap), 5, 'a'}, // a name shorter than it says
+		{1, byte(PartMap), 1, 'a'}, // a part, and then no clock
+	} {
+		var got CompositeClocks
+		if err := got.UnmarshalBinary(bad); err == nil {
+			t.Fatalf("UnmarshalBinary(%v) was accepted", bad)
+		}
+	}
+}

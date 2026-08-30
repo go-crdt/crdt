@@ -130,10 +130,8 @@ func TestChaosStructured(t *testing.T) {
 	churn := chaosSize0("CRDT_STRUCTURED_CHAOS_CHURN", 6)
 	join := chaosSize0("CRDT_STRUCTURED_CHAOS_JOIN", 10)
 	// One round in this many gives back the tombstones every replica has
-	// certainly seen. Zero is never, and never is the default: turning it on is
-	// what found that collecting a map is not sound, and it stays off until
-	// that is settled. See collect_soundness_test.go in the root package.
-	collect := chaosSize0("CRDT_STRUCTURED_CHAOS_COLLECT", 0)
+	// certainly seen and can promise no later write will want. Zero is never.
+	collect := chaosSize0("CRDT_STRUCTURED_CHAOS_COLLECT", 12)
 
 	for _, dt := range docTypes() {
 		t.Run(dt.name, func(t *testing.T) {
@@ -162,7 +160,7 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 	}
 	nw := newChaosNet(replicas)
 	site := crdt.SiteID(replicas + 1)
-	collections, collected := 0, 0
+	collections, collected, floorRefusals := 0, 0, 0
 
 	for round := range rounds {
 		// Cut a few replicas off, and readmit some of those already cut.
@@ -238,6 +236,8 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 					collected += c.Collect(floor, below)
 				}
 				collections++
+			} else {
+				floorRefusals++
 			}
 		}
 
@@ -259,6 +259,27 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 			t.Fatalf("%s seed %d: replica %d still has %d operations pending", dt.name, seed, i, d.Pending())
 		}
 		if !bytes.Equal(d.Snapshot(), want) {
+			if a, ok := d.(holdsComposite); ok {
+				if b, ok2 := docs[0].(holdsComposite); ok2 {
+					for _, part := range a.composite().Parts() {
+						if part.Kind != crdt.PartMap {
+							continue
+						}
+						ma, _ := a.composite().Map(part.Name)
+						mb, _ := b.composite().Map(part.Name)
+						t.Logf("  part %q: replica %d has %d keys %d tombstones, replica 0 has %d keys %d tombstones",
+							part.Name, i, len(ma.Keys()), ma.Tombstones(), len(mb.Keys()), mb.Tombstones())
+						for _, k := range ma.Keys() {
+							va, _ := ma.Get(k)
+							vb, held := mb.Get(k)
+							if !held || string(va) != string(vb) {
+								t.Logf("  first difference at %q: replica %d has %q, replica 0 has %q (held=%v)", k, i, va, vb, held)
+								break
+							}
+						}
+					}
+				}
+			}
 			t.Fatalf("%s seed %d: replica %d diverged (%d bytes vs %d)", dt.name, seed, i, len(d.Snapshot()), len(want))
 		}
 		if !d.Version().Equal(docs[0].Version()) {
@@ -268,12 +289,15 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 	// Asking for collection and never getting any is not a pass: it is a run
 	// that tested nothing about it and said nothing either. The root package's
 	// chaos makes the same demand for the same reason.
-	if collect > 0 && collections == 0 {
-		t.Fatalf("%s seed %d: collection was asked for and never happened, so nothing about it was tested", dt.name, seed)
+	// Refusing is an answer and not a fault. A round where somebody has heard
+	// nothing yet from somebody else bounds that site's next write by nothing,
+	// and the floor says so rather than promising what it cannot.
+	if collect > 0 && collections == 0 && floorRefusals == 0 {
+		t.Fatalf("%s seed %d: collection was asked for and never happened, and the clock floor did not refuse it either, so nothing about it was tested", dt.name, seed)
 	}
 	if testing.Verbose() {
-		fmt.Printf("%-12s seed %d: %d replicas converged on %d bytes, collected %d times giving back %d records\n",
-			dt.name, seed, len(docs), len(want), collections, collected)
+		fmt.Printf("%-12s seed %d: %d replicas converged on %d bytes, collected %d times giving back %d records, the floor refused %d\n",
+			dt.name, seed, len(docs), len(want), collections, collected, floorRefusals)
 	}
 }
 

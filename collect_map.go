@@ -82,22 +82,42 @@ import (
 //
 // Collect reports how many tombstones it dropped.
 func (m *Map) Collect(stable VersionVector, below uint64) int {
+	// The floor and not the highest clock actually dropped, which is what this
+	// counted before. What is dropped depends on what this replica happened to
+	// hold: one that had already given a record back, or never had it, drops
+	// fewer and would remember a lower clock. That is replica-relative state,
+	// and it is in the snapshot — so two replicas that had applied the same
+	// operations wrote different bytes, which is the one thing a snapshot
+	// promises not to do. The floor is the same number for everybody asked with
+	// it, and it is at least as high as anything it allows to go.
+	if below > MaxClock {
+		// A caller saying nothing at all can still arrive says it with the
+		// largest number there is. Nothing above MaxClock names an operation
+		// any replica could have issued, and the snapshot will not carry one.
+		below = MaxClock
+	}
+	if below > m.collectedBelow {
+		m.collectedBelow = below
+	}
 	dropped := 0
 	for key, rec := range m.records {
 		if !rec.dead || !stable.Includes(rec.id) || rec.clock > below {
 			continue
 		}
 		delete(m.records, key)
-		if rec.clock > m.collectedBelow {
-			m.collectedBelow = rec.clock
-		}
 		dropped++
 	}
 	return dropped
 }
 
-// CollectedBelow reports the highest clock this replica has collected a
-// tombstone under, and zero if it has collected none.
+// CollectedBelow reports the floor this map has been collected against, and
+// zero if it has never been collected.
+//
+// It is the floor it was asked with rather than the highest clock it actually
+// dropped, and the difference matters: what is dropped depends on what this
+// replica happened to hold, so remembering that would put replica-relative
+// state in the snapshot and two replicas that had applied the same operations
+// would write different bytes.
 //
 // It is a clock rather than a version, unlike [Doc.Floor] and [List.Floor],
 // because what a map has to recognise is not an operation it dropped but a

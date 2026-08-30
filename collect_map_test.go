@@ -71,8 +71,18 @@ func TestCollectingAMapWithNothingToTake(t *testing.T) {
 	if n := m.Collect(m.Version(), arrived); n != 0 {
 		t.Fatalf("collected %d from a map nothing was deleted from", n)
 	}
-	if len(m.Snapshot()) != before || m.CollectedBelow() != 0 {
-		t.Fatal("collecting nothing changed something")
+	// Nothing is dropped, and the floor is remembered anyway: it is the answer
+	// to what was asked and not a report of what was found, so that two
+	// replicas asked the same thing hold the same bytes whatever each of them
+	// happened to be carrying. Only the floor changes; the records do not.
+	if m.CollectedBelow() != MaxClock {
+		t.Fatalf("CollectedBelow = %d, want the floor it was asked with", m.CollectedBelow())
+	}
+	if got := len(m.Snapshot()); got == before {
+		t.Fatal("the floor it was collected against is not in the snapshot")
+	}
+	if n := len(m.Keys()); n != 20 {
+		t.Fatalf("collecting nothing took %d keys", 20-n)
 	}
 	if _, err := m.Delete("k0"); err != nil {
 		t.Fatal(err)
@@ -111,7 +121,7 @@ func TestCollectedAndUncollectedMapsStillAgree(t *testing.T) {
 		if !sameKeys(a, b) {
 			t.Fatalf("seed %d: the two disagreed before anything was collected", seed)
 		}
-		collected := a.Collect(a.Version(), arrived)
+		collected := a.Collect(a.Version(), floorOf(a, b))
 		if !sameKeys(a, b) {
 			t.Fatalf("seed %d: collecting %d tombstones changed the map", seed, collected)
 		}
@@ -219,8 +229,9 @@ func TestAWriteAboveTheCollectedClockIsOrdinary(t *testing.T) {
 	if err := b.Apply(gone); err != nil {
 		t.Fatal(err)
 	}
-	// Now b has delivered the deletion, so collecting is legitimate.
-	if n := a.Collect(a.Version(), arrived); n != 1 {
+	// Now b has delivered the deletion, and neither will write at or under its
+	// own clock again, so collecting is legitimate.
+	if n := a.Collect(a.Version(), floorOf(a, b)); n != 1 {
 		t.Fatalf("collected %d tombstones, want 1", n)
 	}
 	// And b's next write, made knowing the key was deleted, is ordinary work.
@@ -316,4 +327,17 @@ func settledClocks(v CompositeVersion) CompositeClocks {
 		out[part] = arrived
 	}
 	return out
+}
+
+// floorOf is what a caller that can see every replica can honestly promise: a
+// Lamport clock only goes up, so none of them will write at or under its own
+// clock again, and the least of those bounds everything still to come.
+func floorOf(ms ...*Map) uint64 {
+	floor := ^uint64(0)
+	for _, m := range ms {
+		if c := m.Clock(); c < floor {
+			floor = c
+		}
+	}
+	return floor
 }
