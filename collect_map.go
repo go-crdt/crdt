@@ -1,5 +1,10 @@
 package crdt
 
+import (
+	"encoding/binary"
+	"sort"
+)
+
 // Collect drops the tombstones nothing can still be confused by.
 //
 // A map keeps one record per key rather than one per edit, so it has far less
@@ -25,9 +30,11 @@ package crdt
 // documents. See TestCollectingLosesAComparisonALaterWriteNeeded.
 //
 // So below is a clock floor: a promise that no operation with a clock at or
-// under it can still arrive. A tombstone goes only when its own clock is under
+// under it can still arrive. A tombstone goes when its own clock is at or under
 // that floor, which is what makes every write that can still come strictly
-// later than it and therefore comparable without it.
+// later than it — and a write that is strictly later beats it, comes back, and
+// wants no comparison. What needed the tombstone was a write at or below its
+// clock, and the floor is the promise there will not be one.
 //
 // A replica cannot work the floor out alone, for the same reason it cannot work
 // out the version: it does not know who is out there. [Map.LastClocks] is what
@@ -77,7 +84,7 @@ package crdt
 func (m *Map) Collect(stable VersionVector, below uint64) int {
 	dropped := 0
 	for key, rec := range m.records {
-		if !rec.dead || !stable.Includes(rec.id) || rec.clock >= below {
+		if !rec.dead || !stable.Includes(rec.id) || rec.clock > below {
 			continue
 		}
 		delete(m.records, key)
@@ -191,6 +198,89 @@ func (m *Map) LastClocks() map[SiteID]uint64 {
 	out := make(map[SiteID]uint64, len(m.lastClock))
 	for site, clock := range m.lastClock {
 		out[site] = clock
+	}
+	return out
+}
+
+// MarshalBinary encodes the floors, sorted by part so that two callers holding
+// the same clocks produce the same bytes.
+//
+// A clock above [MaxClock] is refused for the reason a sequence number is: it
+// is not something this package can have produced, so carrying it would be
+// carrying somebody else's mistake onto the wire.
+func (c CompositeClocks) MarshalBinary() ([]byte, error) {
+	parts := make([]Part, 0, len(c))
+	for p := range c {
+		if !p.valid() {
+			return nil, ErrInvalidPart
+		}
+		if c[p] > MaxClock {
+			return nil, ErrInvalidOp
+		}
+		parts = append(parts, p)
+	}
+	sort.Slice(parts, func(i, j int) bool { return partLess(parts[i], parts[j]) })
+	out := binary.AppendUvarint(nil, uint64(len(parts)))
+	for _, p := range parts {
+		out = append(out, byte(p.Kind))
+		out = appendKey(out, p.Name)
+		out = binary.AppendUvarint(out, c[p])
+	}
+	return out, nil
+}
+
+// UnmarshalBinary reads what MarshalBinary wrote, and refuses anything else:
+// these arrive from a peer, so nothing about them is trusted.
+func (c *CompositeClocks) UnmarshalBinary(in []byte) error {
+	r := &reader{buf: in}
+	n, ok := r.uvarint()
+	if !ok || n > uint64(len(r.buf)) {
+		return ErrMalformed
+	}
+	out := CompositeClocks{}
+	var last Part
+	for i := uint64(0); i < n; i++ {
+		kind, ok := r.bytes(1)
+		if !ok {
+			return ErrMalformed
+		}
+		name, ok := r.sized()
+		if !ok {
+			return ErrMalformed
+		}
+		p := Part{Kind: PartKind(kind[0]), Name: string(name)}
+		if !p.valid() {
+			return ErrMalformed
+		}
+		if i > 0 && !partLess(last, p) {
+			// Out of order, or one part named twice: not something
+			// MarshalBinary writes, and accepting it would make two encodings
+			// of one set of floors.
+			return ErrMalformed
+		}
+		last = p
+		clock, ok := r.uvarint()
+		if !ok || clock > MaxClock {
+			return ErrMalformed
+		}
+		out[p] = clock
+	}
+	if len(r.buf) != 0 {
+		return ErrMalformed
+	}
+	*c = out
+	return nil
+}
+
+// Clocks reports how far each map part of this document has counted.
+//
+// It is what a participant tells a server so the server can build a floor to
+// collect against: this replica writes above these, on every part, whatever it
+// does next. A text and a list are left out, having nothing to give back.
+func (c *Composite) Clocks() CompositeClocks {
+	out := CompositeClocks{}
+	for name, m := range c.maps {
+		out[Part{Kind: PartMap, Name: name}] = m.Clock()
 	}
 	return out
 }

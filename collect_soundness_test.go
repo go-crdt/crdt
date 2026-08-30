@@ -223,3 +223,54 @@ func TestALoadedMapRemembersWhatEachSiteHadReached(t *testing.T) {
 		}
 	}
 }
+
+// The floors go over the wire, so they encode and decode like everything else.
+func TestCompositeClocksRoundTrip(t *testing.T) {
+	clocks := CompositeClocks{
+		{Kind: PartMap, Name: "cells"}:  7,
+		{Kind: PartMap, Name: "author"}: 1,
+	}
+	raw, err := clocks.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back CompositeClocks
+	if err := back.UnmarshalBinary(raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(back) != len(clocks) {
+		t.Fatalf("read back %v, wrote %v", back, clocks)
+	}
+	for part, clock := range clocks {
+		if back[part] != clock {
+			t.Fatalf("read back %v, wrote %v", back, clocks)
+		}
+	}
+	// And the bytes are the same whichever order the map was built in, or two
+	// participants holding the same floors would disagree about them.
+	again, err := CompositeClocks{
+		{Kind: PartMap, Name: "author"}: 1,
+		{Kind: PartMap, Name: "cells"}:  7,
+	}.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(again) != string(raw) {
+		t.Fatal("the same floors encoded to different bytes")
+	}
+
+	// Nothing about what arrives is trusted.
+	for _, bad := range [][]byte{
+		{},
+		{2, byte(PartMap), 1, 'a', 5}, // says two, gives one
+		{1, 99, 1, 'a', 5},            // a kind that is not one
+		{2, byte(PartMap), 1, 'b', 5, byte(PartMap), 1, 'a', 5}, // out of order
+		{2, byte(PartMap), 1, 'a', 5, byte(PartMap), 1, 'a', 5}, // named twice
+		{1, byte(PartMap), 1, 'a', 5, 0},                        // bytes left over
+	} {
+		var got CompositeClocks
+		if err := got.UnmarshalBinary(bad); err == nil {
+			t.Fatalf("UnmarshalBinary(%v) was accepted", bad)
+		}
+	}
+}
