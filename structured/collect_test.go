@@ -205,7 +205,12 @@ func TestSweepingAndCollectingADiagramsNodes(t *testing.T) {
 	if _, err := d.Sweep(); err != nil {
 		t.Fatalf("Sweep: %v", err)
 	}
-	n := d.Collect(d.Version())
+	floors := crdt.CompositeClocks{}
+	for part := range d.Version() {
+		// Nothing more is sent in this test, so no clock is still to come.
+		floors[part] = ^uint64(0)
+	}
+	n := d.Collect(d.Version(), floors)
 	if n == 0 {
 		t.Fatal("sweeping made tombstones and collecting took none of them")
 	}

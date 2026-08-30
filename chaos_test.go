@@ -215,7 +215,7 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 
 	var edits, delivered, lost, duplicated, gossips int
 	var joins, disconnects, reconnects, departures int
-	var collections, collected int
+	var collections, collected, floorRefusals int
 
 	for round := range rounds {
 		if round >= partitionUntil && rng.IntN(6) == 0 {
@@ -399,15 +399,20 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 		// joined is left out: it is welcomed with a snapshot and inherits
 		// whatever the hub has given back with it.
 		if collectEvery > 0 && round%collectEvery == collectEvery-1 {
-			if stable, ok := chaosMeet(all, hub); ok {
+			stable, okVersion := chaosMeet(all, hub)
+			below, okClock := chaosClockFloor(all, hub)
+			if okVersion && okClock {
 				collections++
 				for _, r := range all {
 					if r.state == unborn {
 						continue
 					}
-					collected += r.doc.Collect(stable)
+					collected += r.doc.Collect(stable, below)
 				}
-				collected += hub.doc.Collect(stable)
+				collected += hub.doc.Collect(stable, below)
+			}
+			if okVersion && !okClock {
+				floorRefusals++
 			}
 		}
 	}
@@ -503,9 +508,19 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 		edits, delivered, lost, duplicated, gossips, restarts, drops)
 	if collectEvery > 0 {
 		if collections == 0 {
-			t.Fatal("collection was asked for and never happened, so nothing about it was tested")
+			// Refusing is an answer and not a fault. [Map.Collect] wants a
+			// clock floor as well as a version, and in a room this size
+			// somebody has always just arrived and heard nothing yet from
+			// somebody else — which bounds that site's next operation by
+			// nothing and takes the floor to nothing. Saying so is the point:
+			// a sound floor in a churning room is a floor that does not move.
+			if floorRefusals == 0 {
+				t.Fatal("collection was asked for and never happened, and the clock floor did not refuse it either, so nothing about it was tested")
+			}
+			t.Logf("collection was asked for %d times and the clock floor refused every one: a version everybody had was not enough, and no clock could be promised", floorRefusals)
+		} else {
+			t.Logf("collected %d times, giving back %d records; the clock floor refused %d more", collections, collected, floorRefusals)
 		}
-		t.Logf("collected %d times, giving back %d records", collections, collected)
 	}
 	version, err := here[0].doc.Version().MarshalBinary()
 	if err != nil {
@@ -543,6 +558,53 @@ func runChaos(t *testing.T, seed uint64, replicas, rounds, editors, fanout, chur
 // meet with nothing is nothing. It reports false when the answer is empty,
 // which is a room where somebody has just arrived and nothing can be collected
 // yet.
+// chaosClockFloor is the promise [Map.Collect] asks for besides the version:
+// that no operation with a clock at or under it can still arrive anywhere.
+//
+// A site issues in increasing clock order, so whatever has not reached a replica
+// yet from a given site carries a clock above the last one that did. The floor
+// is therefore the least of those, over every replica and every site — and a
+// replica that has never heard from a site at all can be sent that site's first
+// operation, whose clock is bounded by nothing here, so it takes the floor to
+// nothing.
+//
+// That is conservative, and deliberately: a floor that is too low collects less
+// than it could, and a floor that is too high collects a tombstone a later write
+// still needed to be compared against.
+func chaosClockFloor(all []*chaosReplica, hub *chaosReplica) (CompositeClocks, bool) {
+	sites := map[SiteID]struct{}{}
+	live := []*chaosReplica{hub}
+	for _, r := range all {
+		if r.state == unborn {
+			continue
+		}
+		live = append(live, r)
+		sites[r.site] = struct{}{}
+	}
+	sites[hub.site] = struct{}{}
+
+	floor := ^uint64(0)
+	for _, r := range live {
+		m, err := r.doc.Map(chaosMap.Name)
+		if err != nil {
+			return nil, false
+		}
+		seen := m.LastClocks()
+		for site := range sites {
+			clock, heard := seen[site]
+			if !heard {
+				// This replica has heard nothing from that site, so that site's
+				// first operation could still be on its way at any clock.
+				return nil, false
+			}
+			if clock < floor {
+				floor = clock
+			}
+		}
+	}
+	return CompositeClocks{chaosMap: floor}, true
+}
+
 func chaosMeet(all []*chaosReplica, hub *chaosReplica) (CompositeVersion, bool) {
 	out := hub.doc.Version()
 	if len(out) == 0 {

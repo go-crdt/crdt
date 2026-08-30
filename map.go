@@ -315,6 +315,14 @@ type Map struct {
 	// recognises a write that would have lost to a tombstone that is gone; see
 	// [Map.Collect].
 	collectedBelow uint64
+
+	// lastClock is the clock of the last operation integrated from each site.
+	// A site issues in increasing clock order and a transport delivers a site's
+	// operations in order, so the next operation to arrive from that site has a
+	// clock above this one — which is the only thing a replica can say about
+	// what has not arrived yet. See [Map.LastClocks], which is what a caller
+	// computes a collection floor from.
+	lastClock map[SiteID]uint64
 }
 
 // A mapRecord is what a replica keeps for one key: the write that is winning,
@@ -352,6 +360,15 @@ func (m *Map) mint() (ID, uint64) {
 // Site returns the replica this map writes as. [Doc] and [List] answer the same
 // question the same way.
 func (m *Map) Site() SiteID { return m.site }
+
+// Clock reports the Lamport clock this replica has reached.
+//
+// Every operation it issues from now on carries a clock above this one, which
+// is what makes it the bound on a site that has written nothing yet: a
+// participant handed this document writes later than it, whatever it does. A
+// caller building a floor for [Map.Collect] needs that bound for the sites
+// [Map.LastClocks] cannot speak for.
+func (m *Map) Clock() uint64 { return m.clock }
 
 // Stamp returns the (clock, site) the current value of key was written at, and
 // whether the key is live. It is the total order the map resolves concurrent
@@ -621,7 +638,18 @@ func (m *Map) integrate(op MapOp) {
 	}
 	m.vv[op.ID.Site] = op.ID.Seq
 	if op.Kind == MapSuperseded {
+		// A superseded run stands for operations whose clocks are gone with
+		// them, so it says nothing about how far that site's clock had reached
+		// and is not counted. Leaving it out understates the floor, which is
+		// the direction that refuses to collect rather than the one that
+		// collects too much.
 		return
+	}
+	if m.lastClock == nil {
+		m.lastClock = map[SiteID]uint64{}
+	}
+	if op.Clock > m.lastClock[op.ID.Site] {
+		m.lastClock[op.ID.Site] = op.Clock
 	}
 	old, held := m.records[op.Key]
 	if held && !before(old.clock, old.id, op.Clock, op.ID) {

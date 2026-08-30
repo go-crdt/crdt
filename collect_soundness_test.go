@@ -6,7 +6,7 @@ import (
 )
 
 // meetOfAll is the version every one of these replicas has delivered, which is
-// what [Map.Collect] asks to be given.
+// one of the two things [Map.Collect] asks to be given.
 func meetOfAll(ms ...*Map) VersionVector {
 	out := VersionVector{}
 	for site, n := range ms[0].Version() {
@@ -53,15 +53,43 @@ func TestAConcurrentWriteIsRefusedAfterACollection(t *testing.T) {
 	if !floor.Includes(del.ID) {
 		t.Fatalf("the fixture is wrong: %v is not in the meet %v", del.ID, floor)
 	}
-	if n := third.Collect(floor); n == 0 {
-		t.Fatal("the fixture is wrong: nothing was collected")
+	// And the other thing: a promise that no operation with a clock at or under
+	// it can still arrive. Site 1 has sent nothing that this replica holds, so
+	// there is nothing to bound its first operation by and the promise is zero.
+	below := clockFloorOver(third, 1, 2, 3)
+	if below != 0 {
+		t.Fatalf("clock floor = %d; site 1 has sent nothing here, so nothing bounds what it may send", below)
+	}
+	if n := third.Collect(floor, below); n != 0 {
+		t.Fatalf("collected %d tombstones under a floor of nothing", n)
 	}
 
+	// So the tombstone is still here to be compared against, and the write is
+	// an ordinary operation again.
 	if err := third.Apply(set); errors.Is(err, ErrStranded) {
 		t.Fatalf("a concurrent write nobody misused was refused with %v", err)
 	} else if err != nil {
 		t.Fatalf("applying the write: %v", err)
 	}
+}
+
+// clockFloorOver is what a caller that knows who is out there can promise: the
+// least, over every site there is, of the clock of the last operation this
+// replica has from it. A site it has heard nothing from bounds nothing, and
+// takes the answer to zero.
+func clockFloorOver(m *Map, sites ...SiteID) uint64 {
+	seen := m.LastClocks()
+	floor := ^uint64(0)
+	for _, site := range sites {
+		clock, heard := seen[site]
+		if !heard {
+			return 0
+		}
+		if clock < floor {
+			floor = clock
+		}
+	}
+	return floor
 }
 
 // And the write that would have won leaves two replicas holding different
@@ -96,8 +124,9 @@ func TestCollectingLosesAComparisonALaterWriteNeeded(t *testing.T) {
 	if !floor.Includes(del.ID) {
 		t.Fatalf("the fixture is wrong: %v is not in the meet %v", del.ID, floor)
 	}
-	if n := collected.Collect(floor); n == 0 {
-		t.Fatal("the fixture is wrong: nothing was collected")
+	below := clockFloorOver(collected, 2, 3, 4, 5)
+	if n := collected.Collect(floor, below); n != 0 {
+		t.Fatalf("collected %d tombstones while site 3's write was still on its way", n)
 	}
 
 	errCollected, errKept := collected.Apply(set), kept.Apply(set)
@@ -107,5 +136,46 @@ func TestCollectingLosesAComparisonALaterWriteNeeded(t *testing.T) {
 	if heldC != heldK || string(gotC) != string(gotK) {
 		t.Fatalf("two replicas that applied the same operations disagree: collected holds=%v %q, kept holds=%v %q",
 			heldC, gotC, heldK, gotK)
+	}
+}
+
+// And when the guard does fire, the composite says so instead of swallowing it.
+//
+// Getting it to fire takes deliberate misuse — a floor no caller could have
+// promised — which is the point: under a floor somebody could promise, nothing
+// here happens at all. What must not happen is the old behaviour, where the
+// operation was refused, the caller was told the batch had been applied, and
+// everything that site sent afterwards waited for a predecessor that would never
+// come.
+func TestACompositeReportsWhatAMapPartRefused(t *testing.T) {
+	part := Part{Kind: PartMap, Name: "cells"}
+	writer := NewMap(3)
+	set, err := writer.Set("k", []byte("v"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deleter := NewMap(2)
+	del, err := deleter.Delete("k")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	doc := NewComposite(9)
+	if err := doc.Apply(PartOps{Part: part, Map: []MapOp{del}}); err != nil {
+		t.Fatal(err)
+	}
+	// A floor of "everything has arrived" is a lie here: site 3's write has not.
+	if n := doc.Collect(doc.Version(), settledClocks(doc.Version())); n != 1 {
+		t.Fatalf("collected %d tombstones, want the one there is", n)
+	}
+
+	err = doc.Apply(PartOps{Part: part, Map: []MapOp{set}})
+	if !errors.Is(err, ErrStranded) {
+		t.Fatalf("Composite.Apply = %v, want the map part's %v passed on", err, ErrStranded)
+	}
+	// ApplyChanges is the same promise to a caller that is watching.
+	_, err = doc.ApplyChanges(PartOps{Part: part, Map: []MapOp{set}})
+	if !errors.Is(err, ErrStranded) {
+		t.Fatalf("Composite.ApplyChanges = %v, want the map part's %v passed on", err, ErrStranded)
 	}
 }

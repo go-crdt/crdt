@@ -220,14 +220,25 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 			for _, d := range docs[1:] {
 				floor = meetOf(floor, d.Version())
 			}
+			composites := make([]*crdt.Composite, len(docs))
 			for i, d := range docs {
 				held, ok := d.(holdsComposite)
 				if !ok {
 					t.Fatalf("%s: replica %d cannot be collected; give it a composite() method", dt.name, i)
 				}
-				collected += held.composite().Collect(floor)
+				composites[i] = held.composite()
 			}
-			collections++
+			// And the clock floor, which is the other half of what Collect
+			// asks for: no operation at or under it can still arrive anywhere.
+			// A replica that has heard nothing from a site can be sent that
+			// site's first operation at any clock, so it takes the answer to
+			// nothing and nothing is given back that round.
+			if below, ok := clockFloor(composites, sitesOf(docs, replicas)); ok {
+				for _, c := range composites {
+					collected += c.Collect(floor, below)
+				}
+				collections++
+			}
 		}
 
 		// A participant joins late, seeded from a live peer.
@@ -264,4 +275,52 @@ func chaosSession(t *testing.T, dt docType, seed uint64, replicas, rounds, churn
 		fmt.Printf("%-12s seed %d: %d replicas converged on %d bytes, collected %d times giving back %d records\n",
 			dt.name, seed, len(docs), len(want), collections, collected)
 	}
+}
+
+// sitesOf is every site in the session: the founders, and one for each
+// participant that joined later.
+func sitesOf(docs []editor, founders int) []crdt.SiteID {
+	out := make([]crdt.SiteID, 0, len(docs))
+	for i := range docs {
+		_ = founders
+		out = append(out, crdt.SiteID(i+1))
+	}
+	return out
+}
+
+// clockFloor is the least, over every replica and every site, of the clock of
+// the last operation that replica holds from that site — and nothing at all if
+// any replica has heard nothing from any of them, because that site's first
+// operation is bounded by nothing here.
+//
+// One floor for every map part, because every replica collects with the same
+// value: the clock a map collected under is in its snapshot, so two replicas
+// that collected differently hold different bytes and would fail the comparison
+// at the end for a reason that is not a merge fault.
+func clockFloor(cs []*crdt.Composite, sites []crdt.SiteID) (crdt.CompositeClocks, bool) {
+	out := crdt.CompositeClocks{}
+	for _, part := range cs[0].Parts() {
+		if part.Kind != crdt.PartMap {
+			continue
+		}
+		floor := ^uint64(0)
+		for _, c := range cs {
+			m, err := c.Map(part.Name)
+			if err != nil {
+				return nil, false
+			}
+			seen := m.LastClocks()
+			for _, site := range sites {
+				clock, heard := seen[site]
+				if !heard {
+					return nil, false
+				}
+				if clock < floor {
+					floor = clock
+				}
+			}
+		}
+		out[part] = floor
+	}
+	return out, len(out) > 0
 }

@@ -204,10 +204,14 @@ func (d *Diagram) Sweep() ([]crdt.PartOps, error) {
 // property behind it, for good. On a diagram of two hundred nodes half of which
 // were tried and removed, that is most of what the file weighs.
 //
-// stable must be a version every replica has delivered, per part; see
-// [crdt.Doc.Collect] for what that means and who can know it. A part it does not
-// name is left alone.
-func (d *Diagram) Collect(stable crdt.CompositeVersion) int { return d.doc.Collect(stable) }
+// stable must be a version every replica has delivered, per part, and below a
+// clock floor per part: a promise that no operation with a clock at or under it
+// can still arrive there. See [crdt.Map.Collect] for why the version alone is
+// not enough, and [crdt.Doc.Collect] for who can know either of them. A part
+// left out of either is left alone.
+func (d *Diagram) Collect(stable crdt.CompositeVersion, below crdt.CompositeClocks) int {
+	return d.doc.Collect(stable, below)
+}
 
 // AddNode adds a node and returns its identity and the operation to broadcast.
 // The node has no fields yet.

@@ -25,7 +25,7 @@ func TestCollectAMapDropsItsTombstones(t *testing.T) {
 	if m.Tombstones() != 200 {
 		t.Fatalf("%d tombstones, want 200", m.Tombstones())
 	}
-	n := m.Collect(m.Version())
+	n := m.Collect(m.Version(), arrived)
 	if n != 200 {
 		t.Fatalf("collected %d tombstones, want 200", n)
 	}
@@ -68,7 +68,7 @@ func TestCollectingAMapWithNothingToTake(t *testing.T) {
 		}
 	}
 	before := len(m.Snapshot())
-	if n := m.Collect(m.Version()); n != 0 {
+	if n := m.Collect(m.Version(), arrived); n != 0 {
 		t.Fatalf("collected %d from a map nothing was deleted from", n)
 	}
 	if len(m.Snapshot()) != before || m.CollectedBelow() != 0 {
@@ -77,7 +77,7 @@ func TestCollectingAMapWithNothingToTake(t *testing.T) {
 	if _, err := m.Delete("k0"); err != nil {
 		t.Fatal(err)
 	}
-	if n := m.Collect(VersionVector{}); n != 0 {
+	if n := m.Collect(VersionVector{}, arrived); n != 0 {
 		t.Fatalf("collected %d against a version that has seen nothing", n)
 	}
 }
@@ -111,7 +111,7 @@ func TestCollectedAndUncollectedMapsStillAgree(t *testing.T) {
 		if !sameKeys(a, b) {
 			t.Fatalf("seed %d: the two disagreed before anything was collected", seed)
 		}
-		collected := a.Collect(a.Version())
+		collected := a.Collect(a.Version(), arrived)
 		if !sameKeys(a, b) {
 			t.Fatalf("seed %d: collecting %d tombstones changed the map", seed, collected)
 		}
@@ -181,7 +181,7 @@ func TestAWriteThatWouldResurrectACollectedKeyIsRefused(t *testing.T) {
 	}
 	_ = gone
 	// The precondition broken deliberately: b has not delivered the deletion.
-	if n := a.Collect(a.Version()); n != 1 {
+	if n := a.Collect(a.Version(), arrived); n != 1 {
 		t.Fatalf("collected %d tombstones, want 1", n)
 	}
 	if err := a.Apply(late); !errors.Is(err, ErrStranded) {
@@ -220,7 +220,7 @@ func TestAWriteAboveTheCollectedClockIsOrdinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Now b has delivered the deletion, so collecting is legitimate.
-	if n := a.Collect(a.Version()); n != 1 {
+	if n := a.Collect(a.Version(), arrived); n != 1 {
 		t.Fatalf("collected %d tombstones, want 1", n)
 	}
 	// And b's next write, made knowing the key was deleted, is ordinary work.
@@ -289,10 +289,10 @@ func TestACompositeCollectsItsMaps(t *testing.T) {
 	}
 
 	// A part the caller does not vouch for is left alone.
-	if n := c.Collect(CompositeVersion{}); n != 0 {
+	if n := c.Collect(CompositeVersion{}, nil); n != 0 {
 		t.Fatalf("collected %d against a version naming no part", n)
 	}
-	if n := c.Collect(c.Version()); n != 1 {
+	if n := c.Collect(c.Version(), settledClocks(c.Version())); n != 1 {
 		t.Fatalf("collected %d, want the one map tombstone", n)
 	}
 	if props.Tombstones() != 0 {
@@ -301,4 +301,19 @@ func TestACompositeCollectsItsMaps(t *testing.T) {
 	if body.String() != "AAA" {
 		t.Fatalf("the text reads %q, want %q", body.String(), "AAA")
 	}
+}
+
+// arrived is the clock floor of a session nothing more will be sent in: every
+// operation that exists has been delivered, so no clock at all is still to come.
+// A test that has stopped editing can promise it; a running system cannot, which
+// is the whole of what [Map.Collect] asks for besides the version.
+const arrived = ^uint64(0)
+
+// settledClocks says the same for every part a version names.
+func settledClocks(v CompositeVersion) CompositeClocks {
+	out := CompositeClocks{}
+	for part := range v {
+		out[part] = arrived
+	}
+	return out
 }
