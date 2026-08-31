@@ -94,6 +94,16 @@ const BlockMark = '\uFFFF'
 const (
 	blockTypeField  = "\x00type"
 	blockDepthField = "\x00depth"
+
+	// maxBlockDepth is as deep as a block can be nested.
+	//
+	// No document nests this far — HTML stops headings at six, and an outline
+	// four thousand levels down has more indentation than a screen has pixels
+	// — so the bound costs nothing anybody was going to write. What it buys is
+	// that the stack [Blocks.Outline] builds is a few tens of kilobytes
+	// whatever arrives over the wire, rather than a number a peer picks. See
+	// [Blocks.depthOf].
+	maxBlockDepth = 4096
 )
 
 // ErrReservedRune reports text offered to a [Blocks] that contains
@@ -295,6 +305,18 @@ func (b *Blocks) depthOf(id BlockID) int {
 	n, used := binary.Uvarint(raw)
 	if used <= 0 {
 		return 0
+	}
+	// The field came from a peer, so it holds whatever that peer wrote, and
+	// [Blocks.Outline] pushes one entry per level of it. Handed back unbounded
+	// it is an allocation somebody else chose the size of: a single field set
+	// to 1<<62, ten bytes on the wire, made Outline run without ever returning
+	// — on every replica that read the document, not only the one that sent it.
+	// Clamping rather than refusing is deliberate: a depth is how a block is
+	// drawn, and hiding the block would be a worse answer than drawing it as
+	// deep as anything can be drawn. Both replicas clamp the same value the
+	// same way, so nothing here can make two of them disagree.
+	if n > maxBlockDepth {
+		return maxBlockDepth
 	}
 	return int(n)
 }
@@ -512,9 +534,10 @@ func (b *Blocks) SetType(id BlockID, typ string) (crdt.PartOps, error) {
 	return crdt.PartOps{Part: blocksPart, Map: []crdt.MapOp{op}}, nil
 }
 
-// SetDepth says how deeply a block is nested. Zero is the top level.
+// SetDepth says how deeply a block is nested. Zero is the top level, and
+// [maxBlockDepth] is as deep as it goes.
 func (b *Blocks) SetDepth(id BlockID, depth int) (crdt.PartOps, error) {
-	if depth < 0 {
+	if depth < 0 || depth > maxBlockDepth {
 		return crdt.PartOps{}, crdt.ErrOutOfRange
 	}
 	if _, _, ok := b.find(id); !ok {

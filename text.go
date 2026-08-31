@@ -798,8 +798,8 @@ func (d *Doc) park(op Op) {
 // again: its own predecessor from the same site if that has not arrived, and
 // otherwise the character it refers to.
 func (d *Doc) blockedOn(op Op) ID {
-	if op.ID.Seq != d.vv[op.ID.Site]+1 {
-		return ID{Site: op.ID.Site, Seq: op.ID.Seq - 1}
+	if op.first() != d.vv[op.ID.Site]+1 {
+		return ID{Site: op.ID.Site, Seq: op.first() - 1}
 	}
 	if op.Kind == OpInsert {
 		return op.Origin
@@ -810,8 +810,13 @@ func (d *Doc) blockedOn(op Op) ID {
 // ready reports whether an operation can be integrated now: its site's previous
 // operation has landed, and the character it refers to exists.
 func (d *Doc) ready(op Op) bool {
-	if op.ID.Seq != d.vv[op.ID.Site]+1 {
+	if op.first() != d.vv[op.ID.Site]+1 {
 		return false
+	}
+	if op.Kind == OpSuperseded {
+		// It names nothing, so there is nothing to wait for beyond its own
+		// site's previous operation.
+		return true
 	}
 	if op.Kind == OpInsert {
 		_, _, ok := d.lookupChar(op.Origin)
@@ -831,6 +836,12 @@ func (d *Doc) integrate(op Op) (*block, int) {
 		d.clock = op.Clock
 	}
 	d.vv[op.ID.Site] = op.ID.Seq
+	if op.Kind == OpSuperseded {
+		// Accounted for and nothing else. The operations it stands in for are
+		// not here and had no effect worth keeping, which is the whole of what
+		// it says.
+		return nil, 0
+	}
 	if op.Kind == OpDelete {
 		d.tombstone(op)
 		return nil, 0

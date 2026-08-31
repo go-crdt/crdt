@@ -3,11 +3,12 @@ package crdt
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strconv"
 	"unicode/utf8"
 )
 
-// OpKind distinguishes the two operations a text CRDT needs.
+// OpKind distinguishes the operations a text CRDT carries.
 type OpKind uint8
 
 const (
@@ -15,6 +16,27 @@ const (
 	OpInsert OpKind = 1
 	// OpDelete tombstones an existing character.
 	OpDelete OpKind = 2
+	// OpSuperseded stands in for operations the sending replica no longer holds.
+	// It names no character and does nothing: it exists so that a peer catching
+	// up can account for the sequence numbers and move on, exactly as
+	// [MapSuperseded] does for a map.
+	//
+	// It covers a run of consecutive sequence numbers rather than one, ending at
+	// its own ID.Seq and reaching back Span of them.
+	//
+	// It may only stand in for operations nothing else names. A deletion is
+	// named by nothing, so a losing one — the case this exists for, where two
+	// replicas deleted the same character and only one of them is the
+	// character's recorded deletion — can go. An insertion is named by whatever
+	// was inserted after it, so it cannot: a peer sent a run over an insertion
+	// would park everything that followed, waiting for an origin it will never
+	// be given.
+	//
+	// Nothing here produces one yet. This release understands one, so that a
+	// later release may send one to a peer that has been upgraded in between —
+	// the two ends of a session are not deployed at the same moment, and a kind
+	// a peer does not know is a kind it refuses. See go-crdt/crdt#80.
+	OpSuperseded OpKind = 3
 )
 
 // String renders the kind for diagnostics.
@@ -24,6 +46,8 @@ func (k OpKind) String() string {
 		return "insert"
 	case OpDelete:
 		return "delete"
+	case OpSuperseded:
+		return "superseded"
 	default:
 		return "invalid(" + strconv.FormatUint(uint64(k), 10) + ")"
 	}
@@ -52,6 +76,19 @@ type Op struct {
 	Char rune
 	// Target is the character to tombstone. OpDelete only.
 	Target ID
+	// Span is how many consecutive sequence numbers this operation accounts for,
+	// ending at ID.Seq. OpSuperseded only, where it is at least one and never
+	// reaches below sequence number one.
+	Span uint64
+}
+
+// first names the earliest sequence number this operation accounts for, which is
+// its own for everything but a superseded run.
+func (o Op) first() uint64 {
+	if o.Kind == OpSuperseded {
+		return o.ID.Seq - o.Span + 1
+	}
+	return o.ID.Seq
 }
 
 // ErrInvalidOp reports an operation that cannot be applied because it is not
@@ -61,6 +98,24 @@ var ErrInvalidOp = errors.New("crdt: invalid operation")
 
 // ErrMalformed reports bytes that are not a valid encoding.
 var ErrMalformed = errors.New("crdt: malformed encoding")
+
+// ErrUnknownFormat reports a snapshot this build cannot read because it does not
+// know the format version, rather than because the bytes are damaged.
+//
+// The two are worth telling apart by the person holding them. A snapshot travels
+// -- in go-crdt/collab a joining client loads one the server sends it -- so the
+// ordinary way to meet this is a peer running a newer build, and the answer is to
+// upgrade rather than to go looking for corruption. Reported as a malformed
+// encoding, which is what this used to be, it reads as damaged data and sends
+// somebody after the wrong thing.
+//
+// The magic matched, so these bytes are a snapshot of the right kind. Only the
+// version is one this build has no reader for -- either later than any it knows,
+// or a number reserved for work that has not landed.
+// It wraps [ErrMalformed], because these bytes are malformed as far as this build
+// is concerned and a caller that only asks that question must go on getting the
+// same answer. What is new is being able to ask the narrower one.
+var ErrUnknownFormat = fmt.Errorf("%w: format version this build does not know", ErrMalformed)
 
 // ErrExhausted reports a replica that can issue no further operations because
 // its Lamport clock has reached [MaxClock]. Reaching it honestly is not
@@ -123,7 +178,18 @@ func (o Op) validate() error {
 			return ErrInvalidOp
 		}
 	case OpDelete:
-		if o.Target.IsRoot() || !o.Origin.IsRoot() || o.Char != 0 {
+		if o.Target.IsRoot() || !o.Origin.IsRoot() || o.Char != 0 || o.Span != 0 {
+			return ErrInvalidOp
+		}
+	case OpSuperseded:
+		// It names nothing and carries nothing, and its clock is its own
+		// sequence number: there is no Lamport time to report for operations
+		// that are not here, and one encoding of the same meaning is better
+		// than a free field somebody could vary.
+		if !o.Origin.IsRoot() || !o.Target.IsRoot() || o.Char != 0 {
+			return ErrInvalidOp
+		}
+		if o.Clock != o.ID.Seq || o.Span == 0 || o.Span > o.ID.Seq {
 			return ErrInvalidOp
 		}
 	default:
@@ -140,10 +206,16 @@ func (o Op) appendTo(dst []byte) []byte {
 	dst = binary.AppendUvarint(dst, uint64(o.ID.Site))
 	dst = binary.AppendUvarint(dst, o.ID.Seq)
 	dst = binary.AppendUvarint(dst, o.Clock)
-	if o.Kind == OpInsert {
+	switch o.Kind {
+	case OpInsert:
 		dst = binary.AppendUvarint(dst, uint64(o.Origin.Site))
 		dst = binary.AppendUvarint(dst, o.Origin.Seq)
 		return binary.AppendUvarint(dst, uint64(o.Char))
+	case OpSuperseded:
+		// The two fields a delete spends on its target hold the span and a zero,
+		// so every operation is the same shape on the wire whatever it is.
+		dst = binary.AppendUvarint(dst, o.Span)
+		return binary.AppendUvarint(dst, 0)
 	}
 	dst = binary.AppendUvarint(dst, uint64(o.Target.Site))
 	return binary.AppendUvarint(dst, o.Target.Seq)
@@ -182,7 +254,7 @@ func decodeOp(data []byte) (Op, []byte, error) {
 		return Op{}, nil, ErrMalformed
 	}
 	op := Op{Kind: OpKind(data[0])}
-	if op.Kind != OpInsert && op.Kind != OpDelete {
+	if op.Kind != OpInsert && op.Kind != OpDelete && op.Kind != OpSuperseded {
 		return Op{}, nil, ErrInvalidOp
 	}
 	rest := data[1:]
@@ -197,7 +269,8 @@ func decodeOp(data []byte) (Op, []byte, error) {
 	}
 	op.ID = ID{Site: SiteID(fields[0]), Seq: fields[1]}
 	op.Clock = fields[2]
-	if op.Kind == OpInsert {
+	switch op.Kind {
+	case OpInsert:
 		op.Origin = ID{Site: SiteID(fields[3]), Seq: fields[4]}
 		v, used := uvarint(rest)
 		if used <= 0 || v > utf8.MaxRune {
@@ -205,7 +278,15 @@ func decodeOp(data []byte) (Op, []byte, error) {
 		}
 		op.Char = rune(v)
 		rest = rest[used:]
-	} else {
+	case OpSuperseded:
+		op.Span = fields[3]
+		if fields[4] != 0 {
+			// The field a delete spends on its target's sequence number, which
+			// this kind does not use. Refusing anything else keeps one encoding
+			// per operation.
+			return Op{}, nil, ErrMalformed
+		}
+	default:
 		op.Target = ID{Site: SiteID(fields[3]), Seq: fields[4]}
 	}
 	if err := op.validate(); err != nil {

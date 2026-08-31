@@ -212,7 +212,7 @@ CI, and the full suite green under `js/wasm`.
 A real editing history — 259 778 edits from the trace text CRDTs are commonly
 measured on — replays in **18.4 ms** and matches the recorded text exactly; the
 same history delivered back to front, nothing applicable until the last
-operation, settles in 0.25 s, and the document encodes to 620 KB. See [docs/performance.md](docs/performance.md).
+operation, settles in 0.25 s, and the document encodes to 260 KB. See [docs/performance.md](docs/performance.md).
 
 See [docs/design.md](docs/design.md) for how it works and why, and
 [docs/performance.md](docs/performance.md) for what it costs and what changes

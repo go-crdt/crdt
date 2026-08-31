@@ -315,6 +315,20 @@ single byte. Refusing it therefore cannot reject anything this package writes �
 which is asserted over the boundary values rather than assumed, because a rule
 that only rejects is half tested.
 
+Version 8 of a text snapshot puts the same question one level up. A column is
+now a sequence of groups — a run of one value repeated, or a literal stretch of
+values that do not — and a sequence of values can be cut into groups in many
+ways, of which the writer picks one. So the reader refuses the rest, by the three
+facts that say the writer's choice from the other side: a run is at least three
+long, or the writer would have left it in the literals; two literal stretches
+never touch, or the writer would have written one; and no two groups touch on the
+same value, nor does a literal stretch hold three of one, or the writer would
+have seen a longer equal block than the one it wrote. Between them one sequence
+of values has exactly one grouping. Without that the same document would have had
+as many encodings as it has groups, which is the thing the paragraph above says
+cannot happen — and a snapshot would have stopped being a comparison of two
+replicas, which is what most of this suite uses it as.
+
 ### What a replica keeps, it keeps a copy of
 
 An operation handed to `Apply` belongs to whoever handed it over: it may have
