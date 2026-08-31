@@ -1042,8 +1042,12 @@ func LoadComposite(site SiteID, snapshot []byte) (*Composite, error) {
 	if !ok || string(magic) != string(compositeMagic[:]) {
 		return nil, ErrMalformed
 	}
-	if v, ok := r.bytes(1); !ok || v[0] != compositeSnapshotVersion {
+	v, ok := r.bytes(1)
+	if !ok {
 		return nil, ErrMalformed
+	}
+	if v[0] != compositeSnapshotVersion {
+		return nil, ErrUnknownFormat
 	}
 
 	c := NewComposite(site)
