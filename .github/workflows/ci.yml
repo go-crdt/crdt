@@ -2,7 +2,14 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # The purge line is carried on a branch rather than on main, and a pull
+    # request into a branch that is not main triggers nothing at all -- so a
+    # snapshot format change had never been seen by any architecture but the one
+    # it was written on. Pushing to these runs the same checks main gets.
+    #
+    # Remove this list in the change that merges the purge into main; it exists
+    # only while the work lives off to one side.
+    branches: [main, purge-what-nobody-can-read, purge-fix-the-fixtures, persist-the-purge-floor]
   pull_request:
     branches: [main]
 
