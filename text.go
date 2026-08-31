@@ -79,10 +79,12 @@ type block struct {
 // size is how many characters this run holds, whether or not it still has them.
 func (b *block) size() int {
 	if b.gone {
-		if n := len(b.dels); n > 0 {
-			return int(b.dels[n-1].to)
-		}
-		return 0
+		// A purged block always has deletions: Purge takes only blocks every
+		// character of which is deleted, and a snapshot's purged run is refused
+		// unless its deletions cover its whole length. So the last deletion's
+		// end is the length. Guarding against no deletions here would be a line
+		// no test could reach, which the coverage gate says out loud.
+		return int(b.dels[len(b.dels)-1].to)
 	}
 	return len(b.text)
 }

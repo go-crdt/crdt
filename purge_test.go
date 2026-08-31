@@ -1,6 +1,7 @@
 package crdt
 
 import (
+	"bytes"
 	"errors"
 	"testing"
 )
@@ -133,5 +134,165 @@ func TestLoadRefusesAPurgedRunThatIsStillPartlyAlive(t *testing.T) {
 	partly.runs[0].length = 4
 	if _, err := Load(2, partly.build()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("a partly deleted purged run loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// A document that reloads has to remember what it gave up.
+//
+// Without this the floor comes back as zero, and readable would answer that
+// every version is still serveable — telling a caller it can serve a peer whose
+// history it has thrown away. Not reachable while nothing calls readable, and
+// exactly the defect a map's collection floor had until it was written down.
+func TestThePurgeFloorSurvivesASnapshot(t *testing.T) {
+	doc := revisedText(t, 40)
+	if doc.Purge() == 0 {
+		t.Fatal("nothing was purged, so this proves nothing")
+	}
+	before := doc.PurgedBelow()
+	if before == 0 {
+		t.Fatal("a document that purged reports a floor of zero")
+	}
+
+	back, err := Load(2, doc.Snapshot())
+	if err != nil {
+		t.Fatalf("a purged document did not reload: %v", err)
+	}
+	if got := back.PurgedBelow(); got != before {
+		t.Fatalf("PurgedBelow() = %d after a round trip, want %d", got, before)
+	}
+
+	// And a document that never purged still says so, rather than inheriting a
+	// floor from the field being written at all.
+	fresh := revisedText(t, 4)
+	plain, err := Load(2, fresh.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.PurgedBelow(); got != 0 {
+		t.Fatalf("a document that never purged reloaded with a floor of %d", got)
+	}
+}
+
+// A floor above the clock ceiling names a clock no operation could carry.
+func TestLoadRefusesAPurgeFloorAboveTheCeiling(t *testing.T) {
+	tooHigh := wellFormedRun()
+	tooHigh.purgedBelow = MaxClock + 1
+	if _, err := Load(2, tooHigh.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a floor above the ceiling loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// readable is the refusal this needs, and nothing calls it yet, so what it
+// promises is pinned here rather than by a caller.
+//
+// It answers whether a version is late enough that nothing purged was still
+// visible in it: a peer at such a version can be served, and one behind it
+// cannot, because the characters it would need are gone.
+func TestReadableAnswersForAVersionBehindThePurge(t *testing.T) {
+	// A document that has purged nothing can serve anybody, including a version
+	// that has seen nothing at all.
+	fresh := revisedText(t, 4)
+	if !fresh.readable(VersionVector{}) {
+		t.Fatal("a document that purged nothing refused the empty version")
+	}
+
+	doc := revisedText(t, 40)
+	// The version as it stood when everything was still there. Taken before the
+	// purge, so it is exactly a peer that stopped listening early.
+	early := doc.Version().Clone()
+	if doc.Purge() == 0 {
+		t.Fatal("nothing was purged, so this proves nothing")
+	}
+
+	// That peer saw the insertions and, for at least one purged character, not
+	// the deletion that removed it -- so it cannot be served.
+	behind := VersionVector{}
+	for site, seq := range early {
+		behind[site] = seq / 2
+	}
+	if doc.readable(behind) {
+		t.Fatal("a version from before the deletions was reported serveable")
+	}
+
+	// And the version the document itself is at has every deletion, so nothing
+	// purged was visible in it.
+	if !doc.readable(doc.Version()) {
+		t.Fatal("a document refused its own version")
+	}
+}
+
+// purgedRun is a hand-built snapshot of one run of four characters, all deleted
+// and then purged. It is byte-for-byte what Doc.Purge writes for that document,
+// which is how it was arrived at rather than by reasoning about the format.
+//
+// Two things are easy to get wrong and were: a deletion's span counts
+// consecutive deletion *operations*, so the version vector has to promise
+// seq+span-1 rather than seq; and a purged run writes no text at all, its length
+// living in the lengths column with the version vector as its only bound.
+func purgedRun() runBuilder {
+	b := wellFormedRun()
+	b.sites = [][2]uint64{{1, 8}} // four characters and four deletions
+	b.purgedBelow = 4
+	b.runs[0].purged = true
+	b.runs[0].text = nil
+	b.runs[0].length = 4
+	b.runs[0].dels = [][4]uint64{{0, 4, 1, 5}} // gap 0, four of them, from 5@1
+	return b
+}
+
+// A hand-built purged run loads, and says what the document it came from says.
+func TestLoadAcceptsAHandBuiltPurgedRun(t *testing.T) {
+	d, err := Load(2, purgedRun().build())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := d.String(); got != "" {
+		t.Fatalf("String() = %q, want the empty string", got)
+	}
+	if got, want := d.Tombstones(), 4; got != want {
+		t.Fatalf("Tombstones() = %d, want %d", got, want)
+	}
+	if got, want := d.PurgedBelow(), uint64(4); got != want {
+		t.Fatalf("PurgedBelow() = %d, want %d", got, want)
+	}
+	// It is the same document Purge writes, which is the point of the fixture.
+	real := New(1)
+	if _, err := real.Insert(0, "abcd"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := real.Delete(0, 4); err != nil {
+		t.Fatal(err)
+	}
+	real.Purge()
+	if !bytes.Equal(purgedRun().build(), real.Snapshot()) {
+		t.Fatal("the fixture is not what Purge writes")
+	}
+}
+
+// A purged run may not reach past what its site has issued: with no text to
+// bound it, the version vector is the only thing that does.
+func TestLoadRefusesAPurgedRunPastItsVersion(t *testing.T) {
+	past := purgedRun()
+	past.runs[0].length = 9 // the vector promises eight
+	if _, err := Load(2, past.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run past its version loaded with %v, want ErrMalformed", err)
+	}
+
+	// And one whose site has issued nothing at all has no room for any length.
+	none := purgedRun()
+	none.sites = [][2]uint64{{2, 8}}
+	if _, err := Load(2, none.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run from a site with nothing issued loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// The purged column holds a flag, and a flag is nought or one. Anything else
+// describes a run this encoder could not have written, so it is refused rather
+// than read as truthy.
+func TestLoadRefusesAPurgedFlagThatIsNeitherTrueNorFalse(t *testing.T) {
+	odd := purgedRun()
+	odd.runs[0].purgedFlag = 2
+	if _, err := Load(2, odd.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged flag of 2 loaded with %v, want ErrMalformed", err)
 	}
 }

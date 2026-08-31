@@ -198,6 +198,7 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 		s = uv(s, vvSeq) // at this sequence number
 		s = uv(s, 0)     // version 6: an empty collection floor
 		s = uv(s, 0)     // and nothing collected
+		s = uv(s, 0)     // version 7: nothing purged
 		s = uv(s, 1)     // one run
 		// Version 5 writes each field in a column of its own, length-prefixed.
 		// The sequence number is a step from nothing, and the clock the
