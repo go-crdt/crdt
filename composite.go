@@ -814,16 +814,27 @@ func (c *Composite) applyWith(watching bool, batches []PartOps) ([]PartChange, e
 		return c.applyWatching(batches)
 	}
 	for _, b := range batches {
-		// Each part validates with the same function that has just passed here, and
-		// its Apply reports nothing else, so these cannot fail. The errors are
-		// dropped rather than turned into branches no test could reach.
+		// A text and a list validate with the same function that has just passed
+		// here and report nothing else, so those two cannot fail and their
+		// errors are dropped rather than turned into branches no test could
+		// reach. A map is not in that position any more: [Map.Collect] gave it
+		// [ErrStranded], which is about the state of this replica rather than
+		// about the batch, and validation cannot see it coming.
+		//
+		// Dropping that one was worse than an unreachable branch. The operation
+		// is refused, the caller is told the batch was applied, and everything
+		// the same site sent afterwards waits for a predecessor that will never
+		// arrive: measured in one chaos run, sixty-three errors thrown away and
+		// a replica left holding fifteen hundred operations back for good.
 		switch b.Part.Kind {
 		case PartText:
 			_ = c.text(b.Part.Name).Apply(b.Text...)
 		case PartList:
 			_ = c.list(b.Part.Name).Apply(b.List...)
 		default:
-			_ = c.mapPart(b.Part.Name).Apply(b.Map...)
+			if err := c.mapPart(b.Part.Name).Apply(b.Map...); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return nil, nil
@@ -833,8 +844,8 @@ func (c *Composite) applyWith(watching bool, batches []PartOps) ([]PartChange, e
 //
 // Batches are accumulated by part rather than reported one per batch, because a
 // caller may send two batches for one part and a view wants one account of it.
-// The errors below are dropped for the reason the ones above are: every batch
-// has just passed the validation each part's own Apply would repeat.
+// A text's and a list's errors are dropped for the reason they are in
+// [Composite.applyWith]; a map's is returned, for the reason given there too.
 func (c *Composite) applyWatching(batches []PartOps) ([]PartChange, error) {
 	byPart := map[Part]*PartChange{}
 	record := func(p Part) *PartChange {
@@ -858,7 +869,10 @@ func (c *Composite) applyWatching(batches []PartOps) ([]PartChange, error) {
 				record(b.Part)
 			}
 		default:
-			keys, _ := c.mapPart(b.Part.Name).ApplyChanges(b.Map...)
+			keys, err := c.mapPart(b.Part.Name).ApplyChanges(b.Map...)
+			if err != nil {
+				return nil, err
+			}
 			if len(keys) > 0 {
 				at := record(b.Part)
 				at.Keys = mergeKeys(at.Keys, keys)
@@ -1028,8 +1042,12 @@ func LoadComposite(site SiteID, snapshot []byte) (*Composite, error) {
 	if !ok || string(magic) != string(compositeMagic[:]) {
 		return nil, ErrMalformed
 	}
-	if v, ok := r.bytes(1); !ok || v[0] != compositeSnapshotVersion {
+	v, ok := r.bytes(1)
+	if !ok {
 		return nil, ErrMalformed
+	}
+	if v[0] != compositeSnapshotVersion {
+		return nil, ErrUnknownFormat
 	}
 
 	c := NewComposite(site)

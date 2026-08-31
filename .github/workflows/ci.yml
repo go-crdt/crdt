@@ -10,7 +10,7 @@ on:
     # Remove this list in the change that merges the purge into main; it exists
     # only while the work lives off to one side.
     branches: [main, purge-what-nobody-can-read, purge-fix-the-fixtures, persist-the-purge-floor,
-               wire-the-purge-refusal]
+               wire-the-purge-refusal, purge-onto-version-8]
   pull_request:
     branches: [main]
 
@@ -23,8 +23,8 @@ jobs:
   gofmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - name: gofmt
@@ -44,8 +44,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - run: go version
@@ -70,13 +70,13 @@ jobs:
     name: js/wasm (node)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
       - name: Test as WebAssembly
         run: |
           GOOS=js GOARCH=wasm go test \
@@ -93,13 +93,13 @@ jobs:
     env:
       CRDT_TRACE: automerge-paper.json.gz
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - name: Cache the trace
         id: trace
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: automerge-paper.json.gz
           key: editing-trace-automerge-paper-v1
@@ -139,8 +139,8 @@ jobs:
           - { os: ubuntu-latest,    label: amd64 }
           - { os: ubuntu-24.04-arm, label: arm64 }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       - run: go env GOARCH && go test ./...
@@ -157,8 +157,8 @@ jobs:
           - { goarch: ppc64le, qemu: qemu-ppc64le-static }
           - { goarch: s390x,   qemu: qemu-s390x-static }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       # apt has sat on this step for the better part of an hour, more than once,
@@ -213,6 +213,7 @@ jobs:
           - { pkg: ".",           target: FuzzParseMapOps }
           - { pkg: ".",           target: FuzzLoadComposite }
           - { pkg: ".",           target: FuzzCompositeVersion }
+          - { pkg: ".",           target: FuzzCompositeClocks }
           - { pkg: ".",           target: FuzzParsePartOps }
           - { pkg: "./awareness", target: FuzzUpdate }
           - { pkg: "./structured", target: FuzzDecodeID }
@@ -222,8 +223,8 @@ jobs:
           - { pkg: "./structured", target: FuzzDecodeInt }
           - { pkg: "./structured", target: FuzzDecodeBool }
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version: stable
       # -parallel 2 rather than one worker per core.
@@ -269,7 +270,7 @@ jobs:
           exit 1
       - name: Upload any failing input
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-failure-${{ matrix.target }}
           path: testdata/fuzz/

@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"testing"
 )
@@ -346,6 +347,17 @@ func TestLoadAcceptsAHandBuiltPurgedRun(t *testing.T) {
 
 // A purged run may not reach past what its site has issued: with no text to
 // bound it, the version vector is the only thing that does.
+//
+// The first two cases below would be refused with or without that bound, by the
+// ledger a few lines later -- a run reaching past its site names operations the
+// vector never promised, and a snapshot that does not account for exactly the
+// operations it claims is refused whole. What the bound changes is *when*, and
+// the third case is the one that shows it: a purged run costs nothing in the
+// text column, so a crafted length is not held by the bytes the way every other
+// run's is, and reading one means writing out that many characters before
+// anything is checked. Take the bound away and that case does not fail, it
+// hangs. This was measured by taking it away: the case ran past a twenty-second
+// timeout, and the two above still passed.
 func TestLoadRefusesAPurgedRunPastItsVersion(t *testing.T) {
 	past := purgedRun()
 	past.runs[0].length = 9 // the vector promises eight
@@ -359,6 +371,14 @@ func TestLoadRefusesAPurgedRunPastItsVersion(t *testing.T) {
 	if _, err := Load(2, none.build()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("a purged run from a site with nothing issued loaded with %v, want ErrMalformed", err)
 	}
+
+	// A length no machine could hold, from a version vector small enough that
+	// nothing else in the snapshot bounds it.
+	huge := purgedRun()
+	huge.runs[0].length = 1 << 50
+	if _, err := Load(2, huge.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run of 2^50 characters loaded with %v, want ErrMalformed", err)
+	}
 }
 
 // The purged column holds a flag, and a flag is nought or one. Anything else
@@ -370,12 +390,26 @@ func TestLoadRefusesAPurgedFlagThatIsNeitherTrueNorFalse(t *testing.T) {
 	if _, err := Load(2, odd.build()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("a purged flag of 2 loaded with %v, want ErrMalformed", err)
 	}
+
+	// And a run that asks for a flag the column does not hold. This one is
+	// reached through the columns rather than through the builder, which is also
+	// what makes splitColumns count the thirteenth: a walk that stopped at
+	// twelve would leave the purge column in the tail, and this case would be
+	// emptying something else.
+	head, cols, tail := splitColumns(t, purgedRun().build())
+	if len(cols) != 13 {
+		t.Fatalf("a version 9 snapshot came apart into %d columns, want 13", len(cols))
+	}
+	cols[12] = []byte{columnGroups}
+	if _, err := Load(2, joinColumns(head, cols, tail)); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a run whose purge flag is missing loaded with %v, want ErrMalformed", err)
+	}
 }
 
 // A purged run in a document whose floor is zero could not have been written:
 // Purge sets the floor every time it discards anything. It is refused rather
 // than read, and that refusal is what lets the floor alone decide the format
-// version -- a document whose floor is zero has nothing version 7 exists to
+// version -- a document whose floor is zero has nothing version 9 exists to
 // say.
 func TestLoadRefusesAPurgedRunWithNoFloor(t *testing.T) {
 	// The control, so that the rejection below cannot be passing because the
@@ -386,7 +420,7 @@ func TestLoadRefusesAPurgedRunWithNoFloor(t *testing.T) {
 
 	orphan := purgedRun()
 	orphan.purgedBelow = 0
-	// Without this the builder would write version 6, which has no column to
+	// Without this the builder would write version 8, which has no column to
 	// carry the flag, and the run would not be purged at all.
 	orphan.asVersion = snapshotVersion
 	if _, err := Load(2, orphan.build()); !errors.Is(err, ErrMalformed) {
@@ -394,29 +428,29 @@ func TestLoadRefusesAPurgedRunWithNoFloor(t *testing.T) {
 	}
 }
 
-// Version 7 is written by a document that has purged, and by nothing else.
+// Version 9 is written by a document that has purged, and by nothing else.
 //
 // This is the compatibility story, and it is the one this package has learnt
 // twice: understand before write. #83 taught a text and a list to understand a
 // superseded run in one release so that a later one could send it, and
 // go-crdt/collab#98 added a required field to the wire and broke three
 // transports that had not been rebuilt. A snapshot version is the same hazard
-// with a longer memory, because bytes are stored: a build that writes version 7
+// with a longer memory, because bytes are stored: a build that writes version 9
 // hands them to whatever reads next, which may be an older build or an older
 // peer.
 //
-// So Load understands version 7 from this release, and Snapshot writes it only
-// for a document whose owner asked for something version 6 cannot say. Nothing
+// So Load understands version 9 from this release, and Snapshot writes it only
+// for a document whose owner asked for something version 8 cannot say. Nothing
 // stored by a build that merely contains Purge is unreadable by one that does
 // not, unless somebody called Purge.
-func TestOnlyAPurgedDocumentWritesVersionSeven(t *testing.T) {
+func TestOnlyAPurgedDocumentWritesVersionNine(t *testing.T) {
 	doc := revisedText(t, 40)
 	before := doc.Snapshot()
-	if got := before[len(snapshotMagic)]; got != snapshotVersionV6 {
-		t.Fatalf("a document that never purged wrote version %d, want %d", got, snapshotVersionV6)
+	if got := before[len(snapshotMagic)]; got != snapshotVersionV8 {
+		t.Fatalf("a document that never purged wrote version %d, want %d", got, snapshotVersionV8)
 	}
-	if !columnsFit(t, before, 9) || columnsFit(t, before, 10) {
-		t.Fatal("a document that never purged did not write nine columns -- it is either " +
+	if !columnsFit(t, before, 12) || columnsFit(t, before, 13) {
+		t.Fatal("a document that never purged did not write twelve columns -- it is either " +
 			"paying for a column it has nothing to put in, or short of one")
 	}
 
@@ -428,8 +462,8 @@ func TestOnlyAPurgedDocumentWritesVersionSeven(t *testing.T) {
 	if got := after[len(snapshotMagic)]; got != snapshotVersion {
 		t.Fatalf("a purged document wrote version %d, want %d", got, snapshotVersion)
 	}
-	if !columnsFit(t, after, 10) || columnsFit(t, after, 9) {
-		t.Fatal("a purged document did not write ten columns")
+	if !columnsFit(t, after, 13) || columnsFit(t, after, 12) {
+		t.Fatal("a purged document did not write thirteen columns")
 	}
 
 	// Both round-trip, which is what says the two versions are one format and
@@ -437,7 +471,7 @@ func TestOnlyAPurgedDocumentWritesVersionSeven(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		data []byte
-	}{{"version 6", before}, {"version 7", after}} {
+	}{{"version 8", before}, {"version 9", after}} {
 		back, err := Load(2, c.data)
 		if err != nil {
 			t.Fatalf("%s did not load: %v", c.name, err)
@@ -447,8 +481,106 @@ func TestOnlyAPurgedDocumentWritesVersionSeven(t *testing.T) {
 		}
 	}
 
-	// What version 6 saves a document that never purged: the floor, the tenth
-	// column's length prefix, and one flag per run.
-	t.Logf("%d runs; version 6 costs %d bytes, and would have paid about %d more in version 7",
-		runs, len(before), runs+2)
+	// What the bump still saves a document that never purged, which under
+	// version 8's groups is now a handful of bytes rather than one per run: a
+	// column of nought repeated is a count and a value, whatever the count.
+	// The bump is kept for the compatibility above and not for these.
+	zeros := make([]uint64, runs)
+	col := len(groupColumn(zeros)) + 1
+	saved := col + len(binary.AppendUvarint(nil, uint64(col))) + 1
+	t.Logf("%d runs; version 8 costs %d bytes, and would have paid %d more in version 9",
+		runs, len(before), saved)
+	if saved > 16 {
+		t.Fatalf("the flag column costs %d bytes on a column of one repeated value, "+
+			"which is not what version 8's groups are for", saved)
+	}
+}
+
+// A purged run that is not a whole block once it has landed is refused.
+//
+// The writer only ever produces maximal runs, so no honest snapshot cuts one in
+// two; a crafted one can, and the halves integrate into a single block, because
+// that is what consecutive characters from one site do. The flag then names
+// characters the block does not end at, and there is nothing to discard that is
+// not also somebody else's. Reached by splitting the run rather than by
+// reasoning about the check: what makes the block wider than the run is the
+// second half naming the first half's last character as its origin.
+func TestLoadRefusesAPurgedRunThatIsNotAWholeBlock(t *testing.T) {
+	// Four characters from one site, written as two runs, the second purged:
+	// four insertions and two deletions, so the vector promises six.
+	split := runBuilder{
+		sites:       [][2]uint64{{1, 6}},
+		purgedBelow: 4,
+		runs: []encodedRun{
+			{site: 1, seq: 1, clock: 1, text: []rune("ab")},
+			{
+				site: 1, seq: 3, clock: 3, originSite: 1, originSeq: 2,
+				purged: true, length: 2,
+				dels: [][4]uint64{{0, 2, 1, 5}}, // both of them, from 5@1
+			},
+		},
+	}
+	if _, err := Load(2, split.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run that is half a block loaded with %v, want ErrMalformed", err)
+	}
+
+	// The same two runs with the second left alone load, which is what says the
+	// refusal above is about the purge and not about the split.
+	whole := split
+	whole.purgedBelow = 0
+	whole.runs = append([]encodedRun{}, split.runs...)
+	whole.runs[1].purged = false
+	whole.runs[1].length = 0
+	whole.runs[1].text = []rune("cd")
+	if _, err := Load(2, whole.build()); err != nil {
+		t.Fatalf("the same snapshot without the purge did not load: %v", err)
+	}
+}
+
+// A composite carrying a text that has purged says so.
+//
+// It is what stops the fuzzer expecting a newcomer to reproduce such a
+// document's bytes: what a purge took is in no operation, so a peer replaying
+// the history rebuilds the characters and the two snapshots differ there. The
+// same shape as Composite.collected, and true for the same reason.
+//
+// This was covered by a fuzz corpus entry alone until version 7 became version
+// 9, at which point the entry stopped decoding and the branch stopped being
+// reached while every test still passed. A named case is what says so out loud.
+func TestACompositeKnowsOneOfItsTextsHasPurged(t *testing.T) {
+	c := NewComposite(1)
+	part, err := c.Text("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Insert(0, "abcd"); err != nil {
+		t.Fatal(err)
+	}
+	if c.purged() {
+		t.Fatal("a composite that has purged nothing says it has")
+	}
+	if _, err := part.Delete(0, 4); err != nil {
+		t.Fatal(err)
+	}
+	if part.Purge() == 0 {
+		t.Fatal("nothing was purged, so this proves nothing")
+	}
+	if !c.purged() {
+		t.Fatal("a composite whose text has purged says it has not")
+	}
+
+	loaded, err := LoadComposite(2, c.Snapshot())
+	if err != nil {
+		t.Fatalf("LoadComposite: %v", err)
+	}
+	if !loaded.purged() {
+		t.Fatal("the purge did not survive the composite's snapshot")
+	}
+	replayed := NewComposite(3)
+	if err := replayed.Apply(loaded.OpsSince(nil)...); err != nil {
+		t.Fatalf("replaying the history was rejected: %v", err)
+	}
+	if replayed.purged() {
+		t.Fatal("a newcomer inherited a purge nothing sent it")
+	}
 }

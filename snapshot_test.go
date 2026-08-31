@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
+	"math/rand/v2"
 	"os"
 	"strings"
 	"testing"
@@ -345,17 +346,17 @@ type encodedRun struct {
 	length                                  uint64 // overrides the encoded length
 	dels                                    [][4]uint64
 	delCount                                int    // overrides the encoded number of deletions
-	purged                                  bool   // version 7: its characters were discarded
+	purged                                  bool   // version 9: its characters were discarded
 	purgedFlag                              uint64 // overrides the encoded flag
 }
 
 func (b runBuilder) build() []byte {
 	out := append([]byte{}, "crdt"...)
 	// The version the writer would choose for this document, so that a fixture
-	// is comparable byte for byte with what Snapshot produces: version 7 only
-	// when there is a purge floor to write, and version 6 otherwise. See
+	// is comparable byte for byte with what Snapshot produces: version 9 only
+	// when there is a purge floor to write, and version 8 otherwise. See
 	// Doc.formatVersion.
-	version := byte(snapshotVersionV6)
+	version := byte(snapshotVersionV8)
 	if b.purgedBelow != 0 {
 		version = snapshotVersion
 	}
@@ -395,7 +396,7 @@ func (b runBuilder) build() []byte {
 		}
 	}
 	if version >= snapshotVersion {
-		// Version 7: the purge floor. A fixture that purged nothing writes zero,
+		// Version 9: the purge floor. A fixture that purged nothing writes zero,
 		// which is what a document that never called Purge writes.
 		out = binary.AppendUvarint(out, b.purgedBelow)
 	}
@@ -409,69 +410,127 @@ func (b runBuilder) build() []byte {
 	// what a reader of the test wants to see; the encodings are applied here.
 	// Version 4 writes the two sequence numbers as steps and the clock as the
 	// distance above the run's own sequence. Version 5 writes each field in a
-	// column of its own, which is the same bytes in a different order.
+	// column of its own, which is the same bytes in a different order; version
+	// 8 writes the deletion fields in four columns rather than one, and every
+	// column in groups rather than one value at a time.
 	//
 	// A case that asks for a clock below the sequence — which no honest replica
 	// can produce — still encodes: the subtraction wraps, and the enormous
 	// distance is refused against the ceiling instead of against the sequence.
 	// The case still fails to load, which is what it asserts.
-	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields, purged []byte
+	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts []uint64
+	var delGaps, delSpans, delSites, delSeqs, purged []uint64
 	for _, r := range b.runs {
-		runSites = binary.AppendUvarint(runSites, r.site)
-		flag := uint64(boolByte(r.purged))
+		runSites = append(runSites, r.site)
+		flag := boolByte(r.purged)
 		if r.purgedFlag != 0 {
 			flag = r.purgedFlag
 		}
-		purged = binary.AppendUvarint(purged, flag)
-		seqs = binary.AppendUvarint(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
+		purged = append(purged, flag)
+		seqs = append(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
 		lastRun[SiteID(r.site)] = r.seq
-		clocks = binary.AppendUvarint(clocks, r.clock-r.seq)
-		oSites = binary.AppendUvarint(oSites, r.originSite)
-		oSeqs = binary.AppendUvarint(oSeqs, zigzag(int64(r.originSeq)-int64(lastOrigin[SiteID(r.originSite)])))
+		clocks = append(clocks, r.clock-r.seq)
+		oSites = append(oSites, r.originSite)
+		oSeqs = append(oSeqs, zigzag(int64(r.originSeq)-int64(lastOrigin[SiteID(r.originSite)])))
 		lastOrigin[SiteID(r.originSite)] = r.originSeq
 		length := r.length
 		if length == 0 {
 			length = uint64(len(r.text))
 		}
-		lengths = binary.AppendUvarint(lengths, length)
+		lengths = append(lengths, length)
 		for _, ch := range r.text {
-			text = binary.AppendUvarint(text, uint64(ch))
+			text = append(text, uint64(ch))
 		}
 		dn := r.delCount
 		if dn == 0 {
 			dn = len(r.dels)
 		}
-		delCounts = binary.AppendUvarint(delCounts, uint64(dn))
+		delCounts = append(delCounts, uint64(dn))
 		for _, d := range r.dels {
-			delFields = binary.AppendUvarint(delFields, d[0])
-			delFields = binary.AppendUvarint(delFields, d[1])
-			delFields = binary.AppendUvarint(delFields, d[2])
+			delGaps = append(delGaps, d[0])
+			delSpans = append(delSpans, d[1])
+			delSites = append(delSites, d[2])
 			site := SiteID(d[2])
-			delFields = binary.AppendUvarint(delFields, zigzag(int64(d[3])-int64(lastDel[site])))
+			delSeqs = append(delSeqs, zigzag(int64(d[3])-int64(lastDel[site])))
 			lastDel[site] = d[3]
 		}
 	}
-	// Version 5 writes each field in a column of its own, length-prefixed.
-	//
-	// There is no branch here for the versions before it. This builder only
-	// ever produced the current format — nothing has ever set b.ver — and an
-	// interleaved branch that has never run is a branch that is wrong. The
-	// older formats are covered by fixtures written by the builds that
-	// produced them, which is a stronger check than a builder imitating them.
-	cols := [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields}
-	if version >= snapshotVersion {
-		// Version 7's addition, and the reader asks for it by version, so a
-		// fixture that did not write it would be short a column rather than
-		// describing an older format.
-		cols = append(cols, purged)
-	}
-	for _, col := range cols {
-		out = binary.AppendUvarint(out, uint64(len(col)))
-		out = append(out, col...)
+	if version >= snapshotVersionV8 {
+		// Version 8: twelve columns, each an encoding byte and then its groups.
+		cols := [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
+			lengths, text, delCounts, delGaps, delSpans, delSites, delSeqs}
+		if version >= snapshotVersion {
+			// Version 9's addition, and the reader asks for it by version, so a
+			// fixture that did not write it would be short a column rather than
+			// describing an older format.
+			cols = append(cols, purged)
+		}
+		for _, col := range cols {
+			out = appendColumn(out, groupColumn(col))
+		}
+	} else {
+		// Versions 5 and 6: nine plain columns, the deletion fields written as
+		// one stream of gap, span, site and step over and over.
+		var delFields []uint64
+		for i := range delGaps {
+			delFields = append(delFields, delGaps[i], delSpans[i], delSites[i], delSeqs[i])
+		}
+		for _, col := range [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
+			lengths, text, delCounts, delFields} {
+			var enc []byte
+			for _, v := range col {
+				enc = binary.AppendUvarint(enc, v)
+			}
+			out = binary.AppendUvarint(out, uint64(len(enc)))
+			out = append(out, enc...)
+		}
 	}
 
 	out = binary.AppendUvarint(out, 0) // no duplicate deletions
 	return append(out, b.tail...)
+}
+
+// groupColumn writes a column the way version 8 does, and is deliberately not
+// the encoder the package uses: a fixture that shares its encoder with the code
+// under test agrees with it about everything, including its mistakes. What pins
+// this one to the real format is TestABuiltRunIsWhatARealDocumentWrites, which
+// puts its bytes beside a document that was actually typed.
+func groupColumn(vs []uint64) []byte {
+	var out []byte
+	var lit []uint64
+	flushLit := func() {
+		if len(lit) == 0 {
+			return
+		}
+		out = binary.AppendUvarint(out, zigzag(-int64(len(lit))))
+		for _, v := range lit {
+			out = binary.AppendUvarint(out, v)
+		}
+		lit = lit[:0]
+	}
+	for i := 0; i < len(vs); {
+		j := i
+		for j+1 < len(vs) && vs[j+1] == vs[i] {
+			j++
+		}
+		if n := j - i + 1; n >= runThreshold {
+			flushLit()
+			out = binary.AppendUvarint(out, zigzag(int64(n)))
+			out = binary.AppendUvarint(out, vs[i])
+		} else {
+			lit = append(lit, vs[i:j+1]...)
+		}
+		i = j + 1
+	}
+	flushLit()
+	return out
+}
+
+// appendColumn frames one column: its length, its encoding byte, its groups.
+func appendColumn(out, groups []byte) []byte {
+	out = binary.AppendUvarint(out, uint64(len(groups)+1))
+	out = append(out, columnGroups)
+	return append(out, groups...)
 }
 
 // wellFormedRun is a four-character run from site 1 with its third character
@@ -604,11 +663,11 @@ func TestLoadReadsASnapshotWrittenByVersionOne(t *testing.T) {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
 	fresh := d.Snapshot()
-	// Version 6, not the current one: version 7 is written only by a document
+	// Version 8, not the current one: version 9 is written only by a document
 	// that has purged, so that a build which merely understands it never hands
 	// an older reader bytes it cannot parse. See Doc.formatVersion.
-	if fresh[4] != snapshotVersionV6 {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV6)
+	if fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 	again, err := Load(7, fresh)
 	if err != nil {
@@ -662,11 +721,11 @@ func TestLoadReadsASnapshotWrittenByVersionThree(t *testing.T) {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
 	fresh := d.Snapshot()
-	// Version 6, not the current one: version 7 is written only by a document
+	// Version 8, not the current one: version 9 is written only by a document
 	// that has purged, so that a build which merely understands it never hands
 	// an older reader bytes it cannot parse. See Doc.formatVersion.
-	if fresh[4] != snapshotVersionV6 {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV6)
+	if fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 	again, err := Load(7, fresh)
 	if err != nil {
@@ -727,11 +786,11 @@ func TestLoadReadsASnapshotWrittenByVersionTwo(t *testing.T) {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
 	fresh := d.Snapshot()
-	// Version 6, not the current one: version 7 is written only by a document
+	// Version 8, not the current one: version 9 is written only by a document
 	// that has purged, so that a build which merely understands it never hands
 	// an older reader bytes it cannot parse. See Doc.formatVersion.
-	if fresh[4] != snapshotVersionV6 {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV6)
+	if fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 	again, err := Load(7, fresh)
 	if err != nil {
@@ -764,19 +823,139 @@ func TestLoadRejectsTruncatedVersionTwoSnapshots(t *testing.T) {
 	}
 }
 
-// columnsAt returns the offset at which a snapshot's columns begin, by walking
-// the header field by field.
+// columnsFit reports whether a snapshot holds exactly n length-prefixed
+// columns, by walking n of them and requiring that what follows is an empty
+// duplicate-deletion table and the end of the bytes.
 //
-// Walking rather than counting is not a nicety: a byte counted wrong lands every
-// alteration below in the wrong field, and the loader then refuses for a reason
-// none of the cases is about. Which fields are there depends on the version --
-// version 6 added the collection floor and the tallies, version 7 the purge
-// floor -- so the version in the bytes decides, and a fixture written in one
-// version cannot be walked by a header written for another.
-func columnsAt(t *testing.T, good []byte) int {
+// Exactly, rather than at least: a column is length-prefixed, so a walk that
+// stops counting when it runs out reads the duplicate count as one more empty
+// column and answers one too many. Requiring the end to line up is what makes
+// the answer mean something -- these fixtures carry no duplicates, so anything
+// but a zero and an empty buffer says the walk landed somewhere else.
+func columnsFit(t *testing.T, good []byte, n int) bool {
 	t.Helper()
-	version := good[len(snapshotMagic)]
-	r := &reader{buf: good[len(snapshotMagic)+1:]}
+	r := &reader{buf: good[columnsStart(t, good):]}
+	for range n {
+		size, ok := r.uvarint()
+		if !ok {
+			return false
+		}
+		if _, ok := r.bytes(int(size)); !ok {
+			return false
+		}
+	}
+	nDups, ok := r.uvarint()
+	return ok && nDups == 0 && len(r.buf) == 0
+}
+
+// A snapshot is a row of length-prefixed columns, and each of the ways that can
+// be wrong has to be refused rather than half-read.
+//
+// These are failure modes the format did not have before columns: interleaved
+// fields end where the runs end, but a column carries its own length and can
+// claim more bytes than exist, or fewer than the runs need, or more than they
+// use. The last is the one worth stating: bytes left over in a column describe
+// runs the count did not claim, which would make two byte strings for one
+// document.
+//
+// Both column counts are exercised, because there are two: version 8 writes
+// twelve and version 9 a thirteenth, and a document is written in whichever it
+// needs. Running these against one of them only would leave the other's column
+// bookkeeping unchecked -- and the header walk these all depend on has one more
+// field to step over in version 9, which is precisely the mistake that has been
+// made here before.
+func TestLoadRejectsMalformedColumns(t *testing.T) {
+	for _, fixture := range []struct {
+		name string
+		b    runBuilder
+	}{
+		{"version 8, twelve columns", wellFormedRun()},
+		{"version 9, thirteen columns", purgedRun()},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			rejectsMalformedColumns(t, fixture.b.build())
+		})
+	}
+}
+
+func rejectsMalformedColumns(t *testing.T, good []byte) {
+	t.Helper()
+	if _, err := Load(2, good); err != nil {
+		t.Fatalf("the fixture does not load: %v", err)
+	}
+	colsAt := columnsStart(t, good)
+
+	tests := []struct {
+		name  string
+		alter func([]byte) []byte
+	}{
+		{"a column claiming more bytes than the snapshot holds", func(b []byte) []byte {
+			out := append([]byte{}, b[:colsAt]...)
+			out = binary.AppendUvarint(out, 1<<20)
+			return append(out, b[colsAt+1:]...)
+		}},
+		{"a column cut short", func(b []byte) []byte {
+			// Drop the last byte of the last column, so its length overruns.
+			return b[:len(b)-2]
+		}},
+		{"a column of no bytes at all", func(b []byte) []byte {
+			// Not even the encoding byte. A column is at least that, so this is
+			// a missing column rather than an empty one.
+			out := append([]byte{}, b[:colsAt]...)
+			out = binary.AppendUvarint(out, 0)
+			return append(out, b[colsAt+1:]...)
+		}},
+		{"a column that runs out before the runs do", func(b []byte) []byte {
+			// The run count still says one, and the column of sites holds no
+			// values: the field the first run needs is simply not there.
+			// Nothing about the length is wrong, which is what makes this a
+			// different refusal from the ones around it.
+			head, cols, tail := splitColumns(t, b)
+			cols[0] = []byte{columnGroups}
+			return joinColumns(head, cols, tail)
+		}},
+		{"a column with values to spare", func(b []byte) []byte {
+			// Two sites where there is one run: the column is longer than the
+			// count consumes, and what is left over is a run nobody claimed.
+			head, cols, tail := splitColumns(t, b)
+			cols[0] = append([]byte{columnGroups}, groupColumn([]uint64{1, 2})...)
+			return joinColumns(head, cols, tail)
+		}},
+		{"an encoding nothing defines", func(b []byte) []byte {
+			head, cols, tail := splitColumns(t, b)
+			cols[0][0] = columnDeflated + 1
+			return joinColumns(head, cols, tail)
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := Load(2, tt.alter(append([]byte{}, good...))); !errors.Is(err, ErrMalformed) {
+				t.Fatalf("Load() = %v, want ErrMalformed", err)
+			}
+		})
+	}
+}
+
+// columnsStart walks a snapshot's header byte by byte and says where the
+// columns begin.
+//
+// Walking it is not optional and it is not a formality: a byte counted wrong
+// lands every alteration above in the wrong field, and the loader then refuses
+// for a reason none of the cases is about — so the tests keep passing while
+// testing nothing. It happened here once, to a walk that read the collection
+// tally and the purge floor as column lengths and every column after them from
+// the wrong offset, and the case still passed, because landing anywhere in a
+// snapshot produces some rejection. Every field the header grows has to be
+// stepped over here.
+//
+// Which fields are there depends on the version — version 6 added the
+// collection floor and the tallies, version 9 the purge floor — so the version
+// in the bytes decides, and a fixture written in one version cannot be walked
+// by a header written for another.
+func columnsStart(t *testing.T, snap []byte) int {
+	t.Helper()
+	version := snap[len(snapshotMagic)]
+	r := &reader{buf: snap[len(snapshotMagic)+1:]}
 	nSites, _ := r.uvarint()
 	for range nSites {
 		r.uvarint()
@@ -795,109 +974,50 @@ func columnsAt(t *testing.T, good []byte) int {
 		}
 	}
 	if version >= snapshotVersion {
-		r.uvarint() // version 7: the purge floor
+		r.uvarint() // version 9: the purge floor
 	}
 	r.uvarint() // the run count
-	return len(good) - len(r.buf)
+	return len(snap) - len(r.buf)
 }
 
-// columnsFit reports whether a snapshot holds exactly n length-prefixed
-// columns, by walking n of them and requiring that what follows is an empty
-// duplicate-deletion table and the end of the bytes.
-//
-// Exactly, rather than at least: a column is length-prefixed, so a walk that
-// stops counting when it runs out reads the duplicate count as one more empty
-// column and answers one too many. Requiring the end to line up is what makes
-// the answer mean something -- these fixtures carry no duplicates, so anything
-// but a zero and an empty buffer says the walk landed somewhere else.
-func columnsFit(t *testing.T, good []byte, n int) bool {
+// snapshotColumns is how many columns a snapshot of this version holds, which
+// version 9 grows by one. splitColumns has to know, or it reads the duplicate
+// deletion table as a thirteenth column and puts the snapshot back wrong.
+func snapshotColumns(snap []byte) int {
+	c := columns{withPurged: snap[len(snapshotMagic)] >= snapshotVersion}
+	return len(c.all())
+}
+
+// splitColumns takes a version 8 snapshot apart into what comes before the
+// columns, the twelve column payloads, and what comes after them, so that a
+// test can replace one column without counting bytes around it.
+func splitColumns(t *testing.T, snap []byte) ([]byte, [][]byte, []byte) {
 	t.Helper()
-	r := &reader{buf: good[columnsAt(t, good):]}
-	for range n {
-		size, ok := r.uvarint()
+	at := columnsStart(t, snap)
+	r := &reader{buf: snap[at:]}
+	var cols [][]byte
+	for range snapshotColumns(snap) {
+		n, ok := r.uvarint()
 		if !ok {
-			return false
+			t.Fatalf("the snapshot has no length for column %d", len(cols))
 		}
-		if _, ok := r.bytes(int(size)); !ok {
-			return false
+		buf, ok := r.bytes(int(n))
+		if !ok {
+			t.Fatalf("column %d claims %d bytes and has fewer", len(cols), n)
 		}
+		cols = append(cols, append([]byte{}, buf...))
 	}
-	nDups, ok := r.uvarint()
-	return ok && nDups == 0 && len(r.buf) == 0
+	return snap[:at], cols, r.buf
 }
 
-// A version 5 snapshot is nine length-prefixed columns, and each of the ways
-// that can be wrong has to be refused rather than half-read.
-//
-// These are failure modes the format did not have before: interleaved fields
-// end where the runs end, but a column carries its own length and can claim
-// more bytes than exist, or fewer than the runs need, or more than they use.
-// The last is the one worth stating: bytes left over in a column describe runs
-// the count did not claim, which would make two byte strings for one document.
-//
-// Both column counts are exercised, because there are two: version 6 writes
-// nine and version 7 a tenth, and a document is written in whichever it needs.
-// Running these against one of them only would leave the other's column
-// bookkeeping unchecked.
-func TestLoadRejectsMalformedColumns(t *testing.T) {
-	for _, fixture := range []struct {
-		name string
-		b    runBuilder
-	}{
-		{"version 6, nine columns", wellFormedRun()},
-		{"version 7, ten columns", purgedRun()},
-	} {
-		t.Run(fixture.name, func(t *testing.T) {
-			rejectsMalformedColumns(t, fixture.b.build())
-		})
+// joinColumns puts back what splitColumns took apart.
+func joinColumns(head []byte, cols [][]byte, tail []byte) []byte {
+	out := append([]byte{}, head...)
+	for _, c := range cols {
+		out = binary.AppendUvarint(out, uint64(len(c)))
+		out = append(out, c...)
 	}
-}
-
-func rejectsMalformedColumns(t *testing.T, good []byte) {
-	t.Helper()
-	if _, err := Load(2, good); err != nil {
-		t.Fatalf("the fixture does not load: %v", err)
-	}
-	colsAt := columnsAt(t, good)
-
-	tests := []struct {
-		name  string
-		alter func([]byte) []byte
-	}{
-		{"a column claiming more bytes than the snapshot holds", func(b []byte) []byte {
-			out := append([]byte{}, b[:colsAt]...)
-			out = binary.AppendUvarint(out, 1<<20)
-			return append(out, b[colsAt+1:]...)
-		}},
-		{"a column cut short", func(b []byte) []byte {
-			// Drop the last byte of the last column, so its length overruns.
-			return b[:len(b)-2]
-		}},
-		{"a column that runs out before the runs do", func(b []byte) []byte {
-			// The run count still says one, and the column of sites is empty:
-			// the field the first run needs is simply not there. Nothing about
-			// the length is wrong, which is what makes this a different
-			// refusal from the three around it.
-			out := append([]byte{}, b[:colsAt]...)
-			out = binary.AppendUvarint(out, 0) // an empty sites column
-			return append(out, b[colsAt+2:]...)
-		}},
-		{"a column with bytes to spare", func(b []byte) []byte {
-			// One more site than there are runs: the column is longer than the
-			// count consumes, and what is left over is a run nobody claimed.
-			out := append([]byte{}, b[:colsAt]...)
-			out = binary.AppendUvarint(out, 2) // the sites column, now two bytes
-			out = append(out, b[colsAt+1], 9)  // its byte, and one nobody reads
-			return append(out, b[colsAt+2:]...)
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if _, err := Load(2, tt.alter(append([]byte{}, good...))); !errors.Is(err, ErrMalformed) {
-				t.Fatalf("Load() = %v, want ErrMalformed", err)
-			}
-		})
-	}
+	return append(out, tail...)
 }
 
 // Truncating a version 3 snapshot anywhere must fail, as truncating a version 1
@@ -921,31 +1041,18 @@ func TestLoadRejectsTruncatedVersionThreeSnapshots(t *testing.T) {
 }
 
 // A deletion whose fields run out part way through. The count says there is a
-// stretch to read and the column has room for a byte of it, so the refusal has
-// to come from the field that is missing rather than from the length.
+// stretch to read and the gap is there to be read, so the refusal has to come
+// from the field that is missing rather than from a length.
 func TestLoadRejectsADeletionCutOffMidField(t *testing.T) {
-	b := wellFormedRun()
-	good := b.build()
+	good := wellFormedRun().build()
 	if _, err := Load(2, good); err != nil {
 		t.Fatalf("the fixture does not load: %v", err)
 	}
-	// The deletion-fields column is the ninth, and the last one in the version
-	// this fixture is written in; keep one byte of it. The header is walked
-	// rather than counted -- it was counted here once, by a walk that read the
-	// collection tally and the purge floor as column lengths and every column
-	// after them from the wrong offset, and the case still passed, because
-	// landing anywhere in a snapshot produces some rejection.
-	r := &reader{buf: good[columnsAt(t, good):]}
-	for range 8 { // the eight columns before the deletion fields
-		n, _ := r.uvarint()
-		r.bytes(int(n))
-	}
-	at := len(good) - len(r.buf)
-	cut := append([]byte{}, good[:at]...)
-	cut = binary.AppendUvarint(cut, 1) // one byte of deletion fields
-	cut = append(cut, good[at+1])      // the gap, and nothing after it
-	cut = binary.AppendUvarint(cut, 0) // no duplicate deletions
-	if _, err := Load(2, cut); !errors.Is(err, ErrMalformed) {
+	head, cols, tail := splitColumns(t, good)
+	// The column of spans, emptied. Its gap is still there, and its site and
+	// its sequence step after it.
+	cols[9] = []byte{columnGroups}
+	if _, err := Load(2, joinColumns(head, cols, tail)); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("Load() = %v, want ErrMalformed", err)
 	}
 }
@@ -977,11 +1084,10 @@ func TestLoadStillAcceptsVersionFive(t *testing.T) {
 		t.Fatalf("version 5 keeps %d tombstones, the current version %d",
 			was.Tombstones(), now.Tombstones())
 	}
-	// Re-encoding an old snapshot writes version 6: nothing was collected in it,
-	// so its floor is empty, and nothing was purged, so it has nothing version 7
-	// exists to say. See Doc.formatVersion.
-	if fresh := was.Snapshot(); fresh[4] != snapshotVersionV6 {
-		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersionV6)
+	// Re-encoding an old snapshot writes version 8: nothing was purged in it, so
+	// it has nothing version 9 exists to say. See Doc.formatVersion.
+	if fresh := was.Snapshot(); fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 }
 
@@ -1024,5 +1130,35 @@ func TestLoadRejectsAMalformedCollectionHeader(t *testing.T) {
 				t.Fatalf("Load = %v, want ErrMalformed", err)
 			}
 		})
+	}
+}
+
+// The long branch of sortIDs orders exactly as the short one does. It has to:
+// the encodings depend on that order, and a document crosses the threshold
+// between them as it accumulates duplicate deletions.
+func TestBothSortsAgree(t *testing.T) {
+	r := rand.New(rand.NewPCG(7, 11))
+	for _, n := range []int{1, 2, 31, 32, 33, 200, 5000} {
+		ids := make([]ID, n)
+		for i := range ids {
+			ids[i] = ID{Site: SiteID(1 + r.IntN(9)), Seq: 1 + r.Uint64()%50}
+		}
+		mine := append([]ID(nil), ids...)
+		sortIDs(mine)
+
+		// The same list, ordered by the branch this one did not take: an
+		// insertion sort spelled out here rather than borrowed, so the two are
+		// not the same code agreeing with itself.
+		theirs := append([]ID(nil), ids...)
+		for i := 1; i < len(theirs); i++ {
+			for j := i; j > 0 && idLess(theirs[j], theirs[j-1]); j-- {
+				theirs[j], theirs[j-1] = theirs[j-1], theirs[j]
+			}
+		}
+		for i := range mine {
+			if mine[i] != theirs[i] {
+				t.Fatalf("%d ids: the two sorts disagree at %d: %v against %v", n, i, mine[i], theirs[i])
+			}
+		}
 	}
 }

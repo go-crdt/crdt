@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -288,7 +289,11 @@ func TestWhatAPeerCanWriteAndWhatItIsWorth(t *testing.T) {
 	r := NewMultiRegister(1)
 	mustSet(t, r, "mine")
 
-	raw := r.Map()
+	// Each of these is written by a replica that really is the site its key
+	// names, and applied here as an operation. Writing them through r.Map()
+	// instead would make them this replica's own writing under somebody else's
+	// key — which is refused, and refused for a reason, but it is not what a
+	// peer does and it would not test what this test is named for.
 	bad := map[string][]byte{
 		"not-a-site": encodeReading(map[crdt.SiteID]uint64{9: 1}, []byte("x"), false),
 		"9":          nil,                // no vector at all
@@ -307,7 +312,16 @@ func TestWhatAPeerCanWriteAndWhatItIsWorth(t *testing.T) {
 		"1000000001": encodeReading(nil, []byte("nowhere"), false),
 	}
 	for key, value := range bad {
-		if _, err := raw.Set(key, value); err != nil {
+		site := uint64(7) // for a key that names no site at all
+		if n, err := strconv.ParseUint(key, 10, 64); err == nil {
+			site = n
+		}
+		peer := NewMultiRegister(crdt.SiteID(site))
+		op, err := peer.Map().Set(key, value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.Apply(op); err != nil {
 			t.Fatal(err)
 		}
 	}
