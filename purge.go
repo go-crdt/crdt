@@ -90,3 +90,18 @@ func allDeleted(b *block) bool {
 	}
 	return covered == len(b.text)
 }
+
+// purged reports whether any text part has discarded characters, which is what
+// makes this document's bytes something a newcomer replaying its history cannot
+// reproduce: what a purge took is in no operation, and the floor it took them
+// under is in the snapshot and in no operation either.
+//
+// The same shape as [Composite.collected], and true for the same reason.
+func (c *Composite) purged() bool {
+	for _, d := range c.texts {
+		if d.purgedBelow > 0 {
+			return true
+		}
+	}
+	return false
+}

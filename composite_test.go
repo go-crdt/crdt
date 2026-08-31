@@ -1795,12 +1795,25 @@ func FuzzLoadComposite(f *testing.F) {
 		// that is in its snapshot and in no operation — so a newcomer replaying
 		// this history rebuilds what the document says while remembering no
 		// collection of its own, and its bytes differ there and only there.
-		if !loaded.collected() {
+		//
+		// A text that has purged is in the same position, and more plainly: the
+		// characters themselves are gone, and no operation carries them. A
+		// newcomer replaying such a history rebuilds a document that still has
+		// them. That is not a defect to fix here -- it is what readable exists
+		// to police, by refusing to serve a peer that would need them.
+		switch {
+		case loaded.collected():
+			if replayed.collected() {
+				t.Fatal("a newcomer inherited a collection nothing sent it")
+			}
+		case loaded.purged():
+			if replayed.purged() {
+				t.Fatal("a newcomer inherited a purge nothing sent it")
+			}
+		default:
 			if !bytes.Equal(replayed.Snapshot(), encoded) {
 				t.Fatal("replaying the history did not reproduce the state")
 			}
-		} else if replayed.collected() {
-			t.Fatal("a newcomer inherited a collection nothing sent it")
 		}
 	})
 }
