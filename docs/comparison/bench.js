@@ -24,6 +24,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const { gzipSync } = require('node:zlib')
 const { loadTrace, stats, ms, heapUsed } = require('./common')
 
 // Several of these packages block `require('pkg/package.json')` through their
@@ -54,8 +55,8 @@ const impls = {
     text: c => c.text.toString(),
     // V2 is the encoding dmonad/crdt-benchmarks reports as docSize; V1 is what
     // most Yjs deployments send on the wire. Both are recorded.
-    bytes: c => c.Y.encodeStateAsUpdateV2(c.doc).byteLength,
-    altBytes: c => c.Y.encodeStateAsUpdate(c.doc).byteLength,
+    encoded: c => c.Y.encodeStateAsUpdateV2(c.doc),
+    encodedAlt: c => c.Y.encodeStateAsUpdate(c.doc),
     free: c => c.doc.destroy(),
     jsHeap: true
   },
@@ -73,8 +74,8 @@ const impls = {
     text: c => c.text.toString(),
     // V2 is the encoding dmonad/crdt-benchmarks reports as docSize; V1 is what
     // most Yjs deployments send on the wire. Both are recorded.
-    bytes: c => c.Y.encodeStateAsUpdateV2(c.doc).byteLength,
-    altBytes: c => c.Y.encodeStateAsUpdate(c.doc).byteLength,
+    encoded: c => c.Y.encodeStateAsUpdateV2(c.doc),
+    encodedAlt: c => c.Y.encodeStateAsUpdate(c.doc),
     free: c => c.doc.destroy(),
     jsHeap: true
   },
@@ -93,8 +94,8 @@ const impls = {
     text: c => c.text.toString(),
     // V2 is the encoding dmonad/crdt-benchmarks reports as docSize; V1 is what
     // most Yjs deployments send on the wire. Both are recorded.
-    bytes: c => c.Y.encodeStateAsUpdateV2(c.doc).byteLength,
-    altBytes: c => c.Y.encodeStateAsUpdate(c.doc).byteLength,
+    encoded: c => c.Y.encodeStateAsUpdateV2(c.doc),
+    encodedAlt: c => c.Y.encodeStateAsUpdate(c.doc),
     free: c => c.doc.destroy(),
     jsHeap: true
   },
@@ -117,7 +118,7 @@ const impls = {
       return c
     },
     text: c => c.doc.text,
-    bytes: c => c.A.save(c.doc).byteLength,
+    encoded: c => c.A.save(c.doc),
     free: () => {},
     jsHeap: false // the document lives in WebAssembly memory, not the V8 heap
   },
@@ -136,7 +137,7 @@ const impls = {
       return c
     },
     text: c => c.doc.text,
-    bytes: c => c.A.save(c.doc).byteLength,
+    encoded: c => c.A.save(c.doc),
     free: () => {},
     jsHeap: false
   },
@@ -161,7 +162,7 @@ const impls = {
       return c
     },
     text: c => c.doc.text(c.text),
-    bytes: c => c.doc.save().byteLength,
+    encoded: c => c.doc.save(),
     free: c => c.doc.free(),
     jsHeap: false
   },
@@ -186,7 +187,7 @@ const impls = {
       return c
     },
     text: c => c.text.toString(),
-    bytes: c => c.doc.export({ mode: 'snapshot' }).byteLength,
+    encoded: c => c.doc.export({ mode: 'snapshot' }),
     free: () => {},
     jsHeap: false
   },
@@ -208,7 +209,7 @@ const impls = {
       return c
     },
     text: c => c.doc.get(),
-    bytes: c => c.doc.toBytes().byteLength,
+    encoded: c => c.doc.toBytes(),
     free: c => c.doc.free(),
     jsHeap: false // WebAssembly memory again
   }
@@ -269,7 +270,7 @@ function main () {
       held_bytes: held,
       held_kib: +(held / 1024).toFixed(0),
       bytes_per_char: +(held / text.length).toFixed(2),
-      serialized_bytes: impl.bytes(c)
+      serialized_bytes: impl.encoded(c).byteLength
     }))
     global.__keep = c // the reading above must not be of a collected document
     return
@@ -288,8 +289,8 @@ function main () {
     text = impl.text(c)
     if (expected === null) expected = text
     if (text !== expected) throw new Error(`run ${r}: replayed text does not match`)
-    serialized = impl.bytes(c)
-    if (impl.altBytes) alt = impl.altBytes(c)
+    serialized = impl.encoded(c)
+    if (impl.encodedAlt) alt = impl.encodedAlt(c)
     impl.free(c)
   }
 
@@ -304,8 +305,16 @@ function main () {
     median_ms: +ms(t.median).toFixed(2),
     max_ms: +ms(t.max).toFixed(2),
     median_ns_per_edit: +(Number(t.median) / patches.length).toFixed(1),
-    serialized_bytes: serialized,
-    ...(alt === null ? {} : { serialized_bytes_alt: alt })
+    serialized_bytes: serialized.byteLength,
+    // The same document through gzip -6, which is what a store or a transport
+    // would apply on top. A format that has already removed its own redundancy
+    // has little left to give here, so the ratio says more than either number:
+    // it is how much a general-purpose compressor still finds.
+    gzipped_bytes: gzipSync(Buffer.from(serialized), { level: 6 }).length,
+    ...(alt === null ? {} : {
+      serialized_bytes_alt: alt.byteLength,
+      gzipped_bytes_alt: gzipSync(Buffer.from(alt), { level: 6 }).length
+    })
   }))
 }
 
