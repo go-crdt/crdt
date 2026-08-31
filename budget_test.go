@@ -84,15 +84,23 @@ func TestSnapshotBudget(t *testing.T) {
 	// unaccounted for here is the whole of what this test exists to catch.
 	header += uvarint(0) + uvarint(0)
 
-	// Version 7 adds the purge floor, which is zero in a document that never
-	// purged -- one byte, and one byte unaccounted for is what this catches.
-	header += uvarint(d.purgedBelow)
+	// Version 7 adds the purge floor and a flag per run, and this document has
+	// purged nothing, so it is written in version 6 and pays for neither. The
+	// accounting follows the writer rather than the constant -- see
+	// Doc.formatVersion -- because a version this document does not write is a
+	// version whose fields are not in these bytes.
+	version := d.formatVersion()
+	if version == snapshotVersion {
+		header += uvarint(d.purgedBelow)
+	}
 
 	runs := d.runs()
 	runCount += uvarint(uint64(len(runs)))
 	for _, r := range runs {
 		colSites += uvarint(uint64(r.id.Site))
-		colPurged += uvarint(boolByte(r.gone))
+		if version == snapshotVersion {
+			colPurged += uvarint(boolByte(r.gone))
+		}
 		colSeqs += uvarint(zigzag(int64(r.id.Seq) - int64(lastRunSeq2[r.id.Site])))
 		ids += uvarint(uint64(r.id.Site)) + uvarint(zigzag(int64(r.id.Seq)-int64(lastRunSeq2[r.id.Site])))
 		lastRunSeq2[r.id.Site] = r.id.Seq
@@ -149,14 +157,18 @@ func TestSnapshotBudget(t *testing.T) {
 	// Version 5 length-prefixes each of its columns, which is what lets whoever
 	// stores a snapshot take them apart and compress them one at a time — worth
 	// three kilobytes against compressing the whole thing at once. Version 7
-	// adds a tenth, one flag per run. Those lengths are part of the file, so
-	// they are part of this sum; the accounting was short by exactly them, and
-	// said so.
-	for _, n := range []int{colSites, colSeqs, colClocks, colOSites, colOSeqs,
-		colLengths, colText, colDelCounts, colDelFields, colPurged} {
+	// adds a tenth, one flag per run, for a document that has purged. Those
+	// lengths are part of the file, so they are part of this sum; the accounting
+	// was short by exactly them, and said so.
+	lengths := []int{colSites, colSeqs, colClocks, colOSites, colOSeqs,
+		colLengths, colText, colDelCounts, colDelFields}
+	if version == snapshotVersion {
+		lengths = append(lengths, colPurged)
+		runCount += colPurged
+	}
+	for _, n := range lengths {
 		runCount += uvarint(uint64(n))
 	}
-	runCount += colPurged
 
 	total := len(d.Snapshot())
 	parts := []struct {

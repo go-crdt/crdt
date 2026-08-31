@@ -129,6 +129,7 @@ func TestLoadRefusesAPurgedRunThatIsStillPartlyAlive(t *testing.T) {
 	// Four characters, one deletion covering one of them, and the run claiming
 	// its characters were discarded. The other three have nothing behind them.
 	partly := wellFormedRun()
+	partly.purgedBelow = 4 // the floor a purge of this run would have left
 	partly.runs[0].purged = true
 	partly.runs[0].text = nil // a purged run costs nothing in the text column
 	partly.runs[0].length = 4
@@ -369,4 +370,85 @@ func TestLoadRefusesAPurgedFlagThatIsNeitherTrueNorFalse(t *testing.T) {
 	if _, err := Load(2, odd.build()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("a purged flag of 2 loaded with %v, want ErrMalformed", err)
 	}
+}
+
+// A purged run in a document whose floor is zero could not have been written:
+// Purge sets the floor every time it discards anything. It is refused rather
+// than read, and that refusal is what lets the floor alone decide the format
+// version -- a document whose floor is zero has nothing version 7 exists to
+// say.
+func TestLoadRefusesAPurgedRunWithNoFloor(t *testing.T) {
+	// The control, so that the rejection below cannot be passing because the
+	// fixture was wrong in some other way.
+	if _, err := Load(2, purgedRun().build()); err != nil {
+		t.Fatalf("the fixture it varies from does not load: %v", err)
+	}
+
+	orphan := purgedRun()
+	orphan.purgedBelow = 0
+	// Without this the builder would write version 6, which has no column to
+	// carry the flag, and the run would not be purged at all.
+	orphan.asVersion = snapshotVersion
+	if _, err := Load(2, orphan.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run with no floor loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// Version 7 is written by a document that has purged, and by nothing else.
+//
+// This is the compatibility story, and it is the one this package has learnt
+// twice: understand before write. #83 taught a text and a list to understand a
+// superseded run in one release so that a later one could send it, and
+// go-crdt/collab#98 added a required field to the wire and broke three
+// transports that had not been rebuilt. A snapshot version is the same hazard
+// with a longer memory, because bytes are stored: a build that writes version 7
+// hands them to whatever reads next, which may be an older build or an older
+// peer.
+//
+// So Load understands version 7 from this release, and Snapshot writes it only
+// for a document whose owner asked for something version 6 cannot say. Nothing
+// stored by a build that merely contains Purge is unreadable by one that does
+// not, unless somebody called Purge.
+func TestOnlyAPurgedDocumentWritesVersionSeven(t *testing.T) {
+	doc := revisedText(t, 40)
+	before := doc.Snapshot()
+	if got := before[len(snapshotMagic)]; got != snapshotVersionV6 {
+		t.Fatalf("a document that never purged wrote version %d, want %d", got, snapshotVersionV6)
+	}
+	if !columnsFit(t, before, 9) || columnsFit(t, before, 10) {
+		t.Fatal("a document that never purged did not write nine columns -- it is either " +
+			"paying for a column it has nothing to put in, or short of one")
+	}
+
+	runs := len(doc.runs())
+	if doc.Purge() == 0 {
+		t.Fatal("nothing was purged, so this proves nothing")
+	}
+	after := doc.Snapshot()
+	if got := after[len(snapshotMagic)]; got != snapshotVersion {
+		t.Fatalf("a purged document wrote version %d, want %d", got, snapshotVersion)
+	}
+	if !columnsFit(t, after, 10) || columnsFit(t, after, 9) {
+		t.Fatal("a purged document did not write ten columns")
+	}
+
+	// Both round-trip, which is what says the two versions are one format and
+	// not two.
+	for _, c := range []struct {
+		name string
+		data []byte
+	}{{"version 6", before}, {"version 7", after}} {
+		back, err := Load(2, c.data)
+		if err != nil {
+			t.Fatalf("%s did not load: %v", c.name, err)
+		}
+		if !bytes.Equal(back.Snapshot(), c.data) {
+			t.Fatalf("%s did not re-encode to itself", c.name)
+		}
+	}
+
+	// What version 6 saves a document that never purged: the floor, the tenth
+	// column's length prefix, and one flag per run.
+	t.Logf("%d runs; version 6 costs %d bytes, and would have paid about %d more in version 7",
+		runs, len(before), runs+2)
 }

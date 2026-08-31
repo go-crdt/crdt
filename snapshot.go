@@ -58,7 +58,8 @@ const (
 func (d *Doc) Snapshot() []byte {
 	out := make([]byte, 0, 5+2*d.total)
 	out = append(out, snapshotMagic[:]...)
-	out = append(out, snapshotVersion)
+	version := d.formatVersion()
+	out = append(out, version)
 
 	sites := d.vv.sites()
 	out = binary.AppendUvarint(out, uint64(len(sites)))
@@ -79,7 +80,11 @@ func (d *Doc) Snapshot() []byte {
 	// that it can serve a peer whose history it no longer holds. Kept for the
 	// same reason a map keeps its collection floor, and learnt the same way: the
 	// floor a replica does not write down is a floor it does not have.
-	out = binary.AppendUvarint(out, d.purgedBelow)
+	//
+	// Written only by a document that has purged; see formatVersion.
+	if version == snapshotVersion {
+		out = binary.AppendUvarint(out, d.purgedBelow)
+	}
 
 	runs := d.runs()
 	out = binary.AppendUvarint(out, uint64(len(runs)))
@@ -116,7 +121,9 @@ func (d *Doc) Snapshot() []byte {
 		oSeqs = binary.AppendUvarint(oSeqs, zigzag(int64(r.origin.Seq)-int64(lastOriginSeq[r.origin.Site])))
 		lastOriginSeq[r.origin.Site] = r.origin.Seq
 		lengths = binary.AppendUvarint(lengths, r.size())
-		purged = binary.AppendUvarint(purged, boolByte(r.gone))
+		if version == snapshotVersion {
+			purged = binary.AppendUvarint(purged, boolByte(r.gone))
+		}
 		for _, ch := range r.text {
 			text = binary.AppendUvarint(text, uint64(ch))
 		}
@@ -136,7 +143,11 @@ func (d *Doc) Snapshot() []byte {
 	// knowing what is in them — which is also what lets whoever stores this
 	// compress them one at a time, which measured better than compressing the
 	// whole thing at once.
-	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields, purged} {
+	cols := [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields}
+	if version == snapshotVersion {
+		cols = append(cols, purged)
+	}
+	for _, col := range cols {
 		out = binary.AppendUvarint(out, uint64(len(col)))
 		out = append(out, col...)
 	}
@@ -155,6 +166,43 @@ func (d *Doc) Snapshot() []byte {
 		out = binary.AppendUvarint(out, target.Seq)
 	}
 	return out
+}
+
+// formatVersion is the oldest format this document can be written in, which is
+// the current one only when it has something to say that the current one added.
+//
+// # Understand before write
+//
+// A version this build writes is a version every peer and every store that will
+// read it has to understand already, and the two ends of a session are not
+// deployed at the same moment. This package has learnt that twice: #83 taught a
+// text and a list to understand a superseded run in one release so that a later
+// one could send it, and go-crdt/collab#98 added a required field to the wire
+// and broke three transports that had not been rebuilt, at the cost of a
+// retract.
+//
+// So version 7 — the purge floor in the header, the flag per run in the
+// columns — is understood by [Load] from this release, and written by nobody
+// who has not called [Doc.Purge]. A document that never purges keeps writing
+// version 6, which every build since v0.36.0 reads. There is no flag day and no
+// release to wait for: the format moves for a document at the moment its owner
+// asks for something only the new format can say, which is the strongest form
+// of understand-first available to a snapshot, because a purge cannot be
+// expressed in version 6 at all.
+//
+// The floor is the whole condition. A purged run without one is refused by
+// [Load] — [Doc.Purge] always sets it — so a document with the floor at zero has
+// no purged run for version 6 to lose.
+//
+// It costs nothing to keep the two apart and it is measured: the purge column is
+// one uvarint per run, so on the automerge-paper trace it was 10 824 bytes, plus
+// its length prefix and the floor, on a document that had purged nothing. That
+// was 2.26% of a snapshot for a feature it had not used.
+func (d *Doc) formatVersion() byte {
+	if d.purgedBelow > 0 {
+		return snapshotVersion
+	}
+	return snapshotVersionV6
 }
 
 // zigzag maps a signed step onto an unsigned one so that a small step backwards
@@ -391,6 +439,14 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 			return ErrMalformed
 		}
 		gone = flag == 1
+		// A purged run in a document whose floor is zero could not have been
+		// written: [Doc.Purge] sets the floor to the highest clock it discarded
+		// under, every time it discards anything. Refusing it is also what makes
+		// the floor alone enough to decide the format version, so that a
+		// document with nothing purged is never written in one that says it has.
+		if gone && d.purgedBelow == 0 {
+			return ErrMalformed
+		}
 	}
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return ErrMalformed
