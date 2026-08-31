@@ -3,6 +3,7 @@ package crdt
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"strconv"
 	"unicode/utf8"
 )
@@ -97,6 +98,24 @@ var ErrInvalidOp = errors.New("crdt: invalid operation")
 
 // ErrMalformed reports bytes that are not a valid encoding.
 var ErrMalformed = errors.New("crdt: malformed encoding")
+
+// ErrUnknownFormat reports a snapshot this build cannot read because it does not
+// know the format version, rather than because the bytes are damaged.
+//
+// The two are worth telling apart by the person holding them. A snapshot travels
+// -- in go-crdt/collab a joining client loads one the server sends it -- so the
+// ordinary way to meet this is a peer running a newer build, and the answer is to
+// upgrade rather than to go looking for corruption. Reported as a malformed
+// encoding, which is what this used to be, it reads as damaged data and sends
+// somebody after the wrong thing.
+//
+// The magic matched, so these bytes are a snapshot of the right kind. Only the
+// version is one this build has no reader for -- either later than any it knows,
+// or a number reserved for work that has not landed.
+// It wraps [ErrMalformed], because these bytes are malformed as far as this build
+// is concerned and a caller that only asks that question must go on getting the
+// same answer. What is new is being able to ask the narrower one.
+var ErrUnknownFormat = fmt.Errorf("%w: format version this build does not know", ErrMalformed)
 
 // ErrExhausted reports a replica that can issue no further operations because
 // its Lamport clock has reached [MaxClock]. Reaching it honestly is not

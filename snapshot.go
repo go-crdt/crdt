@@ -344,10 +344,13 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV6 &&
-		v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
-		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
+	if !ok {
 		return nil, ErrMalformed
+	}
+	if v[0] != snapshotVersion && v[0] != snapshotVersionV6 &&
+		v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
+		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1 {
+		return nil, ErrUnknownFormat
 	}
 	version := v[0]
 

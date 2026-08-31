@@ -832,8 +832,11 @@ func LoadMap(site SiteID, snapshot []byte) (*Map, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != mapVersion && v[0] != mapVersionV1) {
+	if !ok {
 		return nil, ErrMalformed
+	}
+	if v[0] != mapVersion && v[0] != mapVersionV1 {
+		return nil, ErrUnknownFormat
 	}
 	version := v[0]
 
