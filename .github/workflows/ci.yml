@@ -9,7 +9,8 @@ on:
     #
     # Remove this list in the change that merges the purge into main; it exists
     # only while the work lives off to one side.
-    branches: [main, purge-what-nobody-can-read, purge-fix-the-fixtures, persist-the-purge-floor]
+    branches: [main, purge-what-nobody-can-read, purge-fix-the-fixtures, persist-the-purge-floor,
+               wire-the-purge-refusal]
   pull_request:
     branches: [main]
 

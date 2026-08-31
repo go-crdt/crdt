@@ -1,5 +1,7 @@
 package crdt
 
+import "errors"
+
 // Discarding what a document no longer says.
 //
 // A deletion hides a character and does not forget it, because a replica that
@@ -24,15 +26,25 @@ package crdt
 //
 // # What it costs
 //
-// The past. [Doc.TextAt] and [Doc.ChangesSince] cannot rebuild a state in which
-// a purged character was still visible, so they refuse below
-// [Doc.PurgedBelow] rather than answer with characters missing — a wrong answer
-// about the past being worse than none.
+// A peer that is behind it. A purged run is not in [Doc.OpsSince] at all —
+// neither its insertions nor the deletions that explain them, because both are
+// read from characters that are gone — so a peer missing any of them is sent a
+// history with a hole in it and parks everything that followed. That is what
+// [Doc.CanServe] is for: ask before serving, and send a [Doc.Snapshot] instead
+// of operations to a version it refuses.
 //
-// Nothing else. There is no version to supply and no replica to wait for: a
-// purged run answers to its identity exactly as it did, so an operation naming
-// one finds it, and a peer catching up is sent the run with its characters
-// missing rather than not sent it at all.
+// The past, in the same breath and for the same reason. [Doc.TextAt],
+// [Doc.LenAt] and [Doc.ChangesSince] read the characters, so a version in which
+// a purged character was still visible reads back without it. None of the three
+// can refuse — they return no error, and giving them one would break every
+// caller — so the refusal is the caller's to make, against the same question:
+// a version [Doc.CanServe] accepts is one whose text this replica can still
+// rebuild, because accepting it means every purged character was already
+// deleted at that version.
+//
+// Nothing else. A purged run answers to its identity exactly as it did, so an
+// operation naming one still finds it, and an ordinary edit from a peer that
+// never purged applies unchanged.
 //
 // Purge reports how many characters it discarded.
 func (d *Doc) Purge() int {
@@ -56,30 +68,70 @@ func (d *Doc) Purge() int {
 // PurgedBelow reports the highest clock this replica has discarded a character
 // under, and zero for a document nobody has purged.
 //
-// It is what [Doc.TextAt] and [Doc.ChangesSince] refuse below. A clock rather
-// than a version, because what they cannot rebuild is a moment, and a moment is
-// what a clock names.
+// It is a clock rather than a version because what a purge takes is a moment,
+// and a moment is what a clock names. It says that this replica has given
+// something up; it does not say which peers that costs, which is a question
+// about a version vector and is [Doc.CanServe]'s to answer.
 func (d *Doc) PurgedBelow() uint64 { return d.purgedBelow }
 
-// readable reports whether v is late enough that nothing purged was still
-// visible in it.
-func (d *Doc) readable(v VersionVector) bool {
+// ErrPurged reports a version this replica can no longer answer for, because a
+// purge discarded characters that answering it would need.
+//
+// Beside [ErrStranded], and for the reason written there: an operation that can
+// never be applied is returned rather than left waiting, because parking it is
+// the silent version of the same failure. This is the same doctrine one step
+// earlier — refusing to send what would park at the far end — and it is the
+// shape the field settled on independently. Loro names two of these:
+//
+//	ImportUpdatesThatDependsOnOutdatedVersion
+//	SwitchToVersionBeforeShallowRoot
+//
+// A caller that gets this sends a [Doc.Snapshot] instead of operations. That is
+// not a fallback but the whole design: a snapshot carries a purged document
+// exactly, which is what [Doc.Purge] keeping every identity buys.
+var ErrPurged = errors.New("crdt: a purge discarded characters this version still needs")
+
+// CanServe reports whether this replica can still answer for a peer at v,
+// returning nil when it can and [ErrPurged] when a purge has taken what
+// answering would need. Ask it before [Doc.OpsSince], and send a
+// [Doc.Snapshot] instead when it refuses.
+//
+// A document that has purged nothing accepts every version, including one that
+// has seen nothing at all.
+//
+// It answers for reading the past as well as for serving a peer, and the two
+// are one question rather than two that happen to agree: it accepts v only when
+// every purged character was both written and deleted as of v, and a character
+// deleted as of v is one no reading of v would have shown.
+//
+// # It is not enough for v to be past the deletions
+//
+// The obvious condition — nothing purged was still visible at v — is the one
+// for reading and not the one for serving, and it accepts the worst peer there
+// is. A version that never saw a purged run at all was never shown those
+// characters, so it passes; and it is precisely the version that must be
+// refused, because everything the purge took is what it is owed. Measured on a
+// forty-edit document, purged: the weaker condition accepted the empty version
+// vector, and the 798 operations sent to a peer at it all parked.
+func (d *Doc) CanServe(v VersionVector) error {
 	if d.purgedBelow == 0 {
-		return true
+		return nil
 	}
 	for b := d.head.next; b != nil; b = b.next {
 		if !b.gone {
 			continue
 		}
 		for i := range b.size() {
-			// A purged character was visible at v if v had its insertion and
-			// not the deletion that removed it.
-			if v.Includes(b.idAt(i)) && !v.Includes(b.delIDAt(i)) {
-				return false
+			// Both halves: the insertion, which the purge took out of
+			// [Doc.OpsSince] along with the characters, and the deletion, which
+			// went with it and without which the peer would show a character
+			// this replica can no longer produce.
+			if !v.Includes(b.idAt(i)) || !v.Includes(b.delIDAt(i)) {
+				return ErrPurged
 			}
 		}
 	}
-	return true
+	return nil
 }
 
 // allDeleted reports whether every character of b has been deleted.
