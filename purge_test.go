@@ -180,3 +180,42 @@ func TestLoadRefusesAPurgeFloorAboveTheCeiling(t *testing.T) {
 		t.Fatalf("a floor above the ceiling loaded with %v, want ErrMalformed", err)
 	}
 }
+
+// readable is the refusal this needs, and nothing calls it yet, so what it
+// promises is pinned here rather than by a caller.
+//
+// It answers whether a version is late enough that nothing purged was still
+// visible in it: a peer at such a version can be served, and one behind it
+// cannot, because the characters it would need are gone.
+func TestReadableAnswersForAVersionBehindThePurge(t *testing.T) {
+	// A document that has purged nothing can serve anybody, including a version
+	// that has seen nothing at all.
+	fresh := revisedText(t, 4)
+	if !fresh.readable(VersionVector{}) {
+		t.Fatal("a document that purged nothing refused the empty version")
+	}
+
+	doc := revisedText(t, 40)
+	// The version as it stood when everything was still there. Taken before the
+	// purge, so it is exactly a peer that stopped listening early.
+	early := doc.Version().Clone()
+	if doc.Purge() == 0 {
+		t.Fatal("nothing was purged, so this proves nothing")
+	}
+
+	// That peer saw the insertions and, for at least one purged character, not
+	// the deletion that removed it -- so it cannot be served.
+	behind := VersionVector{}
+	for site, seq := range early {
+		behind[site] = seq / 2
+	}
+	if doc.readable(behind) {
+		t.Fatal("a version from before the deletions was reported serveable")
+	}
+
+	// And the version the document itself is at has every deletion, so nothing
+	// purged was visible in it.
+	if !doc.readable(doc.Version()) {
+		t.Fatal("a document refused its own version")
+	}
+}
