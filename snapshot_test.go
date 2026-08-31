@@ -342,6 +342,7 @@ type encodedRun struct {
 	length                                  uint64 // overrides the encoded length
 	dels                                    [][4]uint64
 	delCount                                int // overrides the encoded number of deletions
+	purged                                  bool // version 7: its characters were discarded
 }
 
 func (b runBuilder) build() []byte {
@@ -398,9 +399,10 @@ func (b runBuilder) build() []byte {
 	// can produce — still encodes: the subtraction wraps, and the enormous
 	// distance is refused against the ceiling instead of against the sequence.
 	// The case still fails to load, which is what it asserts.
-	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields []byte
+	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields, purged []byte
 	for _, r := range b.runs {
 		runSites = binary.AppendUvarint(runSites, r.site)
+		purged = binary.AppendUvarint(purged, boolByte(r.purged))
 		seqs = binary.AppendUvarint(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
 		lastRun[SiteID(r.site)] = r.seq
 		clocks = binary.AppendUvarint(clocks, r.clock-r.seq)
@@ -436,7 +438,14 @@ func (b runBuilder) build() []byte {
 	// interleaved branch that has never run is a branch that is wrong. The
 	// older formats are covered by fixtures written by the builds that
 	// produced them, which is a stronger check than a builder imitating them.
-	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields} {
+	cols := [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields}
+	if version >= snapshotVersion {
+		// Version 7's addition, and the reader asks for it by version, so a
+		// fixture that did not write it would be short a column rather than
+		// describing an older format.
+		cols = append(cols, purged)
+	}
+	for _, col := range cols {
 		out = binary.AppendUvarint(out, uint64(len(col)))
 		out = append(out, col...)
 	}

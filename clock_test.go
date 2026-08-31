@@ -220,6 +220,7 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 			col(uint64('a')),          // the text
 			col(0),                    // no deletions
 			nil,                       // and so no deletion fields
+			col(0),                    // version 7: the run was not purged
 		} {
 			s = uv(s, uint64(len(c)))
 			s = append(s, c...)

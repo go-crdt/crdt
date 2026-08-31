@@ -1,6 +1,9 @@
 package crdt
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 // revisedText writes a document the way one is written, so that whole runs die.
 func revisedText(t *testing.T, edits int) *Doc {
@@ -101,5 +104,34 @@ func TestPurgedDocumentReloads(t *testing.T) {
 	}
 	if back.String() != peer.String() {
 		t.Fatal("the two disagree after an ordinary edit")
+	}
+}
+
+// A purged run whose characters are not all deleted is refused rather than
+// repaired: a character with nothing in it would otherwise be visible, and
+// nothing sound could have written one.
+//
+// This is the reader's own rejection, and until the fixture builder could set
+// the flag nothing could reach it — every other test in this file round-trips a
+// document that [Doc.Purge] produced, which is well formed by construction.
+func TestLoadRefusesAPurgedRunThatIsStillPartlyAlive(t *testing.T) {
+	// The control comes from the only thing that writes these for real, so that
+	// the rejection below cannot be passing merely because the flag was set.
+	doc := revisedText(t, 40)
+	if doc.Purge() == 0 {
+		t.Fatal("nothing was purged, so this proves nothing")
+	}
+	if _, err := Load(2, doc.Snapshot()); err != nil {
+		t.Fatalf("a document Purge wrote did not load: %v", err)
+	}
+
+	// Four characters, one deletion covering one of them, and the run claiming
+	// its characters were discarded. The other three have nothing behind them.
+	partly := wellFormedRun()
+	partly.runs[0].purged = true
+	partly.runs[0].text = nil // a purged run costs nothing in the text column
+	partly.runs[0].length = 4
+	if _, err := Load(2, partly.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a partly deleted purged run loaded with %v, want ErrMalformed", err)
 	}
 }
