@@ -584,3 +584,44 @@ func TestACompositeKnowsOneOfItsTextsHasPurged(t *testing.T) {
 		t.Fatal("a newcomer inherited a purge nothing sent it")
 	}
 }
+
+// The safety belongs on the whole as well as on the part, because
+// [Composite.Text] hands out the *Doc: anything holding a composite can purge
+// one of its texts, and [Composite.OpsSince] would otherwise serve a peer it
+// cannot serve with nothing to ask.
+func TestACompositeRefusesAPeerItsTextCannotServe(t *testing.T) {
+	c := NewComposite(1)
+	text, err := c.Text("t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A version from before anything happened, which is the peer a purge is
+	// likeliest to have outrun.
+	empty := CompositeVersion{}
+	if err := c.CanServe(empty); err != nil {
+		t.Fatalf("a composite that purged nothing refused a peer: %v", err)
+	}
+
+	if _, err := text.Insert(0, "a sentence somebody wrote, and then thought about again."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := text.Delete(0, text.Len()); err != nil {
+		t.Fatal(err)
+	}
+	if n := text.Purge(); n == 0 {
+		t.Fatal("nothing was purged through the part a composite hands out")
+	}
+
+	if err := c.CanServe(empty); !errors.Is(err, ErrPurged) {
+		t.Fatalf("the composite offered to serve a peer its text cannot: %v", err)
+	}
+	// Its own version it can still answer for.
+	if err := c.CanServe(c.Version()); err != nil {
+		t.Fatalf("a composite refused its own version: %v", err)
+	}
+	// And a part the peer names nothing for must not be skipped: an absent
+	// vector is the emptiest one, not a reason to stop asking.
+	if err := c.CanServe(CompositeVersion{Part{Kind: PartMap, Name: "other"}: VersionVector{}}); !errors.Is(err, ErrPurged) {
+		t.Fatal("a version naming another part let the purged text through")
+	}
+}

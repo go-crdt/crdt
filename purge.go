@@ -134,6 +134,27 @@ func (d *Doc) CanServe(v VersionVector) error {
 	return nil
 }
 
+// CanServe reports whether this document can answer a peer at v, or [ErrPurged]
+// if a text part has discarded characters that peer would need.
+//
+// It is [Doc.CanServe] over every text part, and it exists because
+// [Composite.Text] hands out the *Doc: anything holding a composite can purge
+// one of its texts, and [Composite.OpsSince] would then serve a peer it cannot
+// serve with nothing to ask. A safety on the part and none on the whole is a
+// safety somebody reaches around without meaning to.
+//
+// A part the peer names nothing for is a part it holds nothing of, which is the
+// emptiest version there is and the one a purge is likeliest to have outrun -- so
+// it is asked about with an empty vector rather than skipped.
+func (c *Composite) CanServe(v CompositeVersion) error {
+	for name, d := range c.texts {
+		if err := d.CanServe(v[Part{Kind: PartText, Name: name}]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // allDeleted reports whether every character of b has been deleted.
 func allDeleted(b *block) bool {
 	covered := 0
