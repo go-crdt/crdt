@@ -74,7 +74,7 @@ Encoding the replayed document:
 
 | Implementation | Encoded document | Through gzip -6 | Ratio |
 |---|---|---|---|
-| diamond-types 1.0.2 | 109 KB | 93 KB | 1.17× |
+| diamond-types 1.0.2 | 109 KB † | 93 KB | 1.17× |
 | @automerge/automerge 3.4.1 | 129 KB | **129 KB** | **1.00×** |
 | yjs 13.6.32 (V2 encoding) | 160 KB | 70 KB | 2.30× |
 | loro-crdt 1.15.1 | 251 KB | 193 KB | 1.30× |
@@ -89,6 +89,26 @@ twenty-four times larger than anyone else's, because `Snapshot` wrote one record
 per character while everyone else writes runs. Version 2 of the format writes
 runs too, which took it to 620 KB.
 
+† **diamond-types compresses its text inside its own format**, so its first
+column is not an uncompressed figure. `Cargo.toml` has `default = ["lz4",
+"storage"]`, and `src/list/encoding/encode_oplog.rs` puts content in a
+`ContentCompressed` chunk for any document over twenty bytes:
+
+```rust
+// Right now I'm compressing content whenever len > 20.
+const MIN_COMPRESSED_LEN: usize = 20;
+```
+
+Its text — the part that is 182 KB of plain characters in ours — is LZ4'd in
+there. That is corroborated by its gzip ratio: 1.17× on a document whose largest
+component is English prose is what is left when the prose is already compressed.
+(The crate's defaults are what is quoted; the feature flags the
+`diamond-types-node` build uses were not checked.)
+
+So the first column compares one format that compresses the biggest thing in the
+file against five that do not, under a single heading. The second column is the
+one that compares the same operation applied to everybody.
+
 ### Uncompressed is not the only column, and the other one says something else
 
 Uncompressed we are last of six. **Through gzip we are fourth of six**, ahead of
@@ -102,9 +122,14 @@ stream with nothing left to find. diamond-types manages 1.17×, Loro 1.30×.
 
 Ours is 4.13×.
 
-That is a direct measurement of how much redundancy this format leaves in the
-file, and it is the same finding as the field-by-field accounting below arrived
-at from the other side: three columns hold one repeated value and cost 15% of the
+Run-length encoding is not a technique to weigh here, it is the baseline: the
+diamond-types encoding module opens by saying it "is modelled after the
+run-length encoding in Automerge and Yjs", so all three implementations ahead of
+us use it and the fastest and smallest says so in its first paragraph.
+
+The 4.13× is a direct measurement of how much redundancy this format leaves in
+the file, and it is the same finding as the field-by-field accounting below
+arrived at from the other side: three columns hold one repeated value and cost 15% of the
 file, because there is one encoding here where Automerge picks between a
 run-length, a boolean and a delta encoder per column. Its 1.00× is what those
 look like from outside.
