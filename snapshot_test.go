@@ -322,6 +322,9 @@ func TestSnapshotCarriesDuplicateDeletions(t *testing.T) {
 // runBuilder assembles snapshots field by field, so that every
 // rejection in the run reader can be provoked directly.
 type runBuilder struct {
+	// purgedBelow is version 7's floor: the clock below which characters were
+	// discarded. Zero for a fixture that purged nothing.
+	purgedBelow uint64
 	// asVersion writes an older format instead of the current one, so that the
 	// readers for versions this package still accepts keep being exercised after
 	// the current version moves on. Zero means the current version.
@@ -341,7 +344,7 @@ type encodedRun struct {
 	text                                    []rune
 	length                                  uint64 // overrides the encoded length
 	dels                                    [][4]uint64
-	delCount                                int // overrides the encoded number of deletions
+	delCount                                int  // overrides the encoded number of deletions
 	purged                                  bool // version 7: its characters were discarded
 }
 
@@ -382,6 +385,11 @@ func (b runBuilder) build() []byte {
 			out = binary.AppendUvarint(out, g[0])
 			out = binary.AppendUvarint(out, g[1])
 		}
+	}
+	if version >= snapshotVersion {
+		// Version 7: the purge floor. A fixture that purged nothing writes zero,
+		// which is what a document that never called Purge writes.
+		out = binary.AppendUvarint(out, b.purgedBelow)
 	}
 	n := b.count
 	if n == 0 {

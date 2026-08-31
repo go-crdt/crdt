@@ -74,6 +74,13 @@ func (d *Doc) Snapshot() []byte {
 	out = binary.AppendUvarint(out, 0)
 	out = binary.AppendUvarint(out, 0)
 
+	// Version 7: the clock below which characters have been discarded. A
+	// document that reloads has to remember what it gave up, or it would answer
+	// that it can serve a peer whose history it no longer holds. Kept for the
+	// same reason a map keeps its collection floor, and learnt the same way: the
+	// floor a replica does not write down is a floor it does not have.
+	out = binary.AppendUvarint(out, d.purgedBelow)
+
 	runs := d.runs()
 	out = binary.AppendUvarint(out, uint64(len(runs)))
 
@@ -258,6 +265,16 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		if err := readCollected(r); err != nil {
 			return nil, err
 		}
+	}
+
+	if version >= snapshotVersion {
+		below, ok := r.uvarint()
+		// A floor above the ceiling names a clock no operation could carry, so
+		// it describes a document that could not have been written.
+		if !ok || below > MaxClock {
+			return nil, ErrMalformed
+		}
+		d.purgedBelow = below
 	}
 
 	// A snapshot has to account for every operation its version vector claims,

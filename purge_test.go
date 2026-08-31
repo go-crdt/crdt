@@ -135,3 +135,48 @@ func TestLoadRefusesAPurgedRunThatIsStillPartlyAlive(t *testing.T) {
 		t.Fatalf("a partly deleted purged run loaded with %v, want ErrMalformed", err)
 	}
 }
+
+// A document that reloads has to remember what it gave up.
+//
+// Without this the floor comes back as zero, and readable would answer that
+// every version is still serveable — telling a caller it can serve a peer whose
+// history it has thrown away. Not reachable while nothing calls readable, and
+// exactly the defect a map's collection floor had until it was written down.
+func TestThePurgeFloorSurvivesASnapshot(t *testing.T) {
+	doc := revisedText(t, 40)
+	if doc.Purge() == 0 {
+		t.Fatal("nothing was purged, so this proves nothing")
+	}
+	before := doc.PurgedBelow()
+	if before == 0 {
+		t.Fatal("a document that purged reports a floor of zero")
+	}
+
+	back, err := Load(2, doc.Snapshot())
+	if err != nil {
+		t.Fatalf("a purged document did not reload: %v", err)
+	}
+	if got := back.PurgedBelow(); got != before {
+		t.Fatalf("PurgedBelow() = %d after a round trip, want %d", got, before)
+	}
+
+	// And a document that never purged still says so, rather than inheriting a
+	// floor from the field being written at all.
+	fresh := revisedText(t, 4)
+	plain, err := Load(2, fresh.Snapshot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := plain.PurgedBelow(); got != 0 {
+		t.Fatalf("a document that never purged reloaded with a floor of %d", got)
+	}
+}
+
+// A floor above the clock ceiling names a clock no operation could carry.
+func TestLoadRefusesAPurgeFloorAboveTheCeiling(t *testing.T) {
+	tooHigh := wellFormedRun()
+	tooHigh.purgedBelow = MaxClock + 1
+	if _, err := Load(2, tooHigh.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a floor above the ceiling loaded with %v, want ErrMalformed", err)
+	}
+}
