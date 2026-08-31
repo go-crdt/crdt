@@ -199,12 +199,17 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 		s = uv(s, 0)     // version 6: an empty collection floor
 		s = uv(s, 0)     // and nothing collected
 		s = uv(s, 1)     // one run
-		// Version 5 writes each field in a column of its own, length-prefixed.
-		// The sequence number is a step from nothing, and the clock the
-		// distance above it — a clock below its sequence is not expressible,
-		// which is the point of writing it that way.
+		// Version 8 writes each field in a column of its own, length-prefixed,
+		// with an encoding byte and then its groups. The sequence number is a
+		// step from nothing, and the clock the distance above it — a clock
+		// below its sequence is not expressible, which is the point of writing
+		// it that way.
 		col := func(vs ...uint64) []byte {
-			var b []byte
+			b := []byte{columnGroups}
+			if len(vs) == 0 {
+				return b
+			}
+			b = uv(b, zigzag(-int64(len(vs))))
 			for _, v := range vs {
 				b = uv(b, v)
 			}
@@ -219,7 +224,10 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 			col(1),                    // one character
 			col(uint64('a')),          // the text
 			col(0),                    // no deletions
-			nil,                       // and so no deletion fields
+			col(),                     // and so no deletion gaps,
+			col(),                     // no spans,
+			col(),                     // no sites,
+			col(),                     // no sequence steps
 		} {
 			s = uv(s, uint64(len(c)))
 			s = append(s, c...)

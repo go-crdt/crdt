@@ -360,7 +360,7 @@ func (b runBuilder) build() []byte {
 		out = binary.AppendUvarint(out, s[0])
 		out = binary.AppendUvarint(out, s[1])
 	}
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV6 {
 		// Version 6: the collection floor and the per-site tallies of what
 		// collection took away. Nothing here has ever been collected, so both
 		// are empty, which is what a document that never calls Collect writes.
@@ -393,57 +393,115 @@ func (b runBuilder) build() []byte {
 	// what a reader of the test wants to see; the encodings are applied here.
 	// Version 4 writes the two sequence numbers as steps and the clock as the
 	// distance above the run's own sequence. Version 5 writes each field in a
-	// column of its own, which is the same bytes in a different order.
+	// column of its own, which is the same bytes in a different order; version
+	// 8 writes the deletion fields in four columns rather than one, and every
+	// column in groups rather than one value at a time.
 	//
 	// A case that asks for a clock below the sequence — which no honest replica
 	// can produce — still encodes: the subtraction wraps, and the enormous
 	// distance is refused against the ceiling instead of against the sequence.
 	// The case still fails to load, which is what it asserts.
-	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields []byte
+	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts []uint64
+	var delGaps, delSpans, delSites, delSeqs []uint64
 	for _, r := range b.runs {
-		runSites = binary.AppendUvarint(runSites, r.site)
-		seqs = binary.AppendUvarint(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
+		runSites = append(runSites, r.site)
+		seqs = append(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
 		lastRun[SiteID(r.site)] = r.seq
-		clocks = binary.AppendUvarint(clocks, r.clock-r.seq)
-		oSites = binary.AppendUvarint(oSites, r.originSite)
-		oSeqs = binary.AppendUvarint(oSeqs, zigzag(int64(r.originSeq)-int64(lastOrigin[SiteID(r.originSite)])))
+		clocks = append(clocks, r.clock-r.seq)
+		oSites = append(oSites, r.originSite)
+		oSeqs = append(oSeqs, zigzag(int64(r.originSeq)-int64(lastOrigin[SiteID(r.originSite)])))
 		lastOrigin[SiteID(r.originSite)] = r.originSeq
 		length := r.length
 		if length == 0 {
 			length = uint64(len(r.text))
 		}
-		lengths = binary.AppendUvarint(lengths, length)
+		lengths = append(lengths, length)
 		for _, ch := range r.text {
-			text = binary.AppendUvarint(text, uint64(ch))
+			text = append(text, uint64(ch))
 		}
 		dn := r.delCount
 		if dn == 0 {
 			dn = len(r.dels)
 		}
-		delCounts = binary.AppendUvarint(delCounts, uint64(dn))
+		delCounts = append(delCounts, uint64(dn))
 		for _, d := range r.dels {
-			delFields = binary.AppendUvarint(delFields, d[0])
-			delFields = binary.AppendUvarint(delFields, d[1])
-			delFields = binary.AppendUvarint(delFields, d[2])
+			delGaps = append(delGaps, d[0])
+			delSpans = append(delSpans, d[1])
+			delSites = append(delSites, d[2])
 			site := SiteID(d[2])
-			delFields = binary.AppendUvarint(delFields, zigzag(int64(d[3])-int64(lastDel[site])))
+			delSeqs = append(delSeqs, zigzag(int64(d[3])-int64(lastDel[site])))
 			lastDel[site] = d[3]
 		}
 	}
-	// Version 5 writes each field in a column of its own, length-prefixed.
-	//
-	// There is no branch here for the versions before it. This builder only
-	// ever produced the current format — nothing has ever set b.ver — and an
-	// interleaved branch that has never run is a branch that is wrong. The
-	// older formats are covered by fixtures written by the builds that
-	// produced them, which is a stronger check than a builder imitating them.
-	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields} {
-		out = binary.AppendUvarint(out, uint64(len(col)))
-		out = append(out, col...)
+	if version >= snapshotVersion {
+		// Version 8: twelve columns, each an encoding byte and then its groups.
+		for _, col := range [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
+			lengths, text, delCounts, delGaps, delSpans, delSites, delSeqs} {
+			out = appendColumn(out, groupColumn(col))
+		}
+	} else {
+		// Versions 5 and 6: nine plain columns, the deletion fields written as
+		// one stream of gap, span, site and step over and over.
+		var delFields []uint64
+		for i := range delGaps {
+			delFields = append(delFields, delGaps[i], delSpans[i], delSites[i], delSeqs[i])
+		}
+		for _, col := range [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
+			lengths, text, delCounts, delFields} {
+			var enc []byte
+			for _, v := range col {
+				enc = binary.AppendUvarint(enc, v)
+			}
+			out = binary.AppendUvarint(out, uint64(len(enc)))
+			out = append(out, enc...)
+		}
 	}
 
 	out = binary.AppendUvarint(out, 0) // no duplicate deletions
 	return append(out, b.tail...)
+}
+
+// groupColumn writes a column the way version 8 does, and is deliberately not
+// the encoder the package uses: a fixture that shares its encoder with the code
+// under test agrees with it about everything, including its mistakes. What pins
+// this one to the real format is TestABuiltRunIsWhatARealDocumentWrites, which
+// puts its bytes beside a document that was actually typed.
+func groupColumn(vs []uint64) []byte {
+	var out []byte
+	var lit []uint64
+	flushLit := func() {
+		if len(lit) == 0 {
+			return
+		}
+		out = binary.AppendUvarint(out, zigzag(-int64(len(lit))))
+		for _, v := range lit {
+			out = binary.AppendUvarint(out, v)
+		}
+		lit = lit[:0]
+	}
+	for i := 0; i < len(vs); {
+		j := i
+		for j+1 < len(vs) && vs[j+1] == vs[i] {
+			j++
+		}
+		if n := j - i + 1; n >= runThreshold {
+			flushLit()
+			out = binary.AppendUvarint(out, zigzag(int64(n)))
+			out = binary.AppendUvarint(out, vs[i])
+		} else {
+			lit = append(lit, vs[i:j+1]...)
+		}
+		i = j + 1
+	}
+	flushLit()
+	return out
+}
+
+// appendColumn frames one column: its length, its encoding byte, its groups.
+func appendColumn(out, groups []byte) []byte {
+	out = binary.AppendUvarint(out, uint64(len(groups)+1))
+	out = append(out, columnGroups)
+	return append(out, groups...)
 }
 
 // wellFormedRun is a four-character run from site 1 with its third character
@@ -740,32 +798,7 @@ func TestLoadRejectsMalformedColumns(t *testing.T) {
 	if _, err := Load(2, good); err != nil {
 		t.Fatalf("the fixture does not load: %v", err)
 	}
-
-	// Where the columns start: past the magic, the version, the version-vector
-	// table and the run count.
-	head := len(snapshotMagic) + 1
-	r := &reader{buf: good[head:]}
-	nSites, _ := r.uvarint()
-	for range nSites {
-		r.uvarint()
-		r.uvarint()
-	}
-	// Version 6 puts the collection floor and the per-site tallies here, both
-	// empty for this fixture. Walking past them is not optional: a byte counted
-	// wrong lands every alteration below in the wrong field, and the loader then
-	// refuses for a reason none of these cases is about.
-	nFloor, _ := r.uvarint()
-	for range nFloor {
-		r.uvarint()
-		r.uvarint()
-	}
-	nGone, _ := r.uvarint()
-	for range nGone {
-		r.uvarint()
-		r.uvarint()
-	}
-	r.uvarint() // the run count
-	colsAt := len(good) - len(r.buf)
+	colsAt := columnsStart(t, good)
 
 	tests := []struct {
 		name  string
@@ -780,22 +813,33 @@ func TestLoadRejectsMalformedColumns(t *testing.T) {
 			// Drop the last byte of the last column, so its length overruns.
 			return b[:len(b)-2]
 		}},
-		{"a column that runs out before the runs do", func(b []byte) []byte {
-			// The run count still says one, and the column of sites is empty:
-			// the field the first run needs is simply not there. Nothing about
-			// the length is wrong, which is what makes this a different
-			// refusal from the three around it.
+		{"a column of no bytes at all", func(b []byte) []byte {
+			// Not even the encoding byte. A column is at least that, so this is
+			// a missing column rather than an empty one.
 			out := append([]byte{}, b[:colsAt]...)
-			out = binary.AppendUvarint(out, 0) // an empty sites column
-			return append(out, b[colsAt+2:]...)
+			out = binary.AppendUvarint(out, 0)
+			return append(out, b[colsAt+1:]...)
 		}},
-		{"a column with bytes to spare", func(b []byte) []byte {
-			// One more site than there are runs: the column is longer than the
+		{"a column that runs out before the runs do", func(b []byte) []byte {
+			// The run count still says one, and the column of sites holds no
+			// values: the field the first run needs is simply not there.
+			// Nothing about the length is wrong, which is what makes this a
+			// different refusal from the ones around it.
+			head, cols, tail := splitColumns(t, b)
+			cols[0] = []byte{columnGroups}
+			return joinColumns(head, cols, tail)
+		}},
+		{"a column with values to spare", func(b []byte) []byte {
+			// Two sites where there is one run: the column is longer than the
 			// count consumes, and what is left over is a run nobody claimed.
-			out := append([]byte{}, b[:colsAt]...)
-			out = binary.AppendUvarint(out, 2) // the sites column, now two bytes
-			out = append(out, b[colsAt+1], 9)  // its byte, and one nobody reads
-			return append(out, b[colsAt+2:]...)
+			head, cols, tail := splitColumns(t, b)
+			cols[0] = append([]byte{columnGroups}, groupColumn([]uint64{1, 2})...)
+			return joinColumns(head, cols, tail)
+		}},
+		{"an encoding nothing defines", func(b []byte) []byte {
+			head, cols, tail := splitColumns(t, b)
+			cols[0][0] = columnDeflated + 1
+			return joinColumns(head, cols, tail)
 		}},
 	}
 	for _, tt := range tests {
@@ -805,6 +849,69 @@ func TestLoadRejectsMalformedColumns(t *testing.T) {
 			}
 		})
 	}
+}
+
+// columnsStart walks the header of a version 8 snapshot byte by byte and says
+// where the columns begin.
+//
+// Walking it is not optional and it is not a formality: a byte counted wrong
+// lands every alteration above in the wrong field, and the loader then refuses
+// for a reason none of the cases is about — so the tests keep passing while
+// testing nothing. Every field the header grows has to be stepped over here.
+func columnsStart(t *testing.T, snap []byte) int {
+	t.Helper()
+	// Past the magic, the version, the version-vector table, the two tables
+	// version 6 added and the run count.
+	r := &reader{buf: snap[len(snapshotMagic)+1:]}
+	nSites, _ := r.uvarint()
+	for range nSites {
+		r.uvarint()
+		r.uvarint()
+	}
+	nFloor, _ := r.uvarint()
+	for range nFloor {
+		r.uvarint()
+		r.uvarint()
+	}
+	nGone, _ := r.uvarint()
+	for range nGone {
+		r.uvarint()
+		r.uvarint()
+	}
+	r.uvarint() // the run count
+	return len(snap) - len(r.buf)
+}
+
+// splitColumns takes a version 8 snapshot apart into what comes before the
+// columns, the twelve column payloads, and what comes after them, so that a
+// test can replace one column without counting bytes around it.
+func splitColumns(t *testing.T, snap []byte) ([]byte, [][]byte, []byte) {
+	t.Helper()
+	at := columnsStart(t, snap)
+	r := &reader{buf: snap[at:]}
+	var cols [][]byte
+	for range len(new(columns).all()) {
+		n, ok := r.uvarint()
+		if !ok {
+			t.Fatalf("the snapshot has no length for column %d", len(cols))
+		}
+		buf, ok := r.bytes(int(n))
+		if !ok {
+			t.Fatalf("column %d claims %d bytes and has fewer", len(cols), n)
+		}
+		cols = append(cols, append([]byte{}, buf...))
+	}
+	return snap[:at], cols, r.buf
+}
+
+// joinColumns puts back what splitColumns took apart.
+func joinColumns(head []byte, cols [][]byte, tail []byte) []byte {
+	out := append([]byte{}, head...)
+	for _, c := range cols {
+		out = binary.AppendUvarint(out, uint64(len(c)))
+		out = append(out, c...)
+	}
+	return append(out, tail...)
 }
 
 // Truncating a version 3 snapshot anywhere must fail, as truncating a version 1
@@ -828,34 +935,18 @@ func TestLoadRejectsTruncatedVersionThreeSnapshots(t *testing.T) {
 }
 
 // A deletion whose fields run out part way through. The count says there is a
-// stretch to read and the column has room for a byte of it, so the refusal has
-// to come from the field that is missing rather than from the length.
+// stretch to read and the gap is there to be read, so the refusal has to come
+// from the field that is missing rather than from a length.
 func TestLoadRejectsADeletionCutOffMidField(t *testing.T) {
-	b := wellFormedRun()
-	good := b.build()
+	good := wellFormedRun().build()
 	if _, err := Load(2, good); err != nil {
 		t.Fatalf("the fixture does not load: %v", err)
 	}
-	// The deletion-fields column is the last one; keep one byte of it.
-	head := len(snapshotMagic) + 1
-	r := &reader{buf: good[head:]}
-	nSites, _ := r.uvarint()
-	for range nSites {
-		r.uvarint()
-		r.uvarint()
-	}
-	r.uvarint()
-	at := len(good) - len(r.buf)
-	for range 8 { // the eight columns before the deletion fields
-		n, _ := r.uvarint()
-		r.bytes(int(n))
-	}
-	at = len(good) - len(r.buf)
-	cut := append([]byte{}, good[:at]...)
-	cut = binary.AppendUvarint(cut, 1) // one byte of deletion fields
-	cut = append(cut, good[at+1])      // the gap, and nothing after it
-	cut = binary.AppendUvarint(cut, 0) // no duplicate deletions
-	if _, err := Load(2, cut); !errors.Is(err, ErrMalformed) {
+	head, cols, tail := splitColumns(t, good)
+	// The column of spans, emptied. Its gap is still there, and its site and
+	// its sequence step after it.
+	cols[9] = []byte{columnGroups}
+	if _, err := Load(2, joinColumns(head, cols, tail)); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("Load() = %v, want ErrMalformed", err)
 	}
 }
