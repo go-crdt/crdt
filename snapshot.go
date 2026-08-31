@@ -1,7 +1,10 @@
 package crdt
 
 import (
+	"bytes"
+	"compress/flate"
 	"encoding/binary"
+	"io"
 	"slices"
 	"unicode/utf8"
 )
@@ -10,30 +13,71 @@ import (
 // so a decoder rejects foreign or future bytes instead of misreading them.
 var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 
-// snapshotVersion 5 writes the runs in columns — every site, then every
+// snapshotVersion 8 gives every column an encoding of its own rather than one
+// uvarint per value, and splits the deletion fields into four columns so that
+// each is a stream of one kind of number. Version 6 spent 15% of a real document
+// on three columns holding a single repeated value — 10 824 clocks all zero,
+// 10 824 run sites and 50 276 deletion sites all the same author — because a
+// column had no way to say "this number, that many times". It now does: a column
+// is a sequence of groups, either a run of one value or a literal stretch, which
+// is the run-length encoding Automerge and diamond-types both settled on. On the
+// automerge-paper trace that is 478 474 bytes to 259 890, and the three columns
+// above go from 71 924 bytes to twelve. Nothing here compresses, still: a column
+// says in its first byte how it is stored and the reader understands a deflated
+// one, but nothing writes one, because Snapshot promises the same state is the
+// same bytes and a compressor is deterministic for a build rather than across
+// versions of itself. What that costs is measured in [readColumnStream].
+//
+// Version 5 writes the runs in columns — every site, then every
 // sequence number, then every clock, and so on — rather than one run at a time.
 // It is the same fields in the same encodings; only the order changes, and it
 // changes because a compressor looking for repetition in version 4 sees a run's
 // identity beside its text beside its deletions. A column is a stream of
 // similar numbers, which is what a compressor is good at: the same document
 // goes from 148 KB compressed to 97, against diamond-types' 109. The measurement
-// and the choice of compressor are in docs/performance.md; nothing here
-// compresses, because Snapshot promises the same state is the same bytes and a
-// compressor is deterministic for a build rather than across versions of
-// itself. Version 4 writes a run's header as steps: its own sequence number
-// and its origin's from the last the same site used, and its clock as the
-// distance above its own sequence, which it can never fall below. Version 3
+// and the choice of compressor are in docs/performance.md. Version 4 writes a
+// run's header as steps: its own sequence number and its origin's from the last
+// the same site used, and its clock as the distance above its own sequence,
+// which it can never fall below. Version 3
 // writes a deletion's sequence number as a signed step from the previous
 // deletion by the same site; version 2 wrote it in full; version 1 wrote one
-// record per character. All four are readable; version 1's note
-// still read, so a document stored by an older build still opens.
+// record per character. All of them are readable; a document stored by an older
+// build still opens.
+//
+// Version 7 is not one of them, and not because it is newer: it is being
+// written on another branch, for the collection floor, and giving one version
+// byte two meanings is the failure this numbering exists to prevent. It is
+// skipped here and refused by the reader below until that lands.
 const (
-	snapshotVersion   = 6
+	snapshotVersion   = 8
+	snapshotVersionV6 = 6
 	snapshotVersionV5 = 5
 	snapshotVersionV4 = 4
 	snapshotVersionV3 = 3
 	snapshotVersionV2 = 2
 	snapshotVersionV1 = 1
+)
+
+// runThreshold is how many of the same value in a row it takes to be worth
+// writing as a run rather than leaving in the literal stretch around it.
+//
+// It is measured, not chosen. A run costs a count and a value; leaving a pair
+// in the literals costs the two values, and also costs the two group headers
+// that cutting the literal stretch in half needs. So a pair is a loss and a
+// triple is a small win, which is what the trace says: over the twelve columns
+// of automerge-paper, a threshold of two costs 266 270 bytes, three costs
+// 259 840, four costs 259 808 and six costs 261 016. Three is where it turns,
+// and it is the smallest number that never makes a column bigger than writing
+// it out plainly would have.
+const runThreshold = 3
+
+// A column's payload begins with one byte saying how the groups that follow are
+// stored. Only [columnGroups] is ever written; [columnDeflated] is understood so
+// that a peer or a later release can send it without this one refusing the whole
+// snapshot. See the note on writing it in [readColumnStream].
+const (
+	columnGroups   = 0
+	columnDeflated = 1
 )
 
 // Snapshot encodes the whole document — every character, alive or tombstoned,
@@ -85,50 +129,62 @@ func (d *Doc) Snapshot() []byte {
 	// A step is still measured against the last value the same site used in the
 	// same position, which is unchanged by the reordering: the runs are walked
 	// in document order here exactly as they were.
+	//
+	// Version 8 splits what version 5 wrote as one column of deletion fields
+	// into four, one per field. Interleaved, gap beside span beside site beside
+	// sequence step, no two neighbours are the same kind of number and nothing
+	// repeats; apart, the sites are 50 276 copies of one number and cost four
+	// bytes, and the gaps 50 286 bytes become 1 483.
 	var (
-		runSites  []byte // the site of each run
-		seqs      []byte // its sequence number, as a step
-		clocks    []byte // its clock, as the distance above that sequence number
-		oSites    []byte // its origin's site
-		oSeqs     []byte // its origin's sequence number, as a step
-		lengths   []byte // how many characters it holds
-		text      []byte // the characters themselves, every run's after the last
-		delCounts []byte // how many deleted stretches each run has
-		delFields []byte // those stretches: gap, span, site, sequence step
+		runSites  rleWriter // the site of each run
+		seqs      rleWriter // its sequence number, as a step
+		clocks    rleWriter // its clock, as the distance above that sequence number
+		oSites    rleWriter // its origin's site
+		oSeqs     rleWriter // its origin's sequence number, as a step
+		lengths   rleWriter // how many characters it holds
+		text      rleWriter // the characters themselves, every run's after the last
+		delCounts rleWriter // how many deleted stretches each run has
+		delGaps   rleWriter // where each stretch starts, from the end of the last
+		delSpans  rleWriter // how many characters it covers
+		delSites  rleWriter // who deleted them
+		delSeqs   rleWriter // with which sequence number, as a step
 	)
 	lastDelSeq := map[SiteID]uint64{}
 	lastRunSeq := map[SiteID]uint64{}
 	lastOriginSeq := map[SiteID]uint64{}
 	for _, r := range runs {
-		runSites = binary.AppendUvarint(runSites, uint64(r.id.Site))
-		seqs = binary.AppendUvarint(seqs, zigzag(int64(r.id.Seq)-int64(lastRunSeq[r.id.Site])))
+		runSites.add(uint64(r.id.Site))
+		seqs.add(zigzag(int64(r.id.Seq) - int64(lastRunSeq[r.id.Site])))
 		lastRunSeq[r.id.Site] = r.id.Seq
-		clocks = binary.AppendUvarint(clocks, r.clock-r.id.Seq)
-		oSites = binary.AppendUvarint(oSites, uint64(r.origin.Site))
-		oSeqs = binary.AppendUvarint(oSeqs, zigzag(int64(r.origin.Seq)-int64(lastOriginSeq[r.origin.Site])))
+		clocks.add(r.clock - r.id.Seq)
+		oSites.add(uint64(r.origin.Site))
+		oSeqs.add(zigzag(int64(r.origin.Seq) - int64(lastOriginSeq[r.origin.Site])))
 		lastOriginSeq[r.origin.Site] = r.origin.Seq
-		lengths = binary.AppendUvarint(lengths, uint64(len(r.text)))
+		lengths.add(uint64(len(r.text)))
 		for _, ch := range r.text {
-			text = binary.AppendUvarint(text, uint64(ch))
+			text.add(uint64(ch))
 		}
-		delCounts = binary.AppendUvarint(delCounts, uint64(len(r.dels)))
+		delCounts.add(uint64(len(r.dels)))
 		at := uint32(0)
 		for _, del := range r.dels {
-			delFields = binary.AppendUvarint(delFields, uint64(del.from-at))
-			delFields = binary.AppendUvarint(delFields, uint64(del.to-del.from))
-			delFields = binary.AppendUvarint(delFields, uint64(del.id.Site))
-			delFields = binary.AppendUvarint(delFields, zigzag(int64(del.id.Seq)-int64(lastDelSeq[del.id.Site])))
+			delGaps.add(uint64(del.from - at))
+			delSpans.add(uint64(del.to - del.from))
+			delSites.add(uint64(del.id.Site))
+			delSeqs.add(zigzag(int64(del.id.Seq) - int64(lastDelSeq[del.id.Site])))
 			lastDelSeq[del.id.Site] = del.id.Seq
 			at = del.to
 		}
 	}
 
-	// Each column is length-prefixed, so a reader can take them apart without
-	// knowing what is in them — which is also what lets whoever stores this
-	// compress them one at a time, which measured better than compressing the
-	// whole thing at once.
-	for _, col := range [][]byte{runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields} {
-		out = binary.AppendUvarint(out, uint64(len(col)))
+	// Each column is length-prefixed and says in its first byte how it is
+	// stored, so a reader can take them apart without knowing what is in them —
+	// which is also what lets whoever stores this compress them one at a time,
+	// which measured better than compressing the whole thing at once.
+	for _, w := range []*rleWriter{&runSites, &seqs, &clocks, &oSites, &oSeqs,
+		&lengths, &text, &delCounts, &delGaps, &delSpans, &delSites, &delSeqs} {
+		col := w.finish()
+		out = binary.AppendUvarint(out, uint64(len(col)+1))
+		out = append(out, columnGroups)
 		out = append(out, col...)
 	}
 
@@ -160,6 +216,77 @@ func zigzag(v int64) uint64 {
 // resolves to is checked against the version vector like any other identity.
 func unzigzag(v uint64) int64 {
 	return int64(v>>1) ^ -int64(v&1)
+}
+
+// An rleWriter builds one column: a sequence of groups, each either a run of
+// one value repeated or a literal stretch of values that do not repeat enough
+// to be worth a run.
+//
+// A group's header is a zigzagged count, so a run of n reads as 2n and a
+// literal stretch of m as 2m−1: the two never collide, and both cost one byte
+// while they are small. A run's count is at least [runThreshold], which is what
+// makes the encoding canonical — for a given sequence of values there is exactly
+// one grouping, and [column.uvarint] refuses every other. Two replicas holding
+// the same document still write the same bytes, which is what the whole format
+// is for.
+//
+// Only whole equal blocks become runs, so the writer holds one back: it does not
+// know whether the block being counted is long enough until a different value
+// arrives or the column ends.
+type rleWriter struct {
+	out  []byte // the groups already written
+	lit  []byte // the values of the literal stretch being accumulated
+	litN uint64 // how many of them
+	val  uint64 // the value repeating right now
+	n    uint64 // how many times it has repeated
+	have bool
+}
+
+// add takes the next value of the column.
+func (w *rleWriter) add(v uint64) {
+	if w.have && v == w.val {
+		w.n++
+		return
+	}
+	w.flushBlock()
+	w.val, w.n, w.have = v, 1, true
+}
+
+// flushBlock disposes of the equal block just ended: as a run if it is long
+// enough, and otherwise into the literal stretch, which it therefore continues
+// rather than interrupts.
+func (w *rleWriter) flushBlock() {
+	switch {
+	case w.n == 0:
+	case w.n >= runThreshold:
+		w.flushLiteral()
+		w.out = binary.AppendUvarint(w.out, zigzag(int64(w.n)))
+		w.out = binary.AppendUvarint(w.out, w.val)
+	default:
+		for range w.n {
+			w.lit = binary.AppendUvarint(w.lit, w.val)
+		}
+		w.litN += w.n
+	}
+	w.n = 0
+}
+
+// flushLiteral writes the literal stretch, which is always as long as it can be:
+// a run only ever cuts it where the values themselves say so.
+func (w *rleWriter) flushLiteral() {
+	if w.litN == 0 {
+		return
+	}
+	w.out = binary.AppendUvarint(w.out, zigzag(-int64(w.litN)))
+	w.out = append(w.out, w.lit...)
+	w.lit, w.litN = w.lit[:0], 0
+}
+
+// finish closes the column and returns its groups.
+func (w *rleWriter) finish() []byte {
+	w.flushBlock()
+	w.flushLiteral()
+	return w.out
 }
 
 // A run is a stretch of characters one site typed consecutively, as the snapshot
@@ -217,7 +344,8 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		return nil, ErrMalformed
 	}
 	v, ok := r.bytes(1)
-	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
+	if !ok || (v[0] != snapshotVersion && v[0] != snapshotVersionV6 &&
+		v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
 		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1) {
 		return nil, ErrMalformed
 	}
@@ -228,6 +356,14 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	if !ok {
 		return nil, ErrMalformed
 	}
+	// How many operations the version vector promises, in total. Every version
+	// before 8 was its own bound: a column held one uvarint per value, so a
+	// snapshot of n bytes described at most n of anything. A run-length column
+	// does not, and that is the point of it — twelve bytes now stand for 71 924
+	// values. So the bound moves to the only other thing that says how large the
+	// document is, which is the version vector at the front, and every column is
+	// held to it below.
+	ops := uint64(0)
 	for range nSites {
 		s, ok1 := r.uvarint()
 		seq, ok2 := r.uvarint()
@@ -242,10 +378,19 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		if _, dup := d.vv[SiteID(s)]; dup {
 			return nil, ErrMalformed
 		}
+		// The total is held to the same ceiling as one site's. A replica that
+		// has seen every operation carries a clock at least as high as the
+		// number of them it issued itself, so a document of more than [MaxClock]
+		// operations is one no set of replicas could have produced, and reading
+		// it would mean believing a size before anything has been checked.
+		if seq > MaxClock-ops {
+			return nil, ErrMalformed
+		}
+		ops += seq
 		d.vv[SiteID(s)] = seq
 	}
 
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV6 {
 		if err := readCollected(r); err != nil {
 			return nil, err
 		}
@@ -275,11 +420,20 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 
 	// Where each field is read from. Version 5 gives every field a column of
 	// its own; every version before it interleaved them, which is the same
-	// thing with all nine readers pointing at the one stream — the fields go
+	// thing with all twelve readers pointing at the one stream — the fields go
 	// past in the same order either way, so there is one decoder rather than
 	// two, and the older format is exercised by every test the newer one is.
+	//
+	// Version 8's four deletion columns fall out of the same trick: before it
+	// they were one column of gap, span, site and step over and over, which is
+	// those four read in that order from a stream they share.
 	cols := sameStream(r)
-	if version >= snapshotVersionV5 {
+	if version >= snapshotVersion {
+		var err error
+		if cols, err = readColumnsV8(r, ops); err != nil {
+			return nil, err
+		}
+	} else if version >= snapshotVersionV5 {
 		var err error
 		if cols, err = readColumns(r); err != nil {
 			return nil, err
@@ -297,7 +451,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		}
 	}
 	if version >= snapshotVersionV5 {
-		// Every column must have been consumed exactly. A column with bytes
+		// Every column must have been consumed exactly. A column with values
 		// left over describes runs the count did not claim, which is a second
 		// encoding of the same document and so not one this format allows.
 		if !cols.empty() {
@@ -354,9 +508,9 @@ func (d *Doc) readCharacter(r *reader, l *ledger) error {
 // that a run gets exactly the checks a character-at-a-time snapshot got: the
 // shorter encoding buys space, not trust.
 func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
-	id, ok1 := steppedID(c.sites, c.seqs, version, lastRunSeq)
+	id, ok1 := steppedID(c.sites, c.seqs, version >= snapshotVersionV4, lastRunSeq)
 	clock, ok2 := c.clocks.uvarint()
-	origin, ok3 := steppedID(c.oSites, c.oSeqs, version, lastOriginSeq)
+	origin, ok3 := steppedID(c.oSites, c.oSeqs, version >= snapshotVersionV4, lastOriginSeq)
 	length, ok4 := c.lengths.uvarint()
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return ErrMalformed
@@ -382,33 +536,33 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 		clock += id.Seq
 	}
 	// A run of no characters says nothing and would let a snapshot claim any
-	// number of them; each character costs at least a byte still to be read.
-	if length == 0 || length > uint64(len(c.text.buf)) || clock > MaxClock ||
+	// number of them; each character costs at least a value still to be read.
+	if length == 0 || length > c.text.remaining() || clock > MaxClock ||
 		clock < id.Seq || !origin.wellFormed() || !id.wellFormed() {
 		return ErrMalformed
 	}
-	text := make([]rune, length)
-	for i := range text {
+	text := make([]rune, 0, c.text.hint(length))
+	for range length {
 		ch, ok := c.text.uvarint()
 		if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
 			return ErrMalformed
 		}
-		text[i] = rune(ch)
+		text = append(text, rune(ch))
 	}
 
 	// The deleted stretches, as gaps and lengths. They must ascend, not overlap
 	// and stay inside the run, or the characters they name would be the wrong
 	// ones.
 	nDels, ok := c.delCounts.uvarint()
-	if !ok || nDels > uint64(len(c.delFld.buf)) {
+	if !ok || nDels > c.delGaps.remaining() {
 		return ErrMalformed
 	}
-	dels := make([]delRange, 0, nDels)
+	dels := make([]delRange, 0, c.delGaps.hint(nDels))
 	at := uint64(0)
 	for range nDels {
-		gap, ok1 := c.delFld.uvarint()
-		span, ok2 := c.delFld.uvarint()
-		delID, ok3 := c.delFld.delID(version, lastDelSeq)
+		gap, ok1 := c.delGaps.uvarint()
+		span, ok2 := c.delSpans.uvarint()
+		delID, ok3 := steppedID(c.delSites, c.delSeqs, version >= snapshotVersionV3, lastDelSeq)
 		if !ok1 || !ok2 || !ok3 || span == 0 || gap > length ||
 			!delID.wellFormed() || delID.IsRoot() {
 			return ErrMalformed
@@ -574,33 +728,15 @@ func uvarint(buf []byte) (uint64, int) {
 	return v, used
 }
 
-// steppedID reads an identity whose sequence number version 4 writes as a signed
-// step from the last one that site used in the same position — a run's own, or a
-// run's origin. Each position keeps its own running value, which is why the map
-// is a parameter rather than a field.
+// steppedID reads an identity from two columns: one of sites, one of sequence
+// numbers. From version 3 a deletion's sequence number, and from version 4 a
+// run's own and its origin's, are written as a signed step from the last one
+// that site used in that position, which is what stepped selects. Each position
+// keeps its own running value, which is why the map is a parameter rather than
+// a field.
 //
 // The root origin is site 0, sequence 0, and it is common; a step of zero from a
 // running value of zero is one byte, which is what it was before.
-func steppedID(siteCol, seqCol *reader, version byte, last map[SiteID]uint64) (ID, bool) {
-	if version < snapshotVersionV4 {
-		// Before version 4 the two came from one stream, one after the other,
-		// which is what id already reads. Spelling it out again here would be
-		// the same code twice, and the copy would be the one no test reaches.
-		return siteCol.id()
-	}
-	site, ok1 := siteCol.uvarint()
-	step, ok2 := seqCol.uvarint()
-	if !ok1 || !ok2 {
-		return ID{}, false
-	}
-	at := SiteID(site)
-	seq := uint64(int64(last[at]) + unzigzag(step))
-	last[at] = seq
-	return ID{Site: at, Seq: seq}, true
-}
-
-// delID reads a deletion's identity, which version 3 writes as a signed step
-// from the last sequence number that site deleted with.
 //
 // A step is signed, so it can land where no operation is: at zero, or below it,
 // or past the clock ceiling. Nothing extra is checked here for that, and the
@@ -614,17 +750,21 @@ func steppedID(siteCol, seqCol *reader, version byte, last map[SiteID]uint64) (I
 //
 // The running value is left poisoned on a bad step, which costs nothing:
 // decoding stops at the first refusal.
-func (r *reader) delID(version byte, last map[SiteID]uint64) (ID, bool) {
-	if version < snapshotVersionV3 {
-		return r.id()
-	}
-	site, ok1 := r.uvarint()
-	step, ok2 := r.uvarint()
+//
+// Before the version that made a field a step, the two numbers came from one
+// stream, one after the other. That needs no branch of its own: the columns are
+// the same reader then, and site-then-sequence is the order they went past in.
+func steppedID(siteCol, seqCol *column, stepped bool, last map[SiteID]uint64) (ID, bool) {
+	site, ok1 := siteCol.uvarint()
+	seq, ok2 := seqCol.uvarint()
 	if !ok1 || !ok2 {
 		return ID{}, false
 	}
 	at := SiteID(site)
-	seq := uint64(int64(last[at]) + unzigzag(step))
+	if !stepped {
+		return ID{Site: at, Seq: seq}, true
+	}
+	seq = uint64(int64(last[at]) + unzigzag(seq))
 	last[at] = seq
 	return ID{Site: at, Seq: seq}, true
 }
@@ -707,28 +847,47 @@ func sortIDs(ids []ID) {
 const sortIDsInsertionMax = 32
 
 // columns is where each field of a run is read from. Version 5 gives every one
-// its own stream; earlier versions interleave them, which is this with all nine
-// pointing at the same reader.
+// its own stream; earlier versions interleave them, which is this with all
+// twelve pointing at the same reader.
 type columns struct {
-	sites, seqs, clocks     *reader
-	oSites, oSeqs, lengths  *reader
-	text, delCounts, delFld *reader
+	sites, seqs, clocks    *column
+	oSites, oSeqs, lengths *column
+	text, delCounts        *column
+	delGaps, delSpans      *column
+	delSites, delSeqs      *column
+}
+
+// all lists the columns once, so that nothing below can walk a different set of
+// them from the one readColumnsV8 filled in.
+func (c *columns) all() []**column {
+	return []**column{&c.sites, &c.seqs, &c.clocks, &c.oSites, &c.oSeqs,
+		&c.lengths, &c.text, &c.delCounts, &c.delGaps, &c.delSpans,
+		&c.delSites, &c.delSeqs}
 }
 
 // sameStream is how every version before 5 is read: the fields go past in the
 // order the columns are listed in, so one reader serves all of them.
 func sameStream(r *reader) *columns {
-	return &columns{sites: r, seqs: r, clocks: r, oSites: r, oSeqs: r,
-		lengths: r, text: r, delCounts: r, delFld: r}
+	c := &columns{}
+	shared := &column{r: r, plain: true}
+	for _, into := range c.all() {
+		*into = shared
+	}
+	return c
 }
 
-// readColumns takes apart the nine length-prefixed streams a version 5 snapshot
-// writes. A length past the end of what is left is refused here rather than
-// discovered field by field later.
+// readColumns takes apart the nine length-prefixed streams a version 5 or 6
+// snapshot writes. A length past the end of what is left is refused here rather
+// than discovered field by field later.
+//
+// Those versions write the deletion fields as one column of gap, span, site and
+// step repeated, so the four columns version 8 splits them into all read from
+// that one stream, in that order.
 func readColumns(r *reader) (*columns, error) {
 	c := &columns{}
-	for _, into := range []**reader{&c.sites, &c.seqs, &c.clocks, &c.oSites,
-		&c.oSeqs, &c.lengths, &c.text, &c.delCounts, &c.delFld} {
+	var delFields *column
+	for _, into := range []**column{&c.sites, &c.seqs, &c.clocks, &c.oSites,
+		&c.oSeqs, &c.lengths, &c.text, &c.delCounts, &delFields} {
 		n, ok := r.uvarint()
 		if !ok || n > uint64(len(r.buf)) {
 			return nil, ErrMalformed
@@ -737,16 +896,249 @@ func readColumns(r *reader) (*columns, error) {
 		// short. Checking it again would be a line that looks like a guard and
 		// never runs — the coverage says so, and removing it changed nothing.
 		buf, _ := r.bytes(int(n))
-		*into = &reader{buf: buf}
+		*into = &column{r: &reader{buf: buf}, plain: true}
+	}
+	c.delGaps, c.delSpans, c.delSites, c.delSeqs = delFields, delFields, delFields, delFields
+	return c, nil
+}
+
+// readColumnsV8 takes apart the twelve length-prefixed columns of a version 8
+// snapshot. Each begins with a byte saying how it is stored, and holds groups
+// rather than plain values, so how many values it holds is counted here: a
+// run-length column no longer costs a byte per value, and a run's length has to
+// be held to the values that are actually there rather than to the bytes they
+// occupy.
+//
+// ops is what the version vector promises. No column can hold more values than
+// that — one per run, one per character or one per deleted stretch, and each of
+// those is an operation the vector has to account for — so a column claiming
+// more is refused before anything is decoded from it.
+func readColumnsV8(r *reader, ops uint64) (*columns, error) {
+	c := &columns{}
+	for _, into := range c.all() {
+		n, ok := r.uvarint()
+		// A column is at least its encoding byte, so a length of zero is not a
+		// short column but a missing one.
+		if !ok || n == 0 || n > uint64(len(r.buf)) {
+			return nil, ErrMalformed
+		}
+		buf, _ := r.bytes(int(n))
+		groups, err := readColumnStream(buf, ops)
+		if err != nil {
+			return nil, err
+		}
+		values, ok := countColumn(groups, ops)
+		if !ok {
+			return nil, ErrMalformed
+		}
+		*into = &column{r: &reader{buf: groups}, n: values}
 	}
 	return c, nil
 }
 
+// readColumnStream unwraps a column's payload to the groups inside it.
+//
+// [columnDeflated] is understood and never written, which is deliberate and is
+// the whole of what this package does about compressing the text. Measured on
+// automerge-paper, deflating the text column takes a version 8 snapshot from
+// 259 878 bytes to 128 259 — and takes the same snapshot compressed by whoever
+// stores it from 110 487 to 110 512, which is 25 bytes the wrong way.
+// docs/performance.md says compression belongs beside the format rather than
+// inside it, because a compressor's output is deterministic for a build and not
+// across versions of itself, and Snapshot promises the same state is the same
+// bytes. Emitting this would break that promise for a saving only a caller that
+// stores snapshots raw would ever see. So the reader learns it now — a peer
+// that sends it is understood rather than refused — and whether to write it is
+// a decision with a number attached, in docs/performance.md, and one constant
+// away.
+//
+// A compressed column is the one place where a snapshot's own length stops
+// bounding what reading it costs, so the output is held to twenty bytes per
+// operation the version vector promises: a value is at most a ten-byte uvarint
+// and its group header at most another ten.
+//
+// No test can tell that ceiling from its absence by what Load returns, and the
+// reason is worth writing down rather than leaving as a gap in the suite. A
+// column may hold at most one value per operation, and eleven bytes is the most
+// a value and its share of a header can cost, so anything this refuses is
+// refused again by countColumn a few lines below. What it changes is when: this
+// refuses while the bytes are arriving, and countColumn only once they have all
+// been allocated. Lifting it leaves every rejection still rejected, which is why
+// the test beside it says what it says.
+func readColumnStream(buf []byte, ops uint64) ([]byte, error) {
+	switch buf[0] {
+	case columnGroups:
+		return buf[1:], nil
+	case columnDeflated:
+		// The ceiling on ops is only there so that the multiplication cannot
+		// wrap; a version vector promising 2^58 operations describes a document
+		// no machine holds, and it is refused long before this by not adding up.
+		limit := min(ops, uint64(1)<<58) * 20
+		var out bytes.Buffer
+		n, err := io.Copy(&out, io.LimitReader(
+			flate.NewReader(bytes.NewReader(buf[1:])), int64(limit)+1))
+		if err != nil || uint64(n) > limit {
+			return nil, ErrMalformed
+		}
+		return out.Bytes(), nil
+	}
+	return nil, ErrMalformed
+}
+
+// countColumn says how many values a column holds, by walking its group headers
+// without decoding them. It stops at limit rather than counting past it, which
+// is what keeps the total from wrapping: a single run may claim 2^63 values.
+//
+// It reads the grouping and not the rules about it — a group that is legal here
+// and refused by [column.uvarint] is refused there, and refused is refused.
+func countColumn(buf []byte, limit uint64) (uint64, bool) {
+	r := reader{buf: buf}
+	total := uint64(0)
+	for len(r.buf) > 0 {
+		count, ok := r.uvarint()
+		if !ok {
+			return 0, false
+		}
+		var values uint64
+		if count%2 == 0 {
+			values = count / 2
+			if values < runThreshold {
+				return 0, false
+			}
+			if _, ok := r.uvarint(); !ok {
+				return 0, false
+			}
+		} else {
+			// A literal stretch of m values is written as 2m−1, so m is never
+			// zero and the halving cannot wrap however large the header is.
+			values = count/2 + 1
+			for range values {
+				if _, ok := r.uvarint(); !ok {
+					return 0, false
+				}
+			}
+		}
+		total += values
+		if total > limit {
+			return 0, false
+		}
+	}
+	return total, true
+}
+
+// A column is one field of a run, read one value at a time.
+//
+// Versions before 8 wrote a plain uvarint per value, and plain says so: there
+// are no groups to take apart, and how many values are left is not a question
+// the format answers, so the bytes left over stand in for it exactly as they did
+// before.
+type column struct {
+	r     *reader
+	plain bool
+	n     uint64 // values not yet produced, for a version 8 column
+
+	left    uint64 // values left in the group being read
+	lit     bool   // that group is a literal stretch
+	first   bool   // the next value is the first of it
+	val     uint64 // the last value produced
+	have    bool   // one has been
+	prevLit bool   // the group before this one was a literal stretch
+	same    uint64 // how many of the same value the literal stretch ends with
+}
+
+// uvarint produces the column's next value.
+//
+// The refusals here are what make a version 8 column canonical, and they are the
+// same three facts said from the other side. A run is at least [runThreshold]
+// long, or the writer would have left it in the literals. Two literal stretches
+// never touch, or the writer would have written one. And two groups never touch
+// on the same value, nor does a literal stretch hold [runThreshold] of one, or
+// the writer would have seen a longer equal block than the one it wrote. Between
+// them there is exactly one grouping of any sequence of values, so a peer cannot
+// hand over a snapshot that decodes to a document already held and yet does not
+// match its bytes.
+//
+// What is not refused here is anything [countColumn] has already walked. It read
+// every group header and every value of this column before a value was taken
+// from it, so a read cannot come up short and a run cannot be shorter than the
+// threshold. Refusing those again would be lines that look like guards and never
+// run — the coverage says so, and removing them left every rejection rejected.
+func (c *column) uvarint() (uint64, bool) {
+	if c.plain {
+		return c.r.uvarint()
+	}
+	if c.left == 0 && !c.open() {
+		return 0, false
+	}
+	if c.lit {
+		v, _ := c.r.uvarint()
+		switch {
+		case c.first:
+			// A literal stretch beginning on the value the group before it
+			// ended on is an equal block the writer would not have cut.
+			if c.have && v == c.val {
+				return 0, false
+			}
+			c.same, c.first = 1, false
+		case v == c.val:
+			c.same++
+			if c.same >= runThreshold {
+				return 0, false
+			}
+		default:
+			c.same = 1
+		}
+		c.val = v
+	}
+	c.have = true
+	c.left--
+	c.n--
+	return c.val, true
+}
+
+// open starts the next group. A column with nothing left in it is where a run
+// asking for one more field than the snapshot holds is refused.
+func (c *column) open() bool {
+	if len(c.r.buf) == 0 {
+		return false
+	}
+	count, _ := c.r.uvarint()
+	if count%2 == 0 {
+		v, _ := c.r.uvarint()
+		if c.have && v == c.val {
+			return false
+		}
+		c.left, c.lit, c.val, c.prevLit = count/2, false, v, false
+		return true
+	}
+	if c.prevLit {
+		return false
+	}
+	c.left, c.lit, c.first, c.prevLit = count/2+1, true, true, true
+	return true
+}
+
+// remaining is the most values the column can still produce, which is what a
+// count read from another column is held to. A version 8 column knows the
+// number; before that a value cost at least a byte, so the bytes left are it.
+func (c *column) remaining() uint64 {
+	if c.plain {
+		return uint64(len(c.r.buf))
+	}
+	return c.n
+}
+
+// hint sizes a slice for n values without believing n. A run-length column can
+// promise far more values than it holds bytes, so the bytes are the ceiling on
+// what is allocated up front; the slice grows to the rest as it arrives.
+func (c *column) hint(n uint64) uint64 {
+	return min(n, uint64(len(c.r.buf))+1)
+}
+
 // empty reports whether every column was consumed to its end.
 func (c *columns) empty() bool {
-	for _, r := range []*reader{c.sites, c.seqs, c.clocks, c.oSites, c.oSeqs,
-		c.lengths, c.text, c.delCounts, c.delFld} {
-		if len(r.buf) != 0 {
+	for _, col := range c.all() {
+		if (*col).left != 0 || len((*col).r.buf) != 0 {
 			return false
 		}
 	}

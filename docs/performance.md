@@ -16,7 +16,7 @@ Apple M4 Max, Go 1.26.4, `darwin/arm64`:
 | apply the same history as a peer's operations | **52.9 ms** — 204 ns/operation |
 | deliver it **back to front**, nothing applicable until the last operation | **0.25 s** |
 | memory held afterwards | **4.3 MiB** — 24.6 bytes per character including tombstones |
-| the document encoded | **620 KB** — 5.9 bytes per visible character |
+| the document encoded | **260 KB** — 2.5 bytes per visible character |
 
 Reproduce it, and check the result against the recorded final text:
 
@@ -79,7 +79,8 @@ Encoding the replayed document:
 | yjs 13.6.32 (V2 encoding) | 160 KB | 70 KB | 2.30× |
 | loro-crdt 1.15.1 | 251 KB | 193 KB | 1.30× |
 | yjs 13.6.32 (V1 encoding) | 311 KB | 105 KB | 2.96× |
-| **go-crdt/crdt 0.15.0** | **478 KB** | **116 KB** | **4.13×** |
+| **go-crdt/crdt**, format version 8 | **260 KB** | **113 KB** | **2.31×** |
+| *go-crdt/crdt 0.15.0* | *478 KB* | *116 KB* | *4.13×* |
 | *go-crdt/crdt 0.14.0* | *527 KB* |
 | *go-crdt/crdt 0.5.0* | *620 KB* |
 | *go-crdt/crdt 0.4.0, when this was measured* | *2 663 KB* |
@@ -111,28 +112,32 @@ one that compares the same operation applied to everybody.
 
 ### Uncompressed is not the only column, and the other one says something else
 
-Uncompressed we are last of six. **Through gzip we are fourth of six**, ahead of
-Automerge and Loro, and within a quarter of diamond-types — 4.4× their size
-becomes 1.24×. Both numbers are true; this page reported only the first one for
-several releases, which overstated the gap.
+Uncompressed we are third of six at version 8, behind diamond-types and
+Automerge; at version 6 we were last. **Through gzip we are fourth of six**,
+ahead of Automerge and Loro, and within a quarter of diamond-types. Both numbers
+are true; this page reported only the first one for several releases, which
+overstated the gap.
 
 The **ratio** is the part worth reading. **Automerge does not compress at all**:
 129 103 bytes in, 129 161 out. It grows by 58 bytes, which is gzip's header on a
 stream with nothing left to find. diamond-types manages 1.17×, Loro 1.30×.
 
-Ours is 4.13×.
+Ours was 4.13× and is now 2.31×, and what is left of it is the text: the
+structure is 78 KB with next to nothing in it for a compressor to find, and the
+182 KB of English prose beside it is not.
 
 Run-length encoding is not a technique to weigh here, it is the baseline: the
 diamond-types encoding module opens by saying it "is modelled after the
 run-length encoding in Automerge and Yjs", so all three implementations ahead of
 us use it and the fastest and smallest says so in its first paragraph.
 
-The 4.13× is a direct measurement of how much redundancy this format leaves in
-the file, and it is the same finding as the field-by-field accounting below
-arrived at from the other side: three columns hold one repeated value and cost 15% of the
-file, because there is one encoding here where Automerge picks between a
+The 4.13× was a direct measurement of how much redundancy version 6 left in the
+file, and it was the same finding as the field-by-field accounting below arrived
+at from the other side: three columns held one repeated value and cost 15% of the
+file, because there was one encoding here where Automerge picks between a
 run-length, a boolean and a delta encoder per column. Its 1.00× is what those
-look like from outside.
+look like from outside. Version 8 picks per column too, and those three columns
+now cost twelve bytes between them.
 
 Where it matters depends on who is storing the bytes. `gitstore` writes through
 git, which deflates every object; `pgstore` writes a `bytea`, which Postgres
@@ -148,7 +153,7 @@ it was not the answer. If the text is 182 KB of 620, something else is 438 KB,
 and 438 KB is four times diamond-types' entire document — so compressing the
 text would have left most of the gap standing.
 
-That has since been measured rather than reasoned about, on the current format:
+That has since been measured rather than reasoned about, on version 6:
 
 | | Bytes |
 |---|---|
@@ -320,6 +325,75 @@ with the one dependency and without it we are level.
 Small documents pay a little for it: nine column lengths is nine bytes, so the
 version 2 fixture grows from 96 bytes to 105. This is a format for documents,
 and a document with two runs in it is not the one the 478 KB came from.
+
+#### And so, version 8
+
+Version 5 gave every field a column and left every column one encoding, which is
+a uvarint per value however many times that value is the same one. Version 8
+gives a column groups: a run is a count and a value, and everything else is a
+literal stretch. It also splits the deletion fields, which version 5 wrote as one
+column of gap, span, site and step over and over, into four columns of one kind
+of number each — interleaved, no two neighbours are alike and nothing repeats.
+
+On automerge-paper, **478 474 bytes to 259 890**, and the three columns that
+started [issue #88](https://github.com/go-crdt/crdt/issues/88) from 71 924 bytes
+to twelve:
+
+| Column | Version 6 | Version 8 | over |
+|---|---|---|---|
+| text | 182 315 | 182 244 | 182 315 values |
+| run sequence steps | 20 449 | 20 452 | 10 824 |
+| deletion sequence steps | 55 828 | **17 975** | 50 276 |
+| origin sequence steps | 14 660 | 14 664 | 10 824 |
+| run lengths | 11 005 | 10 918 | 10 824 |
+| deletion counts | 10 850 | 9 038 | 10 824 |
+| deletion spans | 50 297 | **3 048** | 50 276 |
+| deletion gaps | 50 286 | **1 483** | 50 276 |
+| origin sites | 10 824 | **6** | 10 824 |
+| run sites | 10 824 | **4** | 10 824 |
+| clocks | 10 824 | **4** | 10 824 |
+| deletion sites | 50 276 | **4** | 50 276 |
+| **total** | **478 438** | **259 840** | |
+
+The threshold is measured rather than chosen. A run costs a count and a value;
+leaving a pair in the literals costs the two values and nothing else, while
+writing it as a run also costs the two group headers that cutting the literal
+stretch in half needs. Over these twelve columns a threshold of two costs 266 270
+bytes, three costs 259 840, four 259 808 and six 261 016. Three is where it
+turns, and it is the smallest number at which no column here is larger than
+writing it out plainly would have been — the two that are, run and origin
+sequence steps, are three and four bytes larger.
+
+**What this does not buy is compressed bytes.** Compressed per column, which is
+what a store does, version 6 is 112 211 bytes with the standard library's flate
+and version 8 is 110 487: 1.5%. Whole-blob gzip goes 115 897 to 112 522. A
+general-purpose compressor was already finding almost all of this; what version 8
+changes is the size of a snapshot nobody has compressed, which is what `DirStore`,
+`MemoryStore` and every transport hold, and it halves it.
+
+#### The compressed text chunk, and why nothing writes one
+
+diamond-types LZ4s its text for any document over twenty bytes, and the obvious
+next step here is the same thing with `compress/flate`. A version 8 column says
+in its first byte how it is stored, and the reader understands a deflated one, so
+a peer or a later release can send one without this build refusing the snapshot.
+Nothing here sends one. The numbers are why:
+
+| | Bytes |
+|---|---|
+| version 8 | 259 890 |
+| version 8 with the text column deflated | **128 270** |
+| version 8, compressed per column by whoever stores it | 110 487 |
+| the same, with the text column deflated first | 110 512 |
+
+It halves a snapshot nobody compresses and costs 25 bytes to everybody who does.
+And it costs the promise directly above: `Snapshot` says the same state is the
+same bytes, and two replicas on different builds of Go would stop agreeing about
+a document they both hold. So the reader learns it and the writer does not, which
+is the same order [#83](https://github.com/go-crdt/crdt/pull/83) shipped
+`OpSuperseded` in. Writing it is one constant, and it wants a caller that stores
+snapshots raw and does not need them comparable — which is a decision about
+callers rather than about the format.
 
 ### Memory
 
@@ -569,7 +643,7 @@ plain that nobody else pays that.
 Version 2 writes a run at a time — one header for a stretch one site typed
 consecutively, then its text, then the stretches of it that have been deleted —
 because everything about the characters in a run follows from the first one.
-**2 663 KB → 620 KB on the real trace, 25.4 → 5.9 bytes per visible character**,
+**2 663 KB → 260 KB on the real trace, 25.4 → 2.5 bytes per visible character**,
 and writing it is twelve times faster.
 
 Version 1 is still read, so a document stored by an older build opens; the test
