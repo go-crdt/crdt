@@ -72,14 +72,14 @@ taken; the other implementations have not been re-run.
 
 Encoding the replayed document:
 
-| Implementation | Encoded document |
-|---|---|
-| diamond-types 1.0.2 | 109 KB |
-| @automerge/automerge 3.4.1 | 129 KB |
-| yjs 13.6.32 (V2 encoding) | 160 KB |
-| loro-crdt 1.14.1 | 251 KB |
-| yjs 13.6.32 (V1 encoding) | 311 KB |
-| **go-crdt/crdt 0.15.0** | **478 KB** |
+| Implementation | Encoded document | Through gzip -6 | Ratio |
+|---|---|---|---|
+| diamond-types 1.0.2 | 109 KB | 93 KB | 1.17× |
+| @automerge/automerge 3.4.1 | 129 KB | **129 KB** | **1.00×** |
+| yjs 13.6.32 (V2 encoding) | 160 KB | 70 KB | 2.30× |
+| loro-crdt 1.15.1 | 251 KB | 193 KB | 1.30× |
+| yjs 13.6.32 (V1 encoding) | 311 KB | 105 KB | 2.96× |
+| **go-crdt/crdt 0.15.0** | **478 KB** | **116 KB** | **4.13×** |
 | *go-crdt/crdt 0.14.0* | *527 KB* |
 | *go-crdt/crdt 0.5.0* | *620 KB* |
 | *go-crdt/crdt 0.4.0, when this was measured* | *2 663 KB* |
@@ -88,6 +88,32 @@ This is what the comparison was for. At 0.4.0 ours was between eight and
 twenty-four times larger than anyone else's, because `Snapshot` wrote one record
 per character while everyone else writes runs. Version 2 of the format writes
 runs too, which took it to 620 KB.
+
+### Uncompressed is not the only column, and the other one says something else
+
+Uncompressed we are last of six. **Through gzip we are fourth of six**, ahead of
+Automerge and Loro, and within a quarter of diamond-types — 4.4× their size
+becomes 1.24×. Both numbers are true; this page reported only the first one for
+several releases, which overstated the gap.
+
+The **ratio** is the part worth reading. **Automerge does not compress at all**:
+129 103 bytes in, 129 161 out. It grows by 58 bytes, which is gzip's header on a
+stream with nothing left to find. diamond-types manages 1.17×, Loro 1.30×.
+
+Ours is 4.13×.
+
+That is a direct measurement of how much redundancy this format leaves in the
+file, and it is the same finding as the field-by-field accounting below arrived
+at from the other side: three columns hold one repeated value and cost 15% of the
+file, because there is one encoding here where Automerge picks between a
+run-length, a boolean and a delta encoder per column. Its 1.00× is what those
+look like from outside.
+
+Where it matters depends on who is storing the bytes. `gitstore` writes through
+git, which deflates every object; `pgstore` writes a `bytea`, which Postgres
+compresses once it is large enough. Both collect most of that 4.13× without
+anyone doing anything. `DirStore` and `MemoryStore` do not, and neither does a
+transport. See [issue #88](https://github.com/go-crdt/crdt/issues/88).
 
 ### What the gap actually was
 

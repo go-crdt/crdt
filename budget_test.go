@@ -1,6 +1,8 @@
 package crdt
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/binary"
 	"sort"
 	"testing"
@@ -151,6 +153,24 @@ func TestSnapshotBudget(t *testing.T) {
 	}
 
 	total := len(d.Snapshot())
+
+	// The same document through gzip -6, which is what a store or a transport
+	// applies on top. docs/comparison reports this for every other
+	// implementation, so that the size table can compare like with like: a
+	// format that has already removed its own redundancy has little left to give
+	// here, and the ratio is how much a general-purpose compressor still finds.
+	var squeezed bytes.Buffer
+	zw, err := gzip.NewWriterLevel(&squeezed, 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zw.Write(d.Snapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("gzip -6: %d bytes, %.2fx", squeezed.Len(), float64(total)/float64(squeezed.Len()))
 	parts := []struct {
 		name string
 		size int
