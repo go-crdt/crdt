@@ -148,6 +148,24 @@ it was not the answer. If the text is 182 KB of 620, something else is 438 KB,
 and 438 KB is four times diamond-types' entire document — so compressing the
 text would have left most of the gap standing.
 
+That has since been measured rather than reasoned about, on the current format:
+
+| | Bytes |
+|---|---|
+| the snapshot | 478 474 |
+| its text column | 182 315 → 49 637 through gzip (3.67×) |
+| everything else | 296 159 |
+| the whole thing through gzip | 115 897 (4.13×) |
+| **compressing only the text** | **345 796 (1.38×)** |
+
+Of the 362 KB a general-purpose compressor removes from this file, the text is
+**133 KB of it and the structure 230 KB**. The text is the largest single
+component of the file and it is not where most of the removable redundancy is;
+those are different questions. Compressing the text is worth 1.38× on its own —
+worth having, and much less work — but the columns are where the larger share
+sits. This is the same conclusion the paragraph above reached in 2026 by
+subtraction, with the number attached.
+
 `TestSnapshotBudget` accounts for every byte `Snapshot` writes, by the field
 that wrote it. On the same document, under version 2:
 
