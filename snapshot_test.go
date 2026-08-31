@@ -344,8 +344,9 @@ type encodedRun struct {
 	text                                    []rune
 	length                                  uint64 // overrides the encoded length
 	dels                                    [][4]uint64
-	delCount                                int  // overrides the encoded number of deletions
-	purged                                  bool // version 7: its characters were discarded
+	delCount                                int    // overrides the encoded number of deletions
+	purged                                  bool   // version 7: its characters were discarded
+	purgedFlag                              uint64 // overrides the encoded flag
 }
 
 func (b runBuilder) build() []byte {
@@ -410,7 +411,11 @@ func (b runBuilder) build() []byte {
 	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts, delFields, purged []byte
 	for _, r := range b.runs {
 		runSites = binary.AppendUvarint(runSites, r.site)
-		purged = binary.AppendUvarint(purged, boolByte(r.purged))
+		flag := uint64(boolByte(r.purged))
+		if r.purgedFlag != 0 {
+			flag = r.purgedFlag
+		}
+		purged = binary.AppendUvarint(purged, flag)
 		seqs = binary.AppendUvarint(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
 		lastRun[SiteID(r.site)] = r.seq
 		clocks = binary.AppendUvarint(clocks, r.clock-r.seq)
@@ -780,6 +785,7 @@ func TestLoadRejectsMalformedColumns(t *testing.T) {
 		r.uvarint()
 		r.uvarint()
 	}
+	r.uvarint() // version 7: the purge floor
 	r.uvarint() // the run count
 	colsAt := len(good) - len(r.buf)
 

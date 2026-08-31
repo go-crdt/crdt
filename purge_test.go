@@ -285,3 +285,14 @@ func TestLoadRefusesAPurgedRunPastItsVersion(t *testing.T) {
 		t.Fatalf("a purged run from a site with nothing issued loaded with %v, want ErrMalformed", err)
 	}
 }
+
+// The purged column holds a flag, and a flag is nought or one. Anything else
+// describes a run this encoder could not have written, so it is refused rather
+// than read as truthy.
+func TestLoadRefusesAPurgedFlagThatIsNeitherTrueNorFalse(t *testing.T) {
+	odd := purgedRun()
+	odd.runs[0].purgedFlag = 2
+	if _, err := Load(2, odd.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged flag of 2 loaded with %v, want ErrMalformed", err)
+	}
+}

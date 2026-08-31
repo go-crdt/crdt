@@ -840,10 +840,9 @@ func readCollected(r *reader) error {
 // size is how many characters this run holds, whether or not it still has them.
 func (r run) size() uint64 {
 	if r.gone {
-		if n := len(r.dels); n > 0 {
-			return uint64(r.dels[n-1].to)
-		}
-		return 0
+		// See the note on block.size: a purged run always has deletions
+		// covering it, so the last one's end is its length.
+		return uint64(r.dels[len(r.dels)-1].to)
 	}
 	return uint64(len(r.text))
 }
