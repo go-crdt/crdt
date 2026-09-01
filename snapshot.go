@@ -58,6 +58,27 @@ const (
 	snapshotVersionV1 = 1
 )
 
+// textFormats is every version of a text snapshot this build reads, ascending.
+//
+// One list, read by [Load] and by [Reads]: a peer is told what the loader does
+// rather than what a second list says it does, and a version added to one
+// without the other is not a way this can go wrong. Note the gap where 7 is.
+var textFormats = []byte{
+	snapshotVersionV1, snapshotVersionV2, snapshotVersionV3,
+	snapshotVersionV4, snapshotVersionV5, snapshotVersionV6,
+	snapshotVersion,
+}
+
+// knownFormat reports whether v is one of them.
+func knownFormat(versions []byte, v byte) bool {
+	for _, known := range versions {
+		if known == v {
+			return true
+		}
+	}
+	return false
+}
+
 // runThreshold is how many of the same value in a row it takes to be worth
 // writing as a run rather than leaving in the literal stretch around it.
 //
@@ -347,9 +368,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	if !ok {
 		return nil, ErrMalformed
 	}
-	if v[0] != snapshotVersion && v[0] != snapshotVersionV6 &&
-		v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
-		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1 {
+	if !knownFormat(textFormats, v[0]) {
 		return nil, unknownFormat(v[0], snapshotVersion)
 	}
 	version := v[0]
