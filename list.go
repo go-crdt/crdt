@@ -797,7 +797,7 @@ func LoadList(site SiteID, snapshot []byte) (*List, error) {
 		return nil, ErrMalformed
 	}
 	if v[0] != listVersion && v[0] != listVersionV1 {
-		return nil, ErrUnknownFormat
+		return nil, unknownFormat(v[0], listVersion)
 	}
 	version := v[0]
 

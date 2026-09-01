@@ -350,7 +350,7 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	if v[0] != snapshotVersion && v[0] != snapshotVersionV6 &&
 		v[0] != snapshotVersionV5 && v[0] != snapshotVersionV4 &&
 		v[0] != snapshotVersionV3 && v[0] != snapshotVersionV2 && v[0] != snapshotVersionV1 {
-		return nil, ErrUnknownFormat
+		return nil, unknownFormat(v[0], snapshotVersion)
 	}
 	version := v[0]
 
