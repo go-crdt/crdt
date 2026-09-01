@@ -2,6 +2,8 @@ package crdt
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -76,5 +78,33 @@ func TestAFormatThisBuildDoesNotKnowIsToldApartFromDamage(t *testing.T) {
 				t.Fatalf("truncated bytes were reported as an unknown format: %v", err)
 			}
 		})
+	}
+}
+
+// The error says which version it found and which is the highest this build
+// reads, because those are the two numbers the person holding the bytes has to
+// compare and neither is in anything they can see.
+func TestAnUnknownFormatSaysWhichVersion(t *testing.T) {
+	d := New(1)
+	if _, err := d.Insert(0, "hello"); err != nil {
+		t.Fatal(err)
+	}
+	snap := d.Snapshot()
+	at := 0
+	for at < len(snap) && snap[at] >= 'a' && snap[at] <= 'z' {
+		at++
+	}
+	highest := snap[at]
+
+	future := append([]byte(nil), snap...)
+	future[at] = 200
+	_, err := Load(2, future)
+	if !errors.Is(err, ErrUnknownFormat) {
+		t.Fatalf("Load = %v, want ErrUnknownFormat", err)
+	}
+	for _, want := range []string{"200", strconv.Itoa(int(highest))} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the message does not carry %q: %v", want, err)
+		}
 	}
 }

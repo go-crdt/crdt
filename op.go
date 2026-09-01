@@ -117,6 +117,21 @@ var ErrMalformed = errors.New("crdt: malformed encoding")
 // same answer. What is new is being able to ask the narrower one.
 var ErrUnknownFormat = fmt.Errorf("%w: format version this build does not know", ErrMalformed)
 
+// unknownFormat reports [ErrUnknownFormat] and says which version was found and
+// which is the highest this build reads, because the two numbers are what the
+// person holding the bytes has to compare and neither is in the snapshot they
+// can see.
+//
+// Loro says the same thing the same way -- its IncompatibleFutureEncodingError
+// carries the version -- and its message is worth quoting for the doctrine
+// rather than the wording: "Loro's encoding is backward compatible but not
+// forward compatible. Please upgrade the version of Loro to support this version
+// of the exported data."
+func unknownFormat(found, highest byte) error {
+	return fmt.Errorf("%w: found version %d, this build reads up to %d",
+		ErrUnknownFormat, found, highest)
+}
+
 // ErrExhausted reports a replica that can issue no further operations because
 // its Lamport clock has reached [MaxClock]. Reaching it honestly is not
 // something a running program does; see [MaxClock].
