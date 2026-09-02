@@ -722,10 +722,11 @@ func (l *List) OpsSince(vv VersionVector) []ListOp {
 // is refused rather than misread.
 var listMagic = [...]byte{'c', 'r', 'd', 'l'}
 
-const (
-	listVersion   = 2
-	listVersionV1 = 1
-)
+// listVersion 2 carries the two tables [readCollected] refuses to see filled.
+// Version 1, which had neither, was read until #99 and is refused as unknown
+// now: nothing holds a version 1 list, and a reader kept for bytes nobody has is
+// a reader nothing real exercises.
+const listVersion = 2
 
 // Snapshot encodes the whole list — every value, present or removed, in order,
 // plus the version vector. It is what a server sends a client joining, and what
@@ -746,13 +747,9 @@ func (l *List) Snapshot() []byte {
 		out = binary.AppendUvarint(out, l.vv[site])
 	}
 
-	// Version 2: what collection has taken away. The floor says how far back
-	// this replica can still be read, and the per-site tallies are what keeps
-	// the accounting exact — a loader counts what it reads and these are the
-	// ones it will not find. Two bytes for a list nobody has collected.
-	// Version 2 carries two tables here, both of them always empty: they were
-	// written for a collection that was withdrawn. Reading refuses a snapshot
-	// whose tables are not, because nothing sound could have produced one.
+	// Two tables, both of them always empty: they were written for a collection
+	// that was withdrawn. Reading refuses a snapshot whose tables are not,
+	// because nothing sound could have produced one.
 	out = binary.AppendUvarint(out, 0)
 	out = binary.AppendUvarint(out, 0)
 
@@ -796,10 +793,9 @@ func LoadList(site SiteID, snapshot []byte) (*List, error) {
 	if !ok {
 		return nil, ErrMalformed
 	}
-	if v[0] != listVersion && v[0] != listVersionV1 {
+	if v[0] != listVersion {
 		return nil, unknownFormat(v[0], listVersion)
 	}
-	version := v[0]
 
 	l := NewList(site)
 	nSites, ok := r.uvarint()
@@ -827,10 +823,8 @@ func LoadList(site SiteID, snapshot []byte) (*List, error) {
 	// back runs the same integration an operation would and that advances the
 	// list's vector as it goes. The snapshot's vector is the authority, and is
 	// put back once everything is in.
-	if version >= listVersion {
-		if err := readCollected(r); err != nil {
-			return nil, err
-		}
+	if err := readCollected(r); err != nil {
+		return nil, err
 	}
 
 	promised := l.vv.Clone()

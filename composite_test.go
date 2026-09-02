@@ -1593,65 +1593,6 @@ func TestLoadCompositeHoldsTheClockCeiling(t *testing.T) {
 	}
 }
 
-// A part written by an older build still opens, and is written back in the
-// current form. That is the one input this decoder accepts and does not return
-// unchanged, and it is why the fuzzer asserts the fixed point on what it
-// produced rather than on what it was given.
-func TestLoadCompositeNormalisesAnOlderPart(t *testing.T) {
-	d := New(1)
-	if _, err := d.Insert(0, "ab"); err != nil {
-		t.Fatal(err)
-	}
-	current := d.Snapshot()
-	// Version 1 wrote one record per character; the loader still reads it.
-	old := append([]byte{}, snapshotMagic[:]...)
-	old = append(old, snapshotVersionV1)
-	old = binary.AppendUvarint(old, 1)
-	old = binary.AppendUvarint(old, 1)
-	old = binary.AppendUvarint(old, 2)
-	old = binary.AppendUvarint(old, 2)
-	for i, ch := range []rune("ab") {
-		originSite := uint64(0)
-		if i > 0 {
-			originSite = 1
-		}
-		old = binary.AppendUvarint(old, 1)           // site
-		old = binary.AppendUvarint(old, uint64(i+1)) // seq
-		old = binary.AppendUvarint(old, uint64(i+1)) // clock
-		old = binary.AppendUvarint(old, originSite)  // origin site
-		old = binary.AppendUvarint(old, uint64(i))   // origin seq
-		old = binary.AppendUvarint(old, uint64(ch))  // character
-		old = binary.AppendUvarint(old, 0)           // deletion site
-		old = binary.AppendUvarint(old, 0)           // deletion seq
-	}
-	old = binary.AppendUvarint(old, 0)
-	if bytes.Equal(old, current) {
-		t.Fatal("the control failed: the two encodings are the same bytes")
-	}
-
-	wrapped := encodeCompositeSnapshot(uint64(1), []byte{byte(PartText)}, "file", sizedPayload(old))
-	loaded, err := LoadComposite(2, wrapped)
-	if err != nil {
-		t.Fatalf("LoadComposite of a part in the older form: %v", err)
-	}
-	if got := textPart(t, loaded, "file").String(); got != "ab" {
-		t.Fatalf("text = %q, want %q", got, "ab")
-	}
-	want := encodeCompositeSnapshot(uint64(1), []byte{byte(PartText)}, "file", sizedPayload(current))
-	if !bytes.Equal(loaded.Snapshot(), want) {
-		t.Fatal("an older part was not written back in the current form")
-	}
-	// And what it wrote back is a fixed point, which is the property that holds
-	// for everything this package produces.
-	again, err := LoadComposite(2, loaded.Snapshot())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(again.Snapshot(), loaded.Snapshot()) {
-		t.Fatal("re-encoding what the loader produced is not a fixed point")
-	}
-}
-
 // Fuzzing
 
 // compositeCorpus returns a snapshot and an encoded version from a small real

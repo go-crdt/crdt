@@ -237,25 +237,6 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 		s = uv(s, 0) // no duplicate deletes
 		return s
 	}
-	// The version 1 form, one record per character, still read.
-	docChar := func(clock uint64) []byte {
-		s := append([]byte{}, snapshotMagic[:]...)
-		s = append(s, snapshotVersionV1)
-		s = uv(s, 1)
-		s = uv(s, 1)
-		s = uv(s, 1)     // site 1 at sequence number 1
-		s = uv(s, 1)     // one character
-		s = uv(s, 1)     // its site
-		s = uv(s, 1)     // its sequence number
-		s = uv(s, clock) // its clock
-		s = uv(s, 0)
-		s = uv(s, 0) // origin = root
-		s = uv(s, 'a')
-		s = uv(s, 0)
-		s = uv(s, 0) // not deleted
-		s = uv(s, 0) // no duplicate deletes
-		return s
-	}
 	listElem := func(vvSeq, clock uint64) []byte {
 		s := append([]byte{}, listMagic[:]...)
 		s = append(s, listVersion)
@@ -298,10 +279,6 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 	}{
 		{"document run", func(vvSeq, clock uint64) error {
 			_, err := Load(2, docRun(vvSeq, clock))
-			return err
-		}, 1},
-		{"version 1 character", func(_, clock uint64) error {
-			_, err := Load(2, docChar(clock))
 			return err
 		}, 1},
 		{"list element", func(vvSeq, clock uint64) error {

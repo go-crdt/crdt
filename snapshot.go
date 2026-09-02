@@ -21,70 +21,53 @@ var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 //
 // Version 8 gives every column an encoding of its own rather than one
 // uvarint per value, and splits the deletion fields into four columns so that
-// each is a stream of one kind of number. Version 6 spent 15% of a real document
-// on three columns holding a single repeated value — 10 824 clocks all zero,
-// 10 824 run sites and 50 276 deletion sites all the same author — because a
-// column had no way to say "this number, that many times". It now does: a column
-// is a sequence of groups, either a run of one value or a literal stretch, which
-// is the run-length encoding Automerge and diamond-types both settled on. On the
-// automerge-paper trace that is 478 474 bytes to 259 890, and the three columns
-// above go from 71 924 bytes to twelve. Nothing here compresses, still: a column
-// says in its first byte how it is stored and the reader understands a deflated
-// one, but nothing writes one, because Snapshot promises the same state is the
-// same bytes and a compressor is deterministic for a build rather than across
-// versions of itself. What that costs is measured in [readColumnStream].
+// each is a stream of one kind of number. The version before it spent 15% of a
+// real document on three columns holding a single repeated value — 10 824
+// clocks all zero, 10 824 run sites and 50 276 deletion sites all the same
+// author — because a column had no way to say "this number, that many times".
+// It now does: a column is a sequence of groups, either a run of one value or a
+// literal stretch, which is the run-length encoding Automerge and diamond-types
+// both settled on. On the automerge-paper trace that is 478 474 bytes to
+// 259 890, and the three columns above go from 71 924 bytes to twelve. Nothing
+// here compresses, still: a column says in its first byte how it is stored and
+// the reader understands a deflated one, but nothing writes one, because
+// Snapshot promises the same state is the same bytes and a compressor is
+// deterministic for a build rather than across versions of itself. What that
+// costs is measured in [readColumnStream].
 //
-// Version 5 writes the runs in columns — every site, then every
-// sequence number, then every clock, and so on — rather than one run at a time.
-// It is the same fields in the same encodings; only the order changes, and it
-// changes because a compressor looking for repetition in version 4 sees a run's
-// identity beside its text beside its deletions. A column is a stream of
-// similar numbers, which is what a compressor is good at: the same document
-// goes from 148 KB compressed to 97, against diamond-types' 109. The measurement
-// and the choice of compressor are in docs/performance.md. Version 4 writes a
-// run's header as steps: its own sequence number and its origin's from the last
-// the same site used, and its clock as the distance above its own sequence,
-// which it can never fall below. Version 3
-// writes a deletion's sequence number as a signed step from the previous
-// deletion by the same site; version 2 wrote it in full; version 1 wrote one
-// record per character. All of them are readable; a document stored by an older
-// build still opens.
+// Versions 1 to 6 were read until #99. They were the encodings this format
+// arrived at — one record per character, then runs, then stepped identities,
+// then columns — and nothing holds them: there are no production servers, the
+// project is in development, and a reader kept for bytes nobody has is a reader
+// nobody tests against anything real. They are refused as unknown now, which is
+// what a peer needs to hear, and [Reads] says so.
 //
-// Version 7 is not one of them, and it is the one number here nothing has ever
-// written. It was reserved for the purge while version 8 was in flight, because
-// two branches each calling the next number theirs is how one version byte comes
-// to mean two things, which is the failure this numbering exists to prevent.
-// Version 8 landed first, so the purge took 9 and 7 was left standing. It stays
-// refused rather than recycled: a build off to one side did write the purge's
-// earlier shape under it, and those bytes are not these. Reusing the number
-// would mean reading them as this format and believing the answer.
+// Version 7 is refused for a different reason, and it is the one number here
+// nothing here has ever written. It was reserved for the purge while version 8
+// was in flight, because two branches each calling the next number theirs is how
+// one version byte comes to mean two things, which is the failure this numbering
+// exists to prevent. Version 8 landed first, so the purge took 9 and 7 was left
+// standing. It stays refused rather than recycled: a build off to one side did
+// write the purge's earlier shape under it, and those bytes are not these.
+// Reusing the number would mean reading them as this format and believing the
+// answer.
 const (
 	snapshotVersion   = 9
 	snapshotVersionV8 = 8
-	snapshotVersionV6 = 6
-	snapshotVersionV5 = 5
-	snapshotVersionV4 = 4
-	snapshotVersionV3 = 3
-	snapshotVersionV2 = 2
-	snapshotVersionV1 = 1
 )
 
 // textFormats is every version of a text snapshot this build reads, ascending.
 //
 // One list, read by [Load] and by [Reads]: a peer is told what the loader does
 // rather than what a second list says it does, and a version added to one
-// without the other is not a way this can go wrong. Note the gap where 7 is.
+// without the other is not a way this can go wrong.
 //
-// Both 8 and 9 are here, and they are not a highest and its predecessor kept for
-// old bytes: this build writes either one, choosing per document in
+// Both are here, and they are not a highest and its predecessor kept for old
+// bytes: this build writes either one, choosing per document in
 // [Doc.formatVersion], so 8 is a version it still produces. A reader that
 // dropped it would refuse the snapshots of every document that has purged
 // nothing, which is most of them.
-var textFormats = []byte{
-	snapshotVersionV1, snapshotVersionV2, snapshotVersionV3,
-	snapshotVersionV4, snapshotVersionV5, snapshotVersionV6,
-	snapshotVersionV8, snapshotVersion,
-}
+var textFormats = []byte{snapshotVersionV8, snapshotVersion}
 
 // knownFormat reports whether v is one of them.
 func knownFormat(versions []byte, v byte) bool {
@@ -150,10 +133,10 @@ func (d *Doc) Snapshot() []byte {
 		out = binary.AppendUvarint(out, d.vv[site])
 	}
 
-	// Version 6 carries two tables here, both of them always empty: they were
-	// written for a collection that was withdrawn because it left two replicas
-	// holding different documents. Reading refuses a snapshot whose tables are
-	// not empty, because nothing sound could have produced one.
+	// Two tables, both of them always empty: they were written for a collection
+	// that was withdrawn because it left two replicas holding different
+	// documents. Reading refuses a snapshot whose tables are not empty, because
+	// nothing sound could have produced one.
 	out = binary.AppendUvarint(out, 0)
 	out = binary.AppendUvarint(out, 0)
 
@@ -520,13 +503,11 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		d.vv[SiteID(s)] = seq
 	}
 
-	if version >= snapshotVersionV6 {
-		if err := readCollected(r); err != nil {
-			return nil, err
-		}
+	if err := readCollected(r); err != nil {
+		return nil, err
 	}
 
-	if version >= snapshotVersion {
+	if version == snapshotVersion {
 		below, ok := r.uvarint()
 		// A floor above the ceiling names a clock no operation could carry, so
 		// it describes a document that could not have been written.
@@ -546,10 +527,10 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	if !ok || count > uint64(len(r.buf)) {
 		return nil, ErrMalformed
 	}
-	// The step a version 3 deletion is written against: the last sequence number
-	// this site deleted with, carried across runs because the encoder carries it
-	// the same way. Per site, so that a document with several authors does not
-	// pay a full-width jump every time the writer changes.
+	// The step a deletion's sequence number is written against: the last
+	// sequence number this site deleted with, carried across runs because the
+	// encoder carries it the same way. Per site, so that a document with several
+	// authors does not pay a full-width jump every time the writer changes.
 	lastDelSeq := map[SiteID]uint64{}
 	// The run header goes the same way, and for the same reason: a run's own
 	// sequence number and its origin's both climb, so the step is small where
@@ -558,45 +539,23 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	lastRunSeq := map[SiteID]uint64{}
 	lastOriginSeq := map[SiteID]uint64{}
 
-	// Where each field is read from. Version 5 gives every field a column of
-	// its own; every version before it interleaved them, which is the same
-	// thing with all twelve readers pointing at the one stream — the fields go
-	// past in the same order either way, so there is one decoder rather than
-	// two, and the older format is exercised by every test the newer one is.
-	//
-	// Version 8's four deletion columns fall out of the same trick: before it
-	// they were one column of gap, span, site and step over and over, which is
-	// those four read in that order from a stream they share.
-	cols := sameStream(r)
-	if version >= snapshotVersionV8 {
-		var err error
-		if cols, err = readColumnsV8(r, ops, version >= snapshotVersion); err != nil {
-			return nil, err
-		}
-	} else if version >= snapshotVersionV5 {
-		var err error
-		if cols, err = readColumns(r); err != nil {
-			return nil, err
-		}
+	// Where each field is read from: every field has a column of its own, and
+	// the four deletion columns are separate rather than one stream of gap,
+	// span, site and step over and over.
+	cols, err := readColumnsV8(r, ops, version == snapshotVersion)
+	if err != nil {
+		return nil, err
 	}
 	for range count {
-		var err error
-		if version == snapshotVersionV1 {
-			err = d.readCharacter(r, ledger)
-		} else {
-			err = d.readRun(cols, ledger, version, lastDelSeq, lastRunSeq, lastOriginSeq)
-		}
-		if err != nil {
+		if err := d.readRun(cols, ledger, lastDelSeq, lastRunSeq, lastOriginSeq); err != nil {
 			return nil, err
 		}
 	}
-	if version >= snapshotVersionV5 {
-		// Every column must have been consumed exactly. A column with values
-		// left over describes runs the count did not claim, which is a second
-		// encoding of the same document and so not one this format allows.
-		if !cols.empty() {
-			return nil, ErrMalformed
-		}
+	// Every column must have been consumed exactly. A column with values left
+	// over describes runs the count did not claim, which is a second encoding of
+	// the same document and so not one this format allows.
+	if !cols.empty() {
+		return nil, ErrMalformed
 	}
 
 	nDups, ok := r.uvarint()
@@ -635,22 +594,13 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	return d, nil
 }
 
-// readCharacter decodes one version 1 entry, which described a single character.
-func (d *Doc) readCharacter(r *reader, l *ledger) error {
-	c, ok := r.character()
-	if !ok {
-		return ErrMalformed
-	}
-	return d.adopt(c, l)
-}
-
-// readRun decodes one version 2 entry and adopts its characters one by one, so
-// that a run gets exactly the checks a character-at-a-time snapshot got: the
+// readRun decodes one run and adopts its characters one by one, so that a run
+// gets exactly the checks each of its characters would get on its own: the
 // shorter encoding buys space, not trust.
-func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
-	id, ok1 := steppedID(c.sites, c.seqs, version >= snapshotVersionV4, lastRunSeq)
+func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
+	id, ok1 := steppedID(c.sites, c.seqs, lastRunSeq)
 	clock, ok2 := c.clocks.uvarint()
-	origin, ok3 := steppedID(c.oSites, c.oSeqs, version >= snapshotVersionV4, lastOriginSeq)
+	origin, ok3 := steppedID(c.oSites, c.oSeqs, lastOriginSeq)
 	length, ok4 := c.lengths.uvarint()
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return ErrMalformed
@@ -671,26 +621,23 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 			return ErrMalformed
 		}
 	}
-	if version >= snapshotVersionV4 {
-		// The clock arrives as the distance above this run's own sequence
-		// number, so it is added back here and held to the ceiling below like
-		// any other clock.
-		//
-		// Nothing is checked before the addition, and it is worth writing down
-		// why, because a guard here looks prudent. The addition can overflow,
-		// but an overflow cannot pass: it means distance + sequence ≥ 2^64, so
-		// the sum lands at distance + sequence − 2^64, which is below the
-		// sequence unless the distance is itself 2^64 or more — and it cannot
-		// be, because it arrived in sixty-four bits. Every overflow therefore
-		// produces a clock below its own sequence number, which is refused.
-		//
-		// Nor is there a second encoding to worry about: for a given sequence
-		// and clock the distance between them is one number, so the canonicity
-		// the padded-varint refusal protects is not at stake. I wrote the guard
-		// first, then tried to write the test that needed it, and the test could
-		// not be written.
-		clock += id.Seq
-	}
+	// The clock arrives as the distance above this run's own sequence number, so
+	// it is added back here and held to the ceiling below like any other clock.
+	//
+	// Nothing is checked before the addition, and it is worth writing down why,
+	// because a guard here looks prudent. The addition can overflow, but an
+	// overflow cannot pass: it means distance + sequence ≥ 2^64, so the sum
+	// lands at distance + sequence − 2^64, which is below the sequence unless
+	// the distance is itself 2^64 or more — and it cannot be, because it arrived
+	// in sixty-four bits. Every overflow therefore produces a clock below its
+	// own sequence number, which is refused.
+	//
+	// Nor is there a second encoding to worry about: for a given sequence and
+	// clock the distance between them is one number, so the canonicity the
+	// padded-varint refusal protects is not at stake. I wrote the guard first,
+	// then tried to write the test that needed it, and the test could not be
+	// written.
+	clock += id.Seq
 	// A run of no characters says nothing and would let a snapshot claim any
 	// number of them; each character costs at least a value still to be read.
 	//
@@ -740,7 +687,7 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 	for range nDels {
 		gap, ok1 := c.delGaps.uvarint()
 		span, ok2 := c.delSpans.uvarint()
-		delID, ok3 := steppedID(c.delSites, c.delSeqs, version >= snapshotVersionV3, lastDelSeq)
+		delID, ok3 := steppedID(c.delSites, c.delSeqs, lastDelSeq)
 		if !ok1 || !ok2 || !ok3 || span == 0 || gap > length ||
 			!delID.wellFormed() || delID.IsRoot() {
 			return ErrMalformed
@@ -927,11 +874,10 @@ func uvarint(buf []byte) (uint64, int) {
 }
 
 // steppedID reads an identity from two columns: one of sites, one of sequence
-// numbers. From version 3 a deletion's sequence number, and from version 4 a
-// run's own and its origin's, are written as a signed step from the last one
-// that site used in that position, which is what stepped selects. Each position
-// keeps its own running value, which is why the map is a parameter rather than
-// a field.
+// numbers. A sequence number is written as a signed step from the last one that
+// site used in that position — a deletion's, a run's own, and its origin's —
+// and each position keeps its own running value, which is why the map is a
+// parameter rather than a field.
 //
 // The root origin is site 0, sequence 0, and it is common; a step of zero from a
 // running value of zero is one byte, which is what it was before.
@@ -948,20 +894,13 @@ func uvarint(buf []byte) (uint64, int) {
 //
 // The running value is left poisoned on a bad step, which costs nothing:
 // decoding stops at the first refusal.
-//
-// Before the version that made a field a step, the two numbers came from one
-// stream, one after the other. That needs no branch of its own: the columns are
-// the same reader then, and site-then-sequence is the order they went past in.
-func steppedID(siteCol, seqCol *column, stepped bool, last map[SiteID]uint64) (ID, bool) {
+func steppedID(siteCol, seqCol *column, last map[SiteID]uint64) (ID, bool) {
 	site, ok1 := siteCol.uvarint()
 	seq, ok2 := seqCol.uvarint()
 	if !ok1 || !ok2 {
 		return ID{}, false
 	}
 	at := SiteID(site)
-	if !stepped {
-		return ID{Site: at, Seq: seq}, true
-	}
 	seq = uint64(int64(last[at]) + unzigzag(seq))
 	last[at] = seq
 	return ID{Site: at, Seq: seq}, true
@@ -974,33 +913,6 @@ func (r *reader) id() (ID, bool) {
 		return ID{}, false
 	}
 	return ID{Site: SiteID(site), Seq: seq}, true
-}
-
-// character decodes one entry, rejecting field combinations that cannot describe
-// a real character before anything is built from them.
-func (r *reader) character() (character, bool) {
-	id, ok := r.id()
-	if !ok {
-		return character{}, false
-	}
-	clock, ok := r.uvarint()
-	if !ok {
-		return character{}, false
-	}
-	origin, ok := r.id()
-	if !ok {
-		return character{}, false
-	}
-	ch, ok := r.uvarint()
-	if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
-		return character{}, false
-	}
-	delID, ok := r.id()
-	if !ok || clock > MaxClock || clock < id.Seq ||
-		!origin.wellFormed() || !delID.wellFormed() {
-		return character{}, false
-	}
-	return character{id: id, clock: clock, origin: origin, ch: rune(ch), delID: delID}, true
 }
 
 // sortIDs orders IDs in place by site then sequence, keeping every derived
@@ -1044,9 +956,8 @@ func sortIDs(ids []ID) {
 // cannot be reached with a list long enough for quadratic to matter.
 const sortIDsInsertionMax = 32
 
-// columns is where each field of a run is read from. Version 5 gives every one
-// its own stream; earlier versions interleave them, which is this with all
-// twelve pointing at the same reader.
+// columns is where each field of a run is read from: every one has a stream of
+// its own.
 type columns struct {
 	sites, seqs, clocks    *column
 	oSites, oSeqs, lengths *column
@@ -1073,43 +984,6 @@ func (c *columns) all() []**column {
 		out = append(out, &c.purged)
 	}
 	return out
-}
-
-// sameStream is how every version before 5 is read: the fields go past in the
-// order the columns are listed in, so one reader serves all of them.
-func sameStream(r *reader) *columns {
-	c := &columns{}
-	shared := &column{r: r, plain: true}
-	for _, into := range c.all() {
-		*into = shared
-	}
-	return c
-}
-
-// readColumns takes apart the nine length-prefixed streams a version 5 or 6
-// snapshot writes. A length past the end of what is left is refused here rather
-// than discovered field by field later.
-//
-// Those versions write the deletion fields as one column of gap, span, site and
-// step repeated, so the four columns version 8 splits them into all read from
-// that one stream, in that order.
-func readColumns(r *reader) (*columns, error) {
-	c := &columns{}
-	var delFields *column
-	for _, into := range []**column{&c.sites, &c.seqs, &c.clocks, &c.oSites,
-		&c.oSeqs, &c.lengths, &c.text, &c.delCounts, &delFields} {
-		n, ok := r.uvarint()
-		if !ok || n > uint64(len(r.buf)) {
-			return nil, ErrMalformed
-		}
-		// The length was just held to what is left, so this cannot come up
-		// short. Checking it again would be a line that looks like a guard and
-		// never runs — the coverage says so, and removing it changed nothing.
-		buf, _ := r.bytes(int(n))
-		*into = &column{r: &reader{buf: buf}, plain: true}
-	}
-	c.delGaps, c.delSpans, c.delSites, c.delSeqs = delFields, delFields, delFields, delFields
-	return c, nil
 }
 
 // readColumnsV8 takes apart the twelve length-prefixed columns of a version 8
@@ -1239,15 +1113,9 @@ func countColumn(buf []byte, limit uint64) (uint64, bool) {
 }
 
 // A column is one field of a run, read one value at a time.
-//
-// Versions before 8 wrote a plain uvarint per value, and plain says so: there
-// are no groups to take apart, and how many values are left is not a question
-// the format answers, so the bytes left over stand in for it exactly as they did
-// before.
 type column struct {
-	r     *reader
-	plain bool
-	n     uint64 // values not yet produced, for a version 8 column
+	r *reader
+	n uint64 // values not yet produced
 
 	left    uint64 // values left in the group being read
 	lit     bool   // that group is a literal stretch
@@ -1276,9 +1144,6 @@ type column struct {
 // threshold. Refusing those again would be lines that look like guards and never
 // run — the coverage says so, and removing them left every rejection rejected.
 func (c *column) uvarint() (uint64, bool) {
-	if c.plain {
-		return c.r.uvarint()
-	}
 	if c.left == 0 && !c.open() {
 		return 0, false
 	}
@@ -1331,14 +1196,9 @@ func (c *column) open() bool {
 }
 
 // remaining is the most values the column can still produce, which is what a
-// count read from another column is held to. A version 8 column knows the
-// number; before that a value cost at least a byte, so the bytes left are it.
-func (c *column) remaining() uint64 {
-	if c.plain {
-		return uint64(len(c.r.buf))
-	}
-	return c.n
-}
+// count read from another column is held to. A column knows the number, counted
+// by [countColumn] before any of it was decoded.
+func (c *column) remaining() uint64 { return c.n }
 
 // hint sizes a slice for n values without believing n. A run-length column can
 // promise far more values than it holds bytes, so the bytes are the ceiling on
@@ -1357,15 +1217,8 @@ func (c *columns) empty() bool {
 	return true
 }
 
-// readCollected reads what version 6 added: the floor this replica can still be
-// read back to, and how many of each site's operations collection took away.
-//
-// Loading is a trust boundary here as everywhere else in this file. A floor
-// naming operations the document has not seen, or a tally claiming more of a
-// site's operations than that site ever issued, describes no document a replica
-// could have produced, and is refused rather than believed.
-// readCollected reads the two tables version 6 of a text and version 2 of a
-// list carry, and refuses a snapshot whose tables are not empty.
+// readCollected reads the two tables a text snapshot and a list snapshot both
+// carry, and refuses one whose tables are not empty.
 //
 // They were written for a collection that has been withdrawn, so nothing that
 // could be trusted has ever filled them. A snapshot that has them filled came

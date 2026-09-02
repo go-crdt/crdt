@@ -751,10 +751,11 @@ func supersededRun(site SiteID, first, last uint64) MapOp {
 // length where a version byte was meant.
 var mapMagic = [...]byte{'c', 'r', 'd', 't', 'm'}
 
-const (
-	mapVersion   = 2
-	mapVersionV1 = 1
-)
+// mapVersion 2 carries the clock tombstones were collected under. Version 1,
+// which did not, was read until #99 and is refused as unknown now: nothing holds
+// a version 1 map, and a reader kept for bytes nobody has is a reader nothing
+// real exercises.
+const mapVersion = 2
 
 // Snapshot encodes the whole map — every key ever written, deleted ones
 // included, each with the identity and Lamport timestamp of the write it holds —
@@ -835,22 +836,19 @@ func LoadMap(site SiteID, snapshot []byte) (*Map, error) {
 	if !ok {
 		return nil, ErrMalformed
 	}
-	if v[0] != mapVersion && v[0] != mapVersionV1 {
+	if v[0] != mapVersion {
 		return nil, unknownFormat(v[0], mapVersion)
 	}
-	version := v[0]
 
 	m := NewMap(site)
-	if version >= mapVersion {
-		below, ok := r.uvarint()
-		// A clock above the ceiling names an operation no replica could have
-		// issued, and this one decides which writes are refused: a crafted
-		// value would refuse every write there is.
-		if !ok || below > MaxClock {
-			return nil, ErrMalformed
-		}
-		m.collectedBelow = below
+	below, ok := r.uvarint()
+	// A clock above the ceiling names an operation no replica could have issued,
+	// and this one decides which writes are refused: a crafted value would refuse
+	// every write there is.
+	if !ok || below > MaxClock {
+		return nil, ErrMalformed
 	}
+	m.collectedBelow = below
 	nSites, ok := r.uvarint()
 	if !ok {
 		return nil, ErrMalformed

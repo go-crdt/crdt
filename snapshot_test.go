@@ -1,12 +1,9 @@
 package crdt
 
 import (
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"math/rand/v2"
-	"os"
-	"strings"
 	"testing"
 )
 
@@ -103,184 +100,6 @@ func TestSnapshotOfEmptyDocument(t *testing.T) {
 	}
 }
 
-// snapshotBuilder assembles snapshots field by field so that every rejection in
-// Load can be provoked directly, rather than by corrupting valid bytes and
-// hoping the corruption lands where it is needed.
-type snapshotBuilder struct {
-	magic   []byte
-	version byte
-	sites   [][2]uint64 // site, sequence
-	items   []snapshotItem
-	dups    [][4]uint64 // deletion site, sequence, target site, target sequence
-	// counts override the encoded lengths, to build a header that lies.
-	itemCount, dupCount int
-	trailing            []byte
-}
-
-type snapshotItem struct {
-	site, seq, clock, originSite, originSeq, char, delSite, delSeq uint64
-}
-
-func (b snapshotBuilder) build() []byte {
-	out := append([]byte{}, b.magic...)
-	out = append(out, b.version)
-	out = binary.AppendUvarint(out, uint64(len(b.sites)))
-	for _, s := range b.sites {
-		out = binary.AppendUvarint(out, s[0])
-		out = binary.AppendUvarint(out, s[1])
-	}
-	count := b.itemCount
-	if count == 0 {
-		count = len(b.items)
-	}
-	out = binary.AppendUvarint(out, uint64(count))
-	for _, it := range b.items {
-		for _, v := range []uint64{it.site, it.seq, it.clock, it.originSite, it.originSeq, it.char, it.delSite, it.delSeq} {
-			out = binary.AppendUvarint(out, v)
-		}
-	}
-	count = b.dupCount
-	if count == 0 {
-		count = len(b.dups)
-	}
-	out = binary.AppendUvarint(out, uint64(count))
-	for _, d := range b.dups {
-		for _, v := range d {
-			out = binary.AppendUvarint(out, v)
-		}
-	}
-	return append(out, b.trailing...)
-}
-
-// wellFormed is a two-character document from site 1, the second deleted, used
-// as the base every rejection test varies from.
-func wellFormed() snapshotBuilder {
-	return snapshotBuilder{
-		magic:   []byte("crdt"),
-		version: snapshotVersionV1,
-		sites:   [][2]uint64{{1, 3}},
-		items: []snapshotItem{
-			{site: 1, seq: 1, clock: 1, char: 'a'},
-			{site: 1, seq: 2, clock: 2, originSite: 1, originSeq: 1, char: 'b', delSite: 1, delSeq: 3},
-		},
-	}
-}
-
-func TestLoadAcceptsAHandBuiltSnapshot(t *testing.T) {
-	d, err := Load(2, wellFormed().build())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if got, want := d.String(), "a"; got != want {
-		t.Fatalf("String() = %q, want %q", got, want)
-	}
-	if got, want := d.Tombstones(), 1; got != want {
-		t.Fatalf("Tombstones() = %d, want %d", got, want)
-	}
-}
-
-func TestLoadRejectsMalformedSnapshots(t *testing.T) {
-	tests := []struct {
-		name  string
-		alter func(*snapshotBuilder)
-	}{
-		{"foreign magic", func(b *snapshotBuilder) { b.magic = []byte("yjs!") }},
-		{"future format version", func(b *snapshotBuilder) { b.version = snapshotVersion + 1 }},
-		{"version zero", func(b *snapshotBuilder) { b.version = 0 }},
-		{"site with no operations", func(b *snapshotBuilder) { b.sites = [][2]uint64{{1, 0}} }},
-		{"more items than bytes", func(b *snapshotBuilder) { b.itemCount = 1 << 20 }},
-		{"more duplicates than bytes", func(b *snapshotBuilder) { b.dupCount = 1 << 20 }},
-		{"trailing bytes", func(b *snapshotBuilder) { b.trailing = []byte{0} }},
-		{"character above the highest rune", func(b *snapshotBuilder) { b.items[0].char = 0x110000 }},
-		{"surrogate character", func(b *snapshotBuilder) { b.items[0].char = 0xD800 }},
-		{"clock below sequence", func(b *snapshotBuilder) { b.items[1].clock = 1 }},
-		{"item with the root identity", func(b *snapshotBuilder) { b.items[0].site, b.items[0].seq = 0, 0 }},
-		{"item the version vector does not cover", func(b *snapshotBuilder) { b.items[1].seq = 9 }},
-		{"repeated identity", func(b *snapshotBuilder) { b.items[1].seq = b.items[0].seq }},
-		{"origin that does not exist", func(b *snapshotBuilder) { b.items[1].originSeq = 7 }},
-		{"origin that comes later", func(b *snapshotBuilder) {
-			b.items[0].originSite, b.items[0].originSeq = 1, 2
-		}},
-		{"deletion the version vector does not cover", func(b *snapshotBuilder) { b.items[1].delSeq = 9 }},
-		{"duplicate deletion of the root", func(b *snapshotBuilder) {
-			b.dups = [][4]uint64{{0, 0, 1, 1}}
-		}},
-		{"duplicate deletion the version vector does not cover", func(b *snapshotBuilder) {
-			b.dups = [][4]uint64{{1, 9, 1, 1}}
-		}},
-		{"duplicate deletion of a character that does not exist", func(b *snapshotBuilder) {
-			b.dups = [][4]uint64{{1, 3, 1, 7}}
-		}},
-		{"duplicate deletion of the root character", func(b *snapshotBuilder) {
-			b.sites = [][2]uint64{{1, 4}}
-			b.dups = [][4]uint64{{1, 4, 0, 0}}
-		}},
-		{"duplicate deletion of a character still visible", func(b *snapshotBuilder) {
-			b.sites = [][2]uint64{{1, 4}}
-			b.dups = [][4]uint64{{1, 4, 1, 1}}
-		}},
-		{"duplicate deletion below the one the character kept", func(b *snapshotBuilder) {
-			// The item keeps the lower operation, so a duplicate below it is a
-			// state the tie-break could not have produced.
-			b.sites = [][2]uint64{{1, 4}}
-			b.items[1].delSeq = 4
-			b.dups = [][4]uint64{{1, 3, 1, 2}}
-		}},
-		{"the same site listed twice", func(b *snapshotBuilder) {
-			b.sites = [][2]uint64{{1, 3}, {1, 3}}
-		}},
-		{"a history with a gap", func(b *snapshotBuilder) {
-			// Four operations promised, three accounted for.
-			b.sites = [][2]uint64{{1, 4}}
-		}},
-		{"a deletion no character claims", func(b *snapshotBuilder) {
-			b.items[1].delSite, b.items[1].delSeq = 0, 0
-		}},
-		{"two characters claiming one deletion", func(b *snapshotBuilder) {
-			b.sites = [][2]uint64{{1, 4}}
-			b.items = append(b.items, snapshotItem{
-				site: 1, seq: 4, clock: 4, originSite: 1, originSeq: 2,
-				char: 'c', delSite: 1, delSeq: 3,
-			})
-		}},
-		{"a character with a sequence number of zero", func(b *snapshotBuilder) {
-			b.items[0].site, b.items[0].seq = 1, 0
-		}},
-		{"a deletion with a sequence number of zero", func(b *snapshotBuilder) {
-			b.items[1].delSite, b.items[1].delSeq = 1, 0
-		}},
-		{"an origin with a sequence number of zero", func(b *snapshotBuilder) {
-			b.items[1].originSite, b.items[1].originSeq = 1, 0
-		}},
-		{"an origin that is a deletion", func(b *snapshotBuilder) {
-			// Operation 3 is the deletion of the second character; it made no
-			// character, so nothing can have been inserted after it.
-			b.sites = [][2]uint64{{1, 4}}
-			b.items = append(b.items, snapshotItem{
-				site: 1, seq: 4, clock: 4, originSite: 1, originSeq: 3, char: 'c',
-			})
-		}},
-		{"characters in an order integration could not produce", func(b *snapshotBuilder) {
-			// Both hang off the root, so the higher clock has to come first.
-			b.sites = [][2]uint64{{1, 2}, {2, 1}}
-			b.items = []snapshotItem{
-				{site: 2, seq: 1, clock: 1, char: 'a'},
-				{site: 1, seq: 1, clock: 9, char: 'b'},
-				{site: 1, seq: 2, clock: 10, originSite: 1, originSeq: 1, char: 'c'},
-			}
-		}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			b := wellFormed()
-			tt.alter(&b)
-			if _, err := Load(2, b.build()); !errors.Is(err, ErrMalformed) {
-				t.Fatalf("Load() = %v, want ErrMalformed", err)
-			}
-		})
-	}
-}
-
 // Every proper prefix of a snapshot is truncated. None may be accepted, and none
 // may panic.
 func TestLoadRejectsTruncatedSnapshots(t *testing.T) {
@@ -326,9 +145,9 @@ type runBuilder struct {
 	// purgedBelow is version 7's floor: the clock below which characters were
 	// discarded. Zero for a fixture that purged nothing.
 	purgedBelow uint64
-	// asVersion writes an older format instead of the current one, so that the
-	// readers for versions this package still accepts keep being exercised after
-	// the current version moves on. Zero means the current version.
+	// asVersion stamps a version byte of its own instead of the one the document
+	// would choose, so that a version this build refuses can be handed to Load.
+	// Zero means the version the document would choose.
 	asVersion byte
 	sites     [][2]uint64
 	floor     [][2]uint64 // the collection floor: site, sequence
@@ -336,7 +155,9 @@ type runBuilder struct {
 	// counts override the encoded lengths of the two, to build a header that lies.
 	floorCount, goneCount int
 	runs                  []encodedRun
-	count                 int // overrides the encoded number of runs
+	count                 int         // overrides the encoded number of runs
+	dups                  [][4]uint64 // deletion site, sequence, target site, target sequence
+	dupCount              int         // overrides the encoded number of them
 	tail                  []byte
 }
 
@@ -372,30 +193,27 @@ func (b runBuilder) build() []byte {
 		out = binary.AppendUvarint(out, s[0])
 		out = binary.AppendUvarint(out, s[1])
 	}
-	if version >= snapshotVersionV6 {
-		// Version 6: the collection floor and the per-site tallies of what
-		// collection took away. Nothing here has ever been collected, so both
-		// are empty, which is what a document that never calls Collect writes.
-		nFloor := b.floorCount
-		if nFloor == 0 {
-			nFloor = len(b.floor)
-		}
-		out = binary.AppendUvarint(out, uint64(nFloor))
-		for _, f := range b.floor {
-			out = binary.AppendUvarint(out, f[0])
-			out = binary.AppendUvarint(out, f[1])
-		}
-		nGone := b.goneCount
-		if nGone == 0 {
-			nGone = len(b.gone)
-		}
-		out = binary.AppendUvarint(out, uint64(nGone))
-		for _, g := range b.gone {
-			out = binary.AppendUvarint(out, g[0])
-			out = binary.AppendUvarint(out, g[1])
-		}
+	// The two tables of the collection that was withdrawn. Nothing here has ever
+	// been collected, so both are empty, which is what a document writes.
+	nFloor := b.floorCount
+	if nFloor == 0 {
+		nFloor = len(b.floor)
 	}
-	if version >= snapshotVersion {
+	out = binary.AppendUvarint(out, uint64(nFloor))
+	for _, f := range b.floor {
+		out = binary.AppendUvarint(out, f[0])
+		out = binary.AppendUvarint(out, f[1])
+	}
+	nGone := b.goneCount
+	if nGone == 0 {
+		nGone = len(b.gone)
+	}
+	out = binary.AppendUvarint(out, uint64(nGone))
+	for _, g := range b.gone {
+		out = binary.AppendUvarint(out, g[0])
+		out = binary.AppendUvarint(out, g[1])
+	}
+	if version == snapshotVersion {
 		// Version 9: the purge floor. A fixture that purged nothing writes zero,
 		// which is what a document that never called Purge writes.
 		out = binary.AppendUvarint(out, b.purgedBelow)
@@ -408,11 +226,9 @@ func (b runBuilder) build() []byte {
 
 	// A case names a run's sequence, clock and origin outright, because that is
 	// what a reader of the test wants to see; the encodings are applied here.
-	// Version 4 writes the two sequence numbers as steps and the clock as the
-	// distance above the run's own sequence. Version 5 writes each field in a
-	// column of its own, which is the same bytes in a different order; version
-	// 8 writes the deletion fields in four columns rather than one, and every
-	// column in groups rather than one value at a time.
+	// The two sequence numbers are steps and the clock is the distance above the
+	// run's own sequence; each field has a column of its own, and every column
+	// holds groups rather than one value at a time.
 	//
 	// A case that asks for a clock below the sequence — which no honest replica
 	// can produce — still encodes: the subtraction wraps, and the enormous
@@ -455,38 +271,29 @@ func (b runBuilder) build() []byte {
 			lastDel[site] = d[3]
 		}
 	}
-	if version >= snapshotVersionV8 {
-		// Version 8: twelve columns, each an encoding byte and then its groups.
-		cols := [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
-			lengths, text, delCounts, delGaps, delSpans, delSites, delSeqs}
-		if version >= snapshotVersion {
-			// Version 9's addition, and the reader asks for it by version, so a
-			// fixture that did not write it would be short a column rather than
-			// describing an older format.
-			cols = append(cols, purged)
-		}
-		for _, col := range cols {
-			out = appendColumn(out, groupColumn(col))
-		}
-	} else {
-		// Versions 5 and 6: nine plain columns, the deletion fields written as
-		// one stream of gap, span, site and step over and over.
-		var delFields []uint64
-		for i := range delGaps {
-			delFields = append(delFields, delGaps[i], delSpans[i], delSites[i], delSeqs[i])
-		}
-		for _, col := range [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
-			lengths, text, delCounts, delFields} {
-			var enc []byte
-			for _, v := range col {
-				enc = binary.AppendUvarint(enc, v)
-			}
-			out = binary.AppendUvarint(out, uint64(len(enc)))
-			out = append(out, enc...)
-		}
+	// Twelve columns, each an encoding byte and then its groups.
+	cols := [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
+		lengths, text, delCounts, delGaps, delSpans, delSites, delSeqs}
+	if version == snapshotVersion {
+		// Version 9's addition, and the reader asks for it by version, so a
+		// fixture that did not write it would be short a column rather than
+		// describing an older format.
+		cols = append(cols, purged)
+	}
+	for _, col := range cols {
+		out = appendColumn(out, groupColumn(col))
 	}
 
-	out = binary.AppendUvarint(out, 0) // no duplicate deletions
+	nDups := b.dupCount
+	if nDups == 0 {
+		nDups = len(b.dups)
+	}
+	out = binary.AppendUvarint(out, uint64(nDups))
+	for _, d := range b.dups {
+		for _, v := range d {
+			out = binary.AppendUvarint(out, v)
+		}
+	}
 	return append(out, b.tail...)
 }
 
@@ -581,8 +388,8 @@ func TestLoadRejectsMalformedRuns(t *testing.T) {
 		{"a deletion starting past the end", func(b *runBuilder) { b.runs[0].dels[0][0] = 9 }},
 		{"a deletion with no identity", func(b *runBuilder) { b.runs[0].dels[0][2], b.runs[0].dels[0][3] = 0, 0 }},
 		{"a deletion with a sequence of zero", func(b *runBuilder) { b.runs[0].dels[0][3] = 0 }},
-		// The two below are failure modes version 3 introduced by writing the
-		// sequence number as a step: a step is signed, so it can land where no
+		// The two below are failure modes the step encoding of a deletion's
+		// sequence number introduces: a step is signed, so it can land where no
 		// operation is. A case still names the sequence it wants; the builder
 		// turns it into the step that reaches it.
 		{"a deletion whose step lands below the first sequence", func(b *runBuilder) {
@@ -597,6 +404,49 @@ func TestLoadRejectsMalformedRuns(t *testing.T) {
 		}},
 		{"an origin that does not exist", func(b *runBuilder) { b.runs[0].originSite, b.runs[0].originSeq = 9, 9 }},
 		{"a run the version vector does not cover", func(b *runBuilder) { b.sites = [][2]uint64{{1, 2}} }},
+		{"the same site listed twice", func(b *runBuilder) {
+			b.sites = [][2]uint64{{1, 5}, {1, 5}}
+		}},
+		{"two runs claiming one identity", func(b *runBuilder) {
+			// Eight operations promised and eight accounted for, so the ledger's
+			// total is right; what is wrong is that the second run repeats the
+			// first run's identities, which no replica could have issued.
+			b.sites = [][2]uint64{{1, 8}}
+			b.runs = append(b.runs, encodedRun{
+				site: 1, seq: 1, clock: 1, text: []rune("efg"),
+				originSite: 1, originSeq: 4,
+			})
+		}},
+		{"runs in an order integration could not produce", func(b *runBuilder) {
+			// Both hang off the root, so the higher clock has to come first.
+			b.sites = [][2]uint64{{1, 1}, {2, 1}}
+			b.runs = []encodedRun{
+				{site: 2, seq: 1, clock: 1, text: []rune("a")},
+				{site: 1, seq: 1, clock: 9, text: []rune("b")},
+			}
+		}},
+		{"more duplicate deletions than bytes", func(b *runBuilder) { b.dupCount = 1 << 20 }},
+		{"a duplicate deletion by the root", func(b *runBuilder) {
+			b.dups = [][4]uint64{{0, 0, 1, 3}}
+		}},
+		{"a duplicate deletion the version vector does not cover", func(b *runBuilder) {
+			b.dups = [][4]uint64{{1, 9, 1, 3}}
+		}},
+		{"a duplicate deletion of a character that does not exist", func(b *runBuilder) {
+			b.sites = [][2]uint64{{1, 6}}
+			b.dups = [][4]uint64{{1, 6, 1, 9}}
+		}},
+		{"a duplicate deletion of a character still visible", func(b *runBuilder) {
+			b.sites = [][2]uint64{{1, 6}}
+			b.dups = [][4]uint64{{1, 6, 1, 1}}
+		}},
+		{"a duplicate deletion below the one the character kept", func(b *runBuilder) {
+			// The character keeps the lower operation, so a duplicate below it
+			// is a state the tie-break could not have produced.
+			b.sites = [][2]uint64{{1, 6}}
+			b.runs[0].dels = [][4]uint64{{2, 1, 1, 6}}
+			b.dups = [][4]uint64{{1, 5, 1, 3}}
+		}},
 		{"trailing bytes", func(b *runBuilder) { b.tail = []byte{0} }},
 	}
 	for _, tt := range tests {
@@ -607,219 +457,6 @@ func TestLoadRejectsMalformedRuns(t *testing.T) {
 				t.Fatalf("Load() = %v, want ErrMalformed", err)
 			}
 		})
-	}
-}
-
-// Version 1 wrote one record per character, and documents stored by an older
-// build must still open — including refusing the ones it should refuse.
-func TestLoadRejectsTruncatedVersionOneSnapshots(t *testing.T) {
-	data := wellFormed().build()
-	if _, err := Load(2, data); err != nil {
-		t.Fatalf("the version 1 fixture does not load: %v", err)
-	}
-	for n := range len(data) {
-		if _, err := Load(2, data[:n]); err == nil {
-			t.Fatalf("Load(%d of %d bytes) succeeded, want an error", n, len(data))
-		}
-	}
-}
-
-// A document stored by an older build has to open. This snapshot was produced by
-// crdt v0.4.0, which wrote one record per character, and is kept verbatim: the
-// test is worth nothing if it is regenerated by the code it is meant to check.
-//
-// It carries the awkward parts on purpose — characters outside the basic plane,
-// a stretch deleted concurrently by two replicas, and a second site's work.
-func TestLoadReadsASnapshotWrittenByVersionOne(t *testing.T) {
-	encoded, err := os.ReadFile("testdata/v1-snapshot.base64")
-	if err != nil {
-		t.Fatalf("reading the fixture: %v", err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
-	if err != nil {
-		t.Fatalf("decoding the fixture: %v", err)
-	}
-	if got, want := raw[4], byte(snapshotVersionV1); got != want {
-		t.Fatalf("the fixture claims format version %d, want %d", got, want)
-	}
-
-	d, err := Load(9, raw)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	const want = "written v0.4.0 — héllo 世界 🌍 and more"
-	if got := d.String(); got != want {
-		t.Fatalf("String() = %q, want %q", got, want)
-	}
-	if got, wantN := d.Tombstones(), 3; got != wantN {
-		t.Fatalf("Tombstones() = %d, want %d", got, wantN)
-	}
-
-	// It must be usable, not merely readable: the history replays, and writing it
-	// out again produces the current format, which reloads to the same thing.
-	peer := New(8)
-	apply(t, peer, d.OpsSince(nil))
-	if got := peer.String(); got != want {
-		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
-	}
-	fresh := d.Snapshot()
-	// Version 8, not the current one: version 9 is written only by a document
-	// that has purged, so that a build which merely understands it never hands
-	// an older reader bytes it cannot parse. See Doc.formatVersion.
-	if fresh[4] != snapshotVersionV8 {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
-	}
-	again, err := Load(7, fresh)
-	if err != nil {
-		t.Fatalf("reloading the re-encoded snapshot: %v", err)
-	}
-	if got := again.String(); got != want {
-		t.Fatalf("the re-encoded snapshot reads %q, want %q", got, want)
-	}
-	if len(fresh) >= len(raw) {
-		t.Fatalf("re-encoding did not shrink it: %d bytes against %d", len(fresh), len(raw))
-	}
-	t.Logf("the same document: %d bytes in version %d, %d in version %d", len(raw), raw[4], len(fresh), fresh[4])
-}
-
-// A document stored by a build that wrote version 3 has to open. Version 4
-// changed the run header: its own sequence number and its origin's are steps
-// now, and its clock is the distance above its own sequence.
-//
-// The fixture was produced by the build that still wrote version 3, and carries
-// the same awkward parts as the version 2 one. Two versions back and one version
-// back both have to read, which is the property a chain of format changes has to
-// keep and the one it is easiest to lose.
-func TestLoadReadsASnapshotWrittenByVersionThree(t *testing.T) {
-	encoded, err := os.ReadFile("testdata/v3-snapshot.base64")
-	if err != nil {
-		t.Fatalf("reading the fixture: %v", err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
-	if err != nil {
-		t.Fatalf("decoding the fixture: %v", err)
-	}
-	if got, want := raw[4], byte(snapshotVersionV3); got != want {
-		t.Fatalf("the fixture claims format version %d, want %d", got, want)
-	}
-
-	d, err := Load(9, raw)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	const want = "written.14.0 — héllo界 🌍 and more plus"
-	if got := d.String(); got != want {
-		t.Fatalf("String() = %q, want %q", got, want)
-	}
-	if got, wantN := d.Tombstones(), 5; got != wantN {
-		t.Fatalf("Tombstones() = %d, want %d", got, wantN)
-	}
-
-	peer := New(8)
-	apply(t, peer, d.OpsSince(nil))
-	if got := peer.String(); got != want {
-		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
-	}
-	fresh := d.Snapshot()
-	// Version 8, not the current one: version 9 is written only by a document
-	// that has purged, so that a build which merely understands it never hands
-	// an older reader bytes it cannot parse. See Doc.formatVersion.
-	if fresh[4] != snapshotVersionV8 {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
-	}
-	again, err := Load(7, fresh)
-	if err != nil {
-		t.Fatalf("reloading the re-encoded snapshot: %v", err)
-	}
-	if got := again.String(); got != want {
-		t.Fatalf("the re-encoded snapshot reads %q, want %q", got, want)
-	}
-	if got, wantN := again.Tombstones(), 5; got != wantN {
-		t.Fatalf("the re-encoded snapshot has %d tombstones, want %d", got, wantN)
-	}
-	t.Logf("the same document: %d bytes in version %d, %d in version %d", len(raw), raw[4], len(fresh), fresh[4])
-}
-
-// A document stored by a build that wrote version 2 has to open. Version 3
-// changed one field — a deletion's sequence number, from the number itself to a
-// step from the last one that site used — and a format change is only safe if
-// what came before it still reads.
-//
-// The fixture was produced by the build that still wrote version 2 and is kept
-// verbatim, for the reason the version 1 one is: a fixture regenerated by the
-// code it is meant to check proves nothing. It carries the awkward parts on
-// purpose — characters outside the basic plane, a stretch two replicas deleted
-// concurrently, a second site's work, and a run holding more than one deleted
-// stretch, which is the case the step encoding is about.
-func TestLoadReadsASnapshotWrittenByVersionTwo(t *testing.T) {
-	encoded, err := os.ReadFile("testdata/v2-snapshot.base64")
-	if err != nil {
-		t.Fatalf("reading the fixture: %v", err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
-	if err != nil {
-		t.Fatalf("decoding the fixture: %v", err)
-	}
-	if got, want := raw[4], byte(snapshotVersionV2); got != want {
-		t.Fatalf("the fixture claims format version %d, want %d", got, want)
-	}
-
-	d, err := Load(9, raw)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	const want = "written.13.0 — héllo界 🌍 and more plus"
-	if got := d.String(); got != want {
-		t.Fatalf("String() = %q, want %q", got, want)
-	}
-	if got, wantN := d.Tombstones(), 5; got != wantN {
-		t.Fatalf("Tombstones() = %d, want %d", got, wantN)
-	}
-
-	// Usable, not merely readable: the history replays into a fresh replica, and
-	// re-encoding writes the current version, which reloads to the same text and
-	// the same tombstones. The tombstones matter here more than anywhere else —
-	// they are what the changed field names.
-	peer := New(8)
-	apply(t, peer, d.OpsSince(nil))
-	if got := peer.String(); got != want {
-		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
-	}
-	fresh := d.Snapshot()
-	// Version 8, not the current one: version 9 is written only by a document
-	// that has purged, so that a build which merely understands it never hands
-	// an older reader bytes it cannot parse. See Doc.formatVersion.
-	if fresh[4] != snapshotVersionV8 {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
-	}
-	again, err := Load(7, fresh)
-	if err != nil {
-		t.Fatalf("reloading the re-encoded snapshot: %v", err)
-	}
-	if got := again.String(); got != want {
-		t.Fatalf("the re-encoded snapshot reads %q, want %q", got, want)
-	}
-	if got, wantN := again.Tombstones(), 5; got != wantN {
-		t.Fatalf("the re-encoded snapshot has %d tombstones, want %d", got, wantN)
-	}
-	t.Logf("the same document: %d bytes in version %d, %d in version %d", len(raw), raw[4], len(fresh), fresh[4])
-}
-
-// Truncating a version 2 snapshot anywhere must fail rather than produce a
-// document, exactly as truncating a version 1 one must.
-func TestLoadRejectsTruncatedVersionTwoSnapshots(t *testing.T) {
-	encoded, err := os.ReadFile("testdata/v2-snapshot.base64")
-	if err != nil {
-		t.Fatalf("reading the fixture: %v", err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
-	if err != nil {
-		t.Fatalf("decoding the fixture: %v", err)
-	}
-	for n := range len(raw) {
-		if _, err := Load(2, raw[:n]); err == nil {
-			t.Fatalf("Load(%d of %d bytes) succeeded, want an error", n, len(raw))
-		}
 	}
 }
 
@@ -948,10 +585,9 @@ func rejectsMalformedColumns(t *testing.T, good []byte) {
 // snapshot produces some rejection. Every field the header grows has to be
 // stepped over here.
 //
-// Which fields are there depends on the version — version 6 added the
-// collection floor and the tallies, version 9 the purge floor — so the version
-// in the bytes decides, and a fixture written in one version cannot be walked
-// by a header written for another.
+// Which fields are there depends on the version — version 9 added the purge
+// floor — so the version in the bytes decides, and a fixture written in one
+// version cannot be walked by a header written for another.
 func columnsStart(t *testing.T, snap []byte) int {
 	t.Helper()
 	version := snap[len(snapshotMagic)]
@@ -961,19 +597,17 @@ func columnsStart(t *testing.T, snap []byte) int {
 		r.uvarint()
 		r.uvarint()
 	}
-	if version >= snapshotVersionV6 {
-		nFloor, _ := r.uvarint()
-		for range nFloor {
-			r.uvarint()
-			r.uvarint()
-		}
-		nGone, _ := r.uvarint()
-		for range nGone {
-			r.uvarint()
-			r.uvarint()
-		}
+	nFloor, _ := r.uvarint()
+	for range nFloor {
+		r.uvarint()
+		r.uvarint()
 	}
-	if version >= snapshotVersion {
+	nGone, _ := r.uvarint()
+	for range nGone {
+		r.uvarint()
+		r.uvarint()
+	}
+	if version == snapshotVersion {
 		r.uvarint() // version 9: the purge floor
 	}
 	r.uvarint() // the run count
@@ -984,7 +618,7 @@ func columnsStart(t *testing.T, snap []byte) int {
 // version 9 grows by one. splitColumns has to know, or it reads the duplicate
 // deletion table as a thirteenth column and puts the snapshot back wrong.
 func snapshotColumns(snap []byte) int {
-	c := columns{withPurged: snap[len(snapshotMagic)] >= snapshotVersion}
+	c := columns{withPurged: snap[len(snapshotMagic)] == snapshotVersion}
 	return len(c.all())
 }
 
@@ -1045,26 +679,6 @@ func joinColumns(head []byte, cols [][]byte, tail []byte) []byte {
 	return append(out, tail...)
 }
 
-// Truncating a version 3 snapshot anywhere must fail, as truncating a version 1
-// or a version 2 one must. It is also the only thing that exercises reading a
-// run header from a version that wrote it in full rather than in columns and
-// stopped mid-field.
-func TestLoadRejectsTruncatedVersionThreeSnapshots(t *testing.T) {
-	encoded, err := os.ReadFile("testdata/v3-snapshot.base64")
-	if err != nil {
-		t.Fatalf("reading the fixture: %v", err)
-	}
-	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
-	if err != nil {
-		t.Fatalf("decoding the fixture: %v", err)
-	}
-	for n := range len(raw) {
-		if _, err := Load(2, raw[:n]); err == nil {
-			t.Fatalf("Load(%d of %d bytes) succeeded, want an error", n, len(raw))
-		}
-	}
-}
-
 // A deletion whose fields run out part way through. The count says there is a
 // stretch to read and the gap is there to be read, so the refusal has to come
 // from the field that is missing rather than from a length.
@@ -1082,43 +696,9 @@ func TestLoadRejectsADeletionCutOffMidField(t *testing.T) {
 	}
 }
 
-// A version 5 snapshot — the format before collection was written down — still
-// loads, and says the same thing as the same document written today. Without
-// this the readers for it stop being exercised the moment the current version
-// moves on, which is how a format that claims to accept an older one quietly
-// stops doing so.
-func TestLoadStillAcceptsVersionFive(t *testing.T) {
-	old := wellFormedRun()
-	old.asVersion = snapshotVersionV5
-	raw := old.build()
-	if raw[4] != snapshotVersionV5 {
-		t.Fatalf("the fixture wrote version %d, want %d", raw[4], snapshotVersionV5)
-	}
-	was, err := Load(2, raw)
-	if err != nil {
-		t.Fatalf("a version 5 snapshot did not load: %v", err)
-	}
-	now, err := Load(2, wellFormedRun().build())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if was.String() != now.String() {
-		t.Fatalf("version 5 reads %q, the current version %q", was.String(), now.String())
-	}
-	if was.Tombstones() != now.Tombstones() {
-		t.Fatalf("version 5 keeps %d tombstones, the current version %d",
-			was.Tombstones(), now.Tombstones())
-	}
-	// Re-encoding an old snapshot writes version 8: nothing was purged in it, so
-	// it has nothing version 9 exists to say. See Doc.formatVersion.
-	if fresh := was.Snapshot(); fresh[4] != snapshotVersionV8 {
-		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersionV8)
-	}
-}
-
-// The version 6 header is a trust boundary like every other field here. A floor
-// or a tally that no document could have produced is refused rather than
-// believed, because both are what the accounting below them is measured against.
+// The two withdrawn-collection tables are a trust boundary like every other
+// field here. Nothing sound could have filled them, so a snapshot whose tables
+// are not empty is refused rather than believed.
 func TestLoadRejectsAMalformedCollectionHeader(t *testing.T) {
 	for _, c := range []struct {
 		name   string

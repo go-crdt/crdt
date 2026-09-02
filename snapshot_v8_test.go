@@ -250,36 +250,6 @@ func TestLoadRejectsABadDeflatedColumn(t *testing.T) {
 	}
 }
 
-// Version 6 is the format before the columns had encodings, and it still loads.
-// Without this the reader for it stops being exercised the moment the current
-// version moves on, which is how a format that claims to accept an older one
-// quietly stops doing so.
-func TestLoadStillAcceptsVersionSix(t *testing.T) {
-	old := wellFormedRun()
-	old.asVersion = snapshotVersionV6
-	raw := old.build()
-	if raw[4] != snapshotVersionV6 {
-		t.Fatalf("the fixture wrote version %d, want %d", raw[4], snapshotVersionV6)
-	}
-	was, err := Load(2, raw)
-	if err != nil {
-		t.Fatalf("a version 6 snapshot did not load: %v", err)
-	}
-	now, err := Load(2, wellFormedRun().build())
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if was.String() != now.String() || was.Tombstones() != now.Tombstones() {
-		t.Fatalf("version 6 reads %q with %d tombstones, the current version %q with %d",
-			was.String(), was.Tombstones(), now.String(), now.Tombstones())
-	}
-	// Version 8, not the current one: version 9 is written only by a document
-	// that has purged, and this one has not. See Doc.formatVersion.
-	if fresh := was.Snapshot(); fresh[4] != snapshotVersionV8 {
-		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersionV8)
-	}
-}
-
 // Version 7 is not skipped because nothing used it: it is being written on
 // another branch, for the collection floor. Reading it here would be reading
 // bytes this build does not know the shape of, so it is refused, and this test
@@ -288,21 +258,6 @@ func TestLoadRefusesTheReservedVersion(t *testing.T) {
 	b := wellFormedRun()
 	b.asVersion = 7
 	if _, err := Load(2, b.build()); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("Load() = %v, want ErrMalformed", err)
-	}
-}
-
-// A version 6 column whose length runs past the end of the snapshot is refused
-// where it is read, not field by field afterwards.
-func TestLoadRejectsAVersionSixColumnPastTheEnd(t *testing.T) {
-	old := wellFormedRun()
-	old.asVersion = snapshotVersionV6
-	raw := old.build()
-	at := columnsStart(t, raw)
-	broken := append([]byte{}, raw[:at]...)
-	broken = binary.AppendUvarint(broken, 1<<20)
-	broken = append(broken, raw[at+1:]...)
-	if _, err := Load(2, broken); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("Load() = %v, want ErrMalformed", err)
 	}
 }

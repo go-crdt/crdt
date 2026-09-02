@@ -99,7 +99,11 @@ func FuzzApply(f *testing.F) {
 func FuzzLoad(f *testing.F) {
 	_, snapshot := corpus(&testing.T{})
 	f.Add(snapshot)
-	f.Add([]byte("crdt\x01"))
+	// A header and nothing else, in a version this build reads: a seed stamped
+	// with a version it does not is refused at the version byte and reaches none
+	// of the loader, which is how four seeds here expired when versions 1 to 6
+	// went.
+	f.Add([]byte("crdt\x08"))
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
@@ -298,7 +302,7 @@ func FuzzParseListOps(f *testing.F) {
 func FuzzLoadList(f *testing.F) {
 	_, snapshot := listCorpus(&testing.T{})
 	f.Add(snapshot)
-	f.Add([]byte("crdl\x01"))
+	f.Add([]byte("crdl\x02"))
 	f.Add([]byte{})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
