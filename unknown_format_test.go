@@ -94,7 +94,12 @@ func TestAnUnknownFormatSaysWhichVersion(t *testing.T) {
 	for at < len(snap) && snap[at] >= 'a' && snap[at] <= 'z' {
 		at++
 	}
-	highest := snap[at]
+	// The highest version this build reads, taken from the one list the loader
+	// reads -- not from the byte in the snapshot, which since the purge is no
+	// longer the same number: a document that has purged nothing writes 8, and
+	// this build reads 9.
+	reads := Reads(FormatText)
+	highest := reads[len(reads)-1]
 
 	future := append([]byte(nil), snap...)
 	future[at] = 200

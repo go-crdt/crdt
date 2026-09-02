@@ -273,8 +273,10 @@ func TestLoadStillAcceptsVersionSix(t *testing.T) {
 		t.Fatalf("version 6 reads %q with %d tombstones, the current version %q with %d",
 			was.String(), was.Tombstones(), now.String(), now.Tombstones())
 	}
-	if fresh := was.Snapshot(); fresh[4] != snapshotVersion {
-		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersion)
+	// Version 8, not the current one: version 9 is written only by a document
+	// that has purged, and this one has not. See Doc.formatVersion.
+	if fresh := was.Snapshot(); fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 }
 

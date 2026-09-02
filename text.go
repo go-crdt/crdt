@@ -64,6 +64,29 @@ type block struct {
 	// answers any question about UTF-16 units without looking at its characters.
 	nsup   int32
 	height uint8
+	// gone is set when the characters of this run have been discarded by
+	// [Doc.Purge]. The run keeps its identity, its length and the operations
+	// that deleted it; what it no longer keeps is what it said.
+	//
+	// A run is only ever purged when every character in it is deleted, and it
+	// is invisible by construction from then on — aliveAt says so without
+	// consulting dels, so a character can never be shown with nothing in it,
+	// not even in the moment between a peer receiving the run and receiving
+	// the deletion that explains it.
+	gone bool
+}
+
+// size is how many characters this run holds, whether or not it still has them.
+func (b *block) size() int {
+	if b.gone {
+		// A purged block always has deletions: Purge takes only blocks every
+		// character of which is deleted, and a snapshot's purged run is refused
+		// unless its deletions cover its whole length. So the last deletion's
+		// end is the length. Guarding against no deletions here would be a line
+		// no test could reach, which the coverage gate says out loud.
+		return int(b.dels[len(b.dels)-1].to)
+	}
+	return len(b.text)
 }
 
 // A delRange is one stretch of a block that was deleted in one go: characters
@@ -102,7 +125,7 @@ func (b *block) deadIndex(i int) int {
 	return -1
 }
 
-func (b *block) aliveAt(i int) bool { return b.deadIndex(i) < 0 }
+func (b *block) aliveAt(i int) bool { return !b.gone && b.deadIndex(i) < 0 }
 
 // delIDAt returns the operation that deleted character i, or the zero ID if it
 // is still visible.
@@ -117,6 +140,9 @@ func (b *block) delIDAt(i int) ID {
 
 // visibleFrom counts the visible characters at offset i or later.
 func (b *block) visibleFrom(i int) int {
+	if b.gone {
+		return 0
+	}
 	n := len(b.text) - i
 	for _, r := range b.dels {
 		if int(r.to) <= i {
@@ -256,6 +282,11 @@ type Doc struct {
 	head *block // sentinel for the root ID; head.next is the first block
 	vv   VersionVector
 
+	// purgedBelow is the highest clock [Doc.Purge] has discarded a character
+	// under, and zero until somebody purges. It is what the readers of the past
+	// refuse below; see purge.go.
+	purgedBelow uint64
+
 	// tree is the root of the index over the same blocks; see tree.go. dirty
 	// holds the one block whose visible-character count the tree has not been
 	// told about yet, which is what keeps typing from paying for the index on
@@ -363,7 +394,7 @@ func (d *Doc) lookupChar(id ID) (*block, int, bool) {
 	}
 	b := blocks[n-1]
 	off := id.Seq - b.id.Seq
-	if off >= uint64(len(b.text)) {
+	if off >= uint64(b.size()) {
 		return nil, 0, false
 	}
 	return b, int(off), true
@@ -512,6 +543,9 @@ func (d *Doc) String() string {
 			continue
 		}
 		at := 0
+		if blk.gone {
+			continue // entirely deleted and discarded; there is nothing to say
+		}
 		for _, r := range blk.dels {
 			if int(r.from) > at {
 				b.WriteString(string(blk.text[at:r.from]))
@@ -580,7 +614,7 @@ func backward(b *block, i, n, pos, budget int) (*block, int, bool) {
 		budget--
 		n = first - 1
 		b = b.prev
-		i = len(b.text) - 1
+		i = b.size() - 1
 	}
 }
 
@@ -669,7 +703,7 @@ func (d *Doc) Delete(pos, length int) ([]Op, error) {
 		leftB, leftAt = d.leftOf(b, i, pos)
 	}
 	for len(targets) < length {
-		if i == len(b.text) {
+		if i == b.size() {
 			b, i = b.next, 0
 			continue
 		}
