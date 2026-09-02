@@ -707,8 +707,15 @@ func TestTheFuzzCorpusStillHoldsAPurgedComposite(t *testing.T) {
 	}
 	// A corpus file is a version line and then one Go literal per argument,
 	// which for this target is a single []byte.
+	//
+	// Trimmed, because the line ending is the checkout's and not the file's: a
+	// Windows runner takes this file with CRLF, and a carriage return left on
+	// the end puts it past the closing parenthesis, where it stops being a Go
+	// literal. Which is how this test first failed -- on Windows only, and
+	// nowhere it was written.
 	literal := ""
 	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
 		if after, ok := strings.CutPrefix(line, "[]byte("); ok {
 			literal = strings.TrimSuffix(after, ")")
 		}
