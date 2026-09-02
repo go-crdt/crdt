@@ -696,6 +696,23 @@ func TestLoadRejectsADeletionCutOffMidField(t *testing.T) {
 	}
 }
 
+// It cannot say which check refused it, and that is a fact about the reader
+// rather than a gap in this test.
+//
+// A deletion's four fields are guarded together -- !ok1 || !ok2 || !ok3 ||
+// span == 0 -- and everything that gets past them meets the ledger and the
+// requirement that every column is consumed to its end. Measured, by weakening
+// each in turn on a build that compiles: removing !ok2, removing !ok3, and
+// removing span == 0 each leave every case above green.
+//
+// So a test that names one of them would be claiming something it cannot
+// establish. Three cases were written to try, one per guard, and all three were
+// still caught by something further down; the attempt is recorded here rather
+// than left as three tests that look more precise than they are.
+//
+// The redundancy is not a defect to remove. A parser that depends on a distant
+// check to refuse a near mistake is worse than one that refuses twice.
+
 // The two withdrawn-collection tables are a trust boundary like every other
 // field here. Nothing sound could have filled them, so a snapshot whose tables
 // are not empty is refused rather than believed.
