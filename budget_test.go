@@ -32,7 +32,24 @@ func TestSnapshotBudget(t *testing.T) {
 
 	d := New(1)
 	replay(t, d, patches)
+	t.Log("a document that has purged nothing, which is written in version 8:")
+	unpurged := snapshotBudget(t, d)
 
+	// And the same document once it has purged, which is the only way version 9
+	// is ever written. What is being read off this second run is what the purge
+	// costs a document that uses it: the floor in the header, and the flag
+	// column, whose whole point is that version 8's groups make it nearly free.
+	if n := d.Purge(); n == 0 {
+		t.Fatal("the trace document purged nothing, so the second budget says nothing")
+	}
+	t.Log("the same document once it has purged, which is written in version 9:")
+	purged := snapshotBudget(t, d)
+	t.Logf("the purge took the snapshot from %d bytes to %d", unpurged, purged)
+}
+
+// snapshotBudget accounts for every byte of d's snapshot and returns its size.
+func snapshotBudget(t *testing.T, d *Doc) int {
+	t.Helper()
 	uvarint := func(v uint64) int {
 		return len(binary.AppendUvarint(nil, v))
 	}
@@ -55,6 +72,16 @@ func TestSnapshotBudget(t *testing.T) {
 	// unaccounted for here is the whole of what this test exists to catch.
 	header += uvarint(0) + uvarint(0)
 
+	// Version 9 adds the purge floor and a flag per run, and a document that has
+	// purged nothing is written in version 8 and pays for neither. The
+	// accounting follows the writer rather than the constant -- see
+	// Doc.formatVersion -- because a version this document does not write is a
+	// version whose fields are not in these bytes.
+	version := d.formatVersion()
+	if version == snapshotVersion {
+		header += uvarint(d.purgedBelow)
+	}
+
 	runs := d.runs()
 	// The count of runs, and then a length and an encoding byte for each of the
 	// twelve columns. Both are part of the file, so both are part of this sum.
@@ -63,6 +90,7 @@ func TestSnapshotBudget(t *testing.T) {
 	var (
 		runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts []uint64
 		delGaps, delSpans, delSites, delSeqs                            []uint64
+		purged                                                          []uint64
 
 		lastDelSeq    = map[SiteID]uint64{}
 		lastRunSeq    = map[SiteID]uint64{}
@@ -87,7 +115,10 @@ func TestSnapshotBudget(t *testing.T) {
 		oSites = append(oSites, uint64(r.origin.Site))
 		oSeqs = append(oSeqs, zigzag(int64(r.origin.Seq)-int64(lastOriginSeq[r.origin.Site])))
 		lastOriginSeq[r.origin.Site] = r.origin.Seq
-		lengths = append(lengths, uint64(len(r.text)))
+		lengths = append(lengths, r.size())
+		if version == snapshotVersion {
+			purged = append(purged, boolByte(r.gone))
+		}
 		for _, ch := range r.text {
 			text = append(text, uint64(ch))
 		}
@@ -127,6 +158,12 @@ func TestSnapshotBudget(t *testing.T) {
 		{"deletion spans", delSpans},
 		{"deletion sites", delSites},
 		{"deletion sequence steps", delSeqs},
+	}
+	if version == snapshotVersion {
+		cols = append(cols, struct {
+			name string
+			vs   []uint64
+		}{"purge flags", purged})
 	}
 
 	parts := []struct {
@@ -210,4 +247,5 @@ func TestSnapshotBudget(t *testing.T) {
 	t.Logf("  origins         %6d, written in full %6d",
 		plain(oSites)+plain(oSeqs), originAsStep)
 	t.Logf("  clocks          %6d, written in full %6d", plain(clocks), clockAsStep)
+	return total
 }

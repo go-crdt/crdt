@@ -198,6 +198,7 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 		s = uv(s, vvSeq) // at this sequence number
 		s = uv(s, 0)     // version 6: an empty collection floor
 		s = uv(s, 0)     // and nothing collected
+		s = uv(s, 0)     // version 9: nothing purged
 		s = uv(s, 1)     // one run
 		// Version 8 writes each field in a column of its own, length-prefixed,
 		// with an encoding byte and then its groups. The sequence number is a
@@ -228,6 +229,7 @@ func TestSnapshotsRefuseAClockAboveTheCeiling(t *testing.T) {
 			col(),                     // no spans,
 			col(),                     // no sites,
 			col(),                     // no sequence steps
+			col(0),                    // version 9: the run was not purged
 		} {
 			s = uv(s, uint64(len(c)))
 			s = append(s, c...)

@@ -13,7 +13,13 @@ import (
 // so a decoder rejects foreign or future bytes instead of misreading them.
 var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 
-// snapshotVersion 8 gives every column an encoding of its own rather than one
+// snapshotVersion 9 adds the purge: a floor in the header saying the clock
+// below which this replica has discarded characters, and a column saying which
+// runs they were discarded from. It is written only by a document that has
+// actually purged — see [Doc.formatVersion] — so a document that has not costs
+// exactly what version 8 costs, to the byte.
+//
+// Version 8 gives every column an encoding of its own rather than one
 // uvarint per value, and splits the deletion fields into four columns so that
 // each is a stream of one kind of number. Version 6 spent 15% of a real document
 // on three columns holding a single repeated value — 10 824 clocks all zero,
@@ -44,12 +50,17 @@ var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 // record per character. All of them are readable; a document stored by an older
 // build still opens.
 //
-// Version 7 is not one of them, and not because it is newer: it is being
-// written on another branch, for the collection floor, and giving one version
-// byte two meanings is the failure this numbering exists to prevent. It is
-// skipped here and refused by the reader below until that lands.
+// Version 7 is not one of them, and it is the one number here nothing has ever
+// written. It was reserved for the purge while version 8 was in flight, because
+// two branches each calling the next number theirs is how one version byte comes
+// to mean two things, which is the failure this numbering exists to prevent.
+// Version 8 landed first, so the purge took 9 and 7 was left standing. It stays
+// refused rather than recycled: a build off to one side did write the purge's
+// earlier shape under it, and those bytes are not these. Reusing the number
+// would mean reading them as this format and believing the answer.
 const (
-	snapshotVersion   = 8
+	snapshotVersion   = 9
+	snapshotVersionV8 = 8
 	snapshotVersionV6 = 6
 	snapshotVersionV5 = 5
 	snapshotVersionV4 = 4
@@ -63,10 +74,16 @@ const (
 // One list, read by [Load] and by [Reads]: a peer is told what the loader does
 // rather than what a second list says it does, and a version added to one
 // without the other is not a way this can go wrong. Note the gap where 7 is.
+//
+// Both 8 and 9 are here, and they are not a highest and its predecessor kept for
+// old bytes: this build writes either one, choosing per document in
+// [Doc.formatVersion], so 8 is a version it still produces. A reader that
+// dropped it would refuse the snapshots of every document that has purged
+// nothing, which is most of them.
 var textFormats = []byte{
 	snapshotVersionV1, snapshotVersionV2, snapshotVersionV3,
 	snapshotVersionV4, snapshotVersionV5, snapshotVersionV6,
-	snapshotVersion,
+	snapshotVersionV8, snapshotVersion,
 }
 
 // knownFormat reports whether v is one of them.
@@ -123,7 +140,8 @@ const (
 func (d *Doc) Snapshot() []byte {
 	out := make([]byte, 0, 5+2*d.total)
 	out = append(out, snapshotMagic[:]...)
-	out = append(out, snapshotVersion)
+	version := d.formatVersion()
+	out = append(out, version)
 
 	sites := d.vv.sites()
 	out = binary.AppendUvarint(out, uint64(len(sites)))
@@ -138,6 +156,17 @@ func (d *Doc) Snapshot() []byte {
 	// not empty, because nothing sound could have produced one.
 	out = binary.AppendUvarint(out, 0)
 	out = binary.AppendUvarint(out, 0)
+
+	// Version 9: the clock below which characters have been discarded. A
+	// document that reloads has to remember what it gave up, or it would answer
+	// that it can serve a peer whose history it no longer holds. Kept for the
+	// same reason a map keeps its collection floor, and learnt the same way: the
+	// floor a replica does not write down is a floor it does not have.
+	//
+	// Written only by a document that has purged; see formatVersion.
+	if version == snapshotVersion {
+		out = binary.AppendUvarint(out, d.purgedBelow)
+	}
 
 	runs := d.runs()
 	out = binary.AppendUvarint(out, uint64(len(runs)))
@@ -169,6 +198,7 @@ func (d *Doc) Snapshot() []byte {
 		delSpans  rleWriter // how many characters it covers
 		delSites  rleWriter // who deleted them
 		delSeqs   rleWriter // with which sequence number, as a step
+		purged    rleWriter // whether each run's characters were discarded
 	)
 	lastDelSeq := map[SiteID]uint64{}
 	lastRunSeq := map[SiteID]uint64{}
@@ -181,7 +211,10 @@ func (d *Doc) Snapshot() []byte {
 		oSites.add(uint64(r.origin.Site))
 		oSeqs.add(zigzag(int64(r.origin.Seq) - int64(lastOriginSeq[r.origin.Site])))
 		lastOriginSeq[r.origin.Site] = r.origin.Seq
-		lengths.add(uint64(len(r.text)))
+		lengths.add(r.size())
+		if version == snapshotVersion {
+			purged.add(boolByte(r.gone))
+		}
 		for _, ch := range r.text {
 			text.add(uint64(ch))
 		}
@@ -201,8 +234,12 @@ func (d *Doc) Snapshot() []byte {
 	// stored, so a reader can take them apart without knowing what is in them —
 	// which is also what lets whoever stores this compress them one at a time,
 	// which measured better than compressing the whole thing at once.
-	for _, w := range []*rleWriter{&runSites, &seqs, &clocks, &oSites, &oSeqs,
-		&lengths, &text, &delCounts, &delGaps, &delSpans, &delSites, &delSeqs} {
+	cols := []*rleWriter{&runSites, &seqs, &clocks, &oSites, &oSeqs,
+		&lengths, &text, &delCounts, &delGaps, &delSpans, &delSites, &delSeqs}
+	if version == snapshotVersion {
+		cols = append(cols, &purged)
+	}
+	for _, w := range cols {
 		col := w.finish()
 		out = binary.AppendUvarint(out, uint64(len(col)+1))
 		out = append(out, columnGroups)
@@ -223,6 +260,61 @@ func (d *Doc) Snapshot() []byte {
 		out = binary.AppendUvarint(out, target.Seq)
 	}
 	return out
+}
+
+// formatVersion is the oldest format this document can be written in, which is
+// the current one only when it has something to say that the current one added.
+//
+// # Understand before write
+//
+// A version this build writes is a version every peer and every store that will
+// read it has to understand already, and the two ends of a session are not
+// deployed at the same moment. This package has learnt that twice: #83 taught a
+// text and a list to understand a superseded run in one release so that a later
+// one could send it, and go-crdt/collab#98 added a required field to the wire
+// and broke three transports that had not been rebuilt, at the cost of a
+// retract.
+//
+// So version 9 — the purge floor in the header, the flag per run in the
+// columns — is understood by [Load] from this release, and written by nobody
+// who has not called [Doc.Purge]. A document that never purges keeps writing
+// version 8, which every build since v0.38.0 reads. There is no flag day and no
+// release to wait for: the format moves for a document at the moment its owner
+// asks for something only the new format can say, which is the strongest form
+// of understand-first available to a snapshot, because a purge cannot be
+// expressed in version 8 at all.
+//
+// The floor is the whole condition. A purged run without one is refused by
+// [Load] — [Doc.Purge] always sets it — so a document with the floor at zero has
+// no purged run for version 8 to lose.
+//
+// It costs nothing to keep the two apart, and it now costs almost nothing to
+// stop. Under version 6's encoding the flag was a uvarint per run, so on the
+// automerge-paper trace it was 10 824 bytes on a document that had purged
+// nothing — 2.26% of a snapshot for a feature it had not used, which is what
+// made the conditional bump worth its complication in the first place. Version
+// 8's groups collapse a column holding one repeated value to a count and a
+// value, so the same all-nought column is four bytes of groups, seven with its
+// encoding byte, its length prefix and the floor: 0.003%.
+//
+// So the bytes no longer argue for this, and it is kept anyway, on the
+// compatibility argument above alone. That is worth saying out loud, because the
+// measurement that justified it has evaporated and the reason it was built has
+// not: a document that has not purged still writes the version every build since
+// v0.38.0 reads, and the seven bytes were never the point.
+func (d *Doc) formatVersion() byte {
+	if d.purgedBelow > 0 {
+		return snapshotVersion
+	}
+	return snapshotVersionV8
+}
+
+// boolByte is the one value a flag column spends.
+func boolByte(b bool) uint64 {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // zigzag maps a signed step onto an unsigned one so that a small step backwards
@@ -318,6 +410,22 @@ type run struct {
 	origin ID
 	text   []rune
 	dels   []delRange
+	// gone is a run whose characters were discarded by [Doc.Purge]. Its length
+	// is the one the deletions describe, and the text column holds nothing for
+	// it — which is the whole saving, and which a reader has to be told rather
+	// than left to infer, because a run that is merely deleted looks the same
+	// from every other column.
+	gone bool
+}
+
+// size is how many characters this run holds, whether or not it still has them.
+func (r run) size() uint64 {
+	if r.gone {
+		// See the note on block.size: a purged run always has deletions
+		// covering it, so the last one's end is its length.
+		return uint64(r.dels[len(r.dels)-1].to)
+	}
+	return uint64(len(r.text))
 }
 
 // appendDel adds a deletion record, joining it to the one before when they touch
@@ -346,7 +454,7 @@ func appendDel(dels []delRange, r delRange) []delRange {
 func (d *Doc) runs() []run {
 	var out []run
 	for b := d.head.next; b != nil; b = b.next {
-		fresh := run{id: b.id, clock: b.clock, origin: b.originID, text: b.text}
+		fresh := run{id: b.id, clock: b.clock, origin: b.originID, text: b.text, gone: b.gone}
 		for _, del := range b.dels {
 			fresh.dels = appendDel(fresh.dels, del)
 		}
@@ -418,6 +526,16 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 		}
 	}
 
+	if version >= snapshotVersion {
+		below, ok := r.uvarint()
+		// A floor above the ceiling names a clock no operation could carry, so
+		// it describes a document that could not have been written.
+		if !ok || below > MaxClock {
+			return nil, ErrMalformed
+		}
+		d.purgedBelow = below
+	}
+
 	// A snapshot has to account for every operation its version vector claims,
 	// exactly once. Anything less and the document could not reproduce its own
 	// history: a peer replaying it would stall on the missing sequence number, or
@@ -450,9 +568,9 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 	// they were one column of gap, span, site and step over and over, which is
 	// those four read in that order from a stream they share.
 	cols := sameStream(r)
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV8 {
 		var err error
-		if cols, err = readColumnsV8(r, ops); err != nil {
+		if cols, err = readColumnsV8(r, ops, version >= snapshotVersion); err != nil {
 			return nil, err
 		}
 	} else if version >= snapshotVersionV5 {
@@ -537,6 +655,22 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 	if !ok1 || !ok2 || !ok3 || !ok4 {
 		return ErrMalformed
 	}
+	gone := false
+	if c.purged != nil {
+		flag, ok := c.purged.uvarint()
+		if !ok || flag > 1 {
+			return ErrMalformed
+		}
+		gone = flag == 1
+		// A purged run in a document whose floor is zero could not have been
+		// written: [Doc.Purge] sets the floor to the highest clock it discarded
+		// under, every time it discards anything. Refusing it is also what makes
+		// the floor alone enough to decide the format version, so that a
+		// document with nothing purged is never written in one that says it has.
+		if gone && d.purgedBelow == 0 {
+			return ErrMalformed
+		}
+	}
 	if version >= snapshotVersionV4 {
 		// The clock arrives as the distance above this run's own sequence
 		// number, so it is added back here and held to the ceiling below like
@@ -559,12 +693,34 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 	}
 	// A run of no characters says nothing and would let a snapshot claim any
 	// number of them; each character costs at least a value still to be read.
-	if length == 0 || length > c.text.remaining() || clock > MaxClock ||
+	//
+	// A purged run costs nothing in the text column, so what holds its length is
+	// the version vector instead: every character is an operation the vector
+	// promises, and they run consecutively from the run's own identity, so the
+	// run cannot reach past what its site has issued.
+	bound := c.text.remaining()
+	if gone {
+		if promised := l.vv[id.Site]; promised >= id.Seq {
+			bound = promised - id.Seq + 1
+		} else {
+			bound = 0
+		}
+	}
+	if length == 0 || length > bound || clock > MaxClock ||
 		clock < id.Seq || !origin.wellFormed() || !id.wellFormed() {
 		return ErrMalformed
 	}
+	// A purged run is adopted with characters that are never read: it is
+	// entirely deleted, which is checked below, so nothing can see them, and
+	// they are dropped again once the run is in. Going through the ordinary path
+	// rather than around it is what keeps a purged run placed exactly where an
+	// unpurged one would be.
 	text := make([]rune, 0, c.text.hint(length))
 	for range length {
+		if gone {
+			text = append(text, ' ')
+			continue
+		}
 		ch, ok := c.text.uvarint()
 		if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
 			return ErrMalformed
@@ -617,6 +773,26 @@ func (d *Doc) readRun(c *columns, l *ledger, version byte, lastDelSeq, lastRunSe
 		if err := d.adopt(c, l); err != nil {
 			return err
 		}
+	}
+
+	if gone {
+		// A purged run must be entirely deleted, or a character with nothing in
+		// it would be visible. Nothing sound could have written one that is not,
+		// so this is refused rather than repaired.
+		covered := uint64(0)
+		for _, del := range dels {
+			covered += uint64(del.to - del.from)
+		}
+		if covered != length {
+			return ErrMalformed
+		}
+		b, _, known := d.lookupChar(ID{Site: id.Site, Seq: id.Seq + length - 1})
+		if !known || b.id != id || uint64(len(b.text)) != length {
+			return ErrMalformed
+		}
+		b.gone = true
+		b.text = nil
+		b.nsup = 0
 	}
 	return nil
 }
@@ -877,14 +1053,26 @@ type columns struct {
 	text, delCounts        *column
 	delGaps, delSpans      *column
 	delSites, delSeqs      *column
+	// purged is version 9's addition: whether each run's characters were
+	// discarded. It is nil for every earlier version, where no run could have
+	// been, and readRun asks only when it is there.
+	purged *column
+	// withPurged says the thirteenth column is there. It is a field rather than
+	// an argument because all is walked before the columns are filled in, so
+	// asking whether purged is nil would answer no every time.
+	withPurged bool
 }
 
 // all lists the columns once, so that nothing below can walk a different set of
 // them from the one readColumnsV8 filled in.
 func (c *columns) all() []**column {
-	return []**column{&c.sites, &c.seqs, &c.clocks, &c.oSites, &c.oSeqs,
+	out := []**column{&c.sites, &c.seqs, &c.clocks, &c.oSites, &c.oSeqs,
 		&c.lengths, &c.text, &c.delCounts, &c.delGaps, &c.delSpans,
 		&c.delSites, &c.delSeqs}
+	if c.withPurged {
+		out = append(out, &c.purged)
+	}
+	return out
 }
 
 // sameStream is how every version before 5 is read: the fields go past in the
@@ -935,8 +1123,10 @@ func readColumns(r *reader) (*columns, error) {
 // that — one per run, one per character or one per deleted stretch, and each of
 // those is an operation the vector has to account for — so a column claiming
 // more is refused before anything is decoded from it.
-func readColumnsV8(r *reader, ops uint64) (*columns, error) {
-	c := &columns{}
+//
+// purged says whether the thirteenth column, version 9's, is there.
+func readColumnsV8(r *reader, ops uint64, purged bool) (*columns, error) {
+	c := &columns{withPurged: purged}
 	for _, into := range c.all() {
 		n, ok := r.uvarint()
 		// A column is at least its encoding byte, so a length of zero is not a

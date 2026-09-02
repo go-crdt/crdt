@@ -78,9 +78,14 @@ func upTo(highest byte) []byte {
 //
 // It is not always the highest version read: a format ships its reader first and
 // its writer a release later, so that a peer meets nothing it cannot understand.
-// The four coincide today and are kept apart because that is the fact a sender
-// has to compare against what a peer says it reads, and because the purge branch
-// already separates them.
+//
+// Nor is it always what a given document writes. A text is version 9 here and
+// version 8 in the bytes of every document that has not purged, because the
+// purge's fields are written only by a document that has any -- see
+// [Doc.formatVersion]. The higher number is the honest answer to a sender's
+// question all the same: what a peer has to be able to read is the most this
+// build might send it, and a peer told 8 would be sent a 9 the first time
+// somebody called [Doc.Purge].
 //
 // Zero for a format this build does not know.
 func Writes(f Format) byte {

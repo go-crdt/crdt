@@ -323,6 +323,9 @@ func TestSnapshotCarriesDuplicateDeletions(t *testing.T) {
 // runBuilder assembles snapshots field by field, so that every
 // rejection in the run reader can be provoked directly.
 type runBuilder struct {
+	// purgedBelow is version 7's floor: the clock below which characters were
+	// discarded. Zero for a fixture that purged nothing.
+	purgedBelow uint64
 	// asVersion writes an older format instead of the current one, so that the
 	// readers for versions this package still accepts keep being exercised after
 	// the current version moves on. Zero means the current version.
@@ -342,12 +345,21 @@ type encodedRun struct {
 	text                                    []rune
 	length                                  uint64 // overrides the encoded length
 	dels                                    [][4]uint64
-	delCount                                int // overrides the encoded number of deletions
+	delCount                                int    // overrides the encoded number of deletions
+	purged                                  bool   // version 9: its characters were discarded
+	purgedFlag                              uint64 // overrides the encoded flag
 }
 
 func (b runBuilder) build() []byte {
 	out := append([]byte{}, "crdt"...)
-	version := byte(snapshotVersion)
+	// The version the writer would choose for this document, so that a fixture
+	// is comparable byte for byte with what Snapshot produces: version 9 only
+	// when there is a purge floor to write, and version 8 otherwise. See
+	// Doc.formatVersion.
+	version := byte(snapshotVersionV8)
+	if b.purgedBelow != 0 {
+		version = snapshotVersion
+	}
 	if b.asVersion != 0 {
 		version = b.asVersion
 	}
@@ -383,6 +395,11 @@ func (b runBuilder) build() []byte {
 			out = binary.AppendUvarint(out, g[1])
 		}
 	}
+	if version >= snapshotVersion {
+		// Version 9: the purge floor. A fixture that purged nothing writes zero,
+		// which is what a document that never called Purge writes.
+		out = binary.AppendUvarint(out, b.purgedBelow)
+	}
 	n := b.count
 	if n == 0 {
 		n = len(b.runs)
@@ -402,9 +419,14 @@ func (b runBuilder) build() []byte {
 	// distance is refused against the ceiling instead of against the sequence.
 	// The case still fails to load, which is what it asserts.
 	var runSites, seqs, clocks, oSites, oSeqs, lengths, text, delCounts []uint64
-	var delGaps, delSpans, delSites, delSeqs []uint64
+	var delGaps, delSpans, delSites, delSeqs, purged []uint64
 	for _, r := range b.runs {
 		runSites = append(runSites, r.site)
+		flag := boolByte(r.purged)
+		if r.purgedFlag != 0 {
+			flag = r.purgedFlag
+		}
+		purged = append(purged, flag)
 		seqs = append(seqs, zigzag(int64(r.seq)-int64(lastRun[SiteID(r.site)])))
 		lastRun[SiteID(r.site)] = r.seq
 		clocks = append(clocks, r.clock-r.seq)
@@ -433,10 +455,17 @@ func (b runBuilder) build() []byte {
 			lastDel[site] = d[3]
 		}
 	}
-	if version >= snapshotVersion {
+	if version >= snapshotVersionV8 {
 		// Version 8: twelve columns, each an encoding byte and then its groups.
-		for _, col := range [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
-			lengths, text, delCounts, delGaps, delSpans, delSites, delSeqs} {
+		cols := [][]uint64{runSites, seqs, clocks, oSites, oSeqs,
+			lengths, text, delCounts, delGaps, delSpans, delSites, delSeqs}
+		if version >= snapshotVersion {
+			// Version 9's addition, and the reader asks for it by version, so a
+			// fixture that did not write it would be short a column rather than
+			// describing an older format.
+			cols = append(cols, purged)
+		}
+		for _, col := range cols {
 			out = appendColumn(out, groupColumn(col))
 		}
 	} else {
@@ -634,8 +663,11 @@ func TestLoadReadsASnapshotWrittenByVersionOne(t *testing.T) {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
 	fresh := d.Snapshot()
-	if fresh[4] != snapshotVersion {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersion)
+	// Version 8, not the current one: version 9 is written only by a document
+	// that has purged, so that a build which merely understands it never hands
+	// an older reader bytes it cannot parse. See Doc.formatVersion.
+	if fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 	again, err := Load(7, fresh)
 	if err != nil {
@@ -689,8 +721,11 @@ func TestLoadReadsASnapshotWrittenByVersionThree(t *testing.T) {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
 	fresh := d.Snapshot()
-	if fresh[4] != snapshotVersion {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersion)
+	// Version 8, not the current one: version 9 is written only by a document
+	// that has purged, so that a build which merely understands it never hands
+	// an older reader bytes it cannot parse. See Doc.formatVersion.
+	if fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 	again, err := Load(7, fresh)
 	if err != nil {
@@ -751,8 +786,11 @@ func TestLoadReadsASnapshotWrittenByVersionTwo(t *testing.T) {
 		t.Fatalf("replaying the loaded history gave %q, want %q", got, want)
 	}
 	fresh := d.Snapshot()
-	if fresh[4] != snapshotVersion {
-		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersion)
+	// Version 8, not the current one: version 9 is written only by a document
+	// that has purged, so that a build which merely understands it never hands
+	// an older reader bytes it cannot parse. See Doc.formatVersion.
+	if fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote format version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 	again, err := Load(7, fresh)
 	if err != nil {
@@ -785,16 +823,63 @@ func TestLoadRejectsTruncatedVersionTwoSnapshots(t *testing.T) {
 	}
 }
 
-// A version 5 snapshot is nine length-prefixed columns, and each of the ways
-// that can be wrong has to be refused rather than half-read.
+// columnsFit reports whether a snapshot holds exactly n length-prefixed
+// columns, by walking n of them and requiring that what follows is an empty
+// duplicate-deletion table and the end of the bytes.
 //
-// These are failure modes the format did not have before: interleaved fields
-// end where the runs end, but a column carries its own length and can claim
-// more bytes than exist, or fewer than the runs need, or more than they use.
-// The last is the one worth stating: bytes left over in a column describe runs
-// the count did not claim, which would make two byte strings for one document.
+// Exactly, rather than at least: a column is length-prefixed, so a walk that
+// stops counting when it runs out reads the duplicate count as one more empty
+// column and answers one too many. Requiring the end to line up is what makes
+// the answer mean something -- these fixtures carry no duplicates, so anything
+// but a zero and an empty buffer says the walk landed somewhere else.
+func columnsFit(t *testing.T, good []byte, n int) bool {
+	t.Helper()
+	r := &reader{buf: good[columnsStart(t, good):]}
+	for range n {
+		size, ok := r.uvarint()
+		if !ok {
+			return false
+		}
+		if _, ok := r.bytes(int(size)); !ok {
+			return false
+		}
+	}
+	nDups, ok := r.uvarint()
+	return ok && nDups == 0 && len(r.buf) == 0
+}
+
+// A snapshot is a row of length-prefixed columns, and each of the ways that can
+// be wrong has to be refused rather than half-read.
+//
+// These are failure modes the format did not have before columns: interleaved
+// fields end where the runs end, but a column carries its own length and can
+// claim more bytes than exist, or fewer than the runs need, or more than they
+// use. The last is the one worth stating: bytes left over in a column describe
+// runs the count did not claim, which would make two byte strings for one
+// document.
+//
+// Both column counts are exercised, because there are two: version 8 writes
+// twelve and version 9 a thirteenth, and a document is written in whichever it
+// needs. Running these against one of them only would leave the other's column
+// bookkeeping unchecked -- and the header walk these all depend on has one more
+// field to step over in version 9, which is precisely the mistake that has been
+// made here before.
 func TestLoadRejectsMalformedColumns(t *testing.T) {
-	good := wellFormedRun().build()
+	for _, fixture := range []struct {
+		name string
+		b    runBuilder
+	}{
+		{"version 8, twelve columns", wellFormedRun()},
+		{"version 9, thirteen columns", purgedRun()},
+	} {
+		t.Run(fixture.name, func(t *testing.T) {
+			rejectsMalformedColumns(t, fixture.b.build())
+		})
+	}
+}
+
+func rejectsMalformedColumns(t *testing.T, good []byte) {
+	t.Helper()
 	if _, err := Load(2, good); err != nil {
 		t.Fatalf("the fixture does not load: %v", err)
 	}
@@ -851,35 +936,56 @@ func TestLoadRejectsMalformedColumns(t *testing.T) {
 	}
 }
 
-// columnsStart walks the header of a version 8 snapshot byte by byte and says
-// where the columns begin.
+// columnsStart walks a snapshot's header byte by byte and says where the
+// columns begin.
 //
 // Walking it is not optional and it is not a formality: a byte counted wrong
 // lands every alteration above in the wrong field, and the loader then refuses
 // for a reason none of the cases is about — so the tests keep passing while
-// testing nothing. Every field the header grows has to be stepped over here.
+// testing nothing. It happened here once, to a walk that read the collection
+// tally and the purge floor as column lengths and every column after them from
+// the wrong offset, and the case still passed, because landing anywhere in a
+// snapshot produces some rejection. Every field the header grows has to be
+// stepped over here.
+//
+// Which fields are there depends on the version — version 6 added the
+// collection floor and the tallies, version 9 the purge floor — so the version
+// in the bytes decides, and a fixture written in one version cannot be walked
+// by a header written for another.
 func columnsStart(t *testing.T, snap []byte) int {
 	t.Helper()
-	// Past the magic, the version, the version-vector table, the two tables
-	// version 6 added and the run count.
+	version := snap[len(snapshotMagic)]
 	r := &reader{buf: snap[len(snapshotMagic)+1:]}
 	nSites, _ := r.uvarint()
 	for range nSites {
 		r.uvarint()
 		r.uvarint()
 	}
-	nFloor, _ := r.uvarint()
-	for range nFloor {
-		r.uvarint()
-		r.uvarint()
+	if version >= snapshotVersionV6 {
+		nFloor, _ := r.uvarint()
+		for range nFloor {
+			r.uvarint()
+			r.uvarint()
+		}
+		nGone, _ := r.uvarint()
+		for range nGone {
+			r.uvarint()
+			r.uvarint()
+		}
 	}
-	nGone, _ := r.uvarint()
-	for range nGone {
-		r.uvarint()
-		r.uvarint()
+	if version >= snapshotVersion {
+		r.uvarint() // version 9: the purge floor
 	}
 	r.uvarint() // the run count
 	return len(snap) - len(r.buf)
+}
+
+// snapshotColumns is how many columns a snapshot of this version holds, which
+// version 9 grows by one. splitColumns has to know, or it reads the duplicate
+// deletion table as a thirteenth column and puts the snapshot back wrong.
+func snapshotColumns(snap []byte) int {
+	c := columns{withPurged: snap[len(snapshotMagic)] >= snapshotVersion}
+	return len(c.all())
 }
 
 // splitColumns takes a version 8 snapshot apart into what comes before the
@@ -890,7 +996,7 @@ func splitColumns(t *testing.T, snap []byte) ([]byte, [][]byte, []byte) {
 	at := columnsStart(t, snap)
 	r := &reader{buf: snap[at:]}
 	var cols [][]byte
-	for range len(new(columns).all()) {
+	for range snapshotColumns(snap) {
 		n, ok := r.uvarint()
 		if !ok {
 			t.Fatalf("the snapshot has no length for column %d", len(cols))
@@ -900,6 +1006,31 @@ func splitColumns(t *testing.T, snap []byte) ([]byte, [][]byte, []byte) {
 			t.Fatalf("column %d claims %d bytes and has fewer", len(cols), n)
 		}
 		cols = append(cols, append([]byte{}, buf...))
+	}
+
+	// What is left has to be exactly the duplicate-deletion table, ending where
+	// the snapshot ends. This is what says the walk above landed on a column
+	// boundary rather than near one, and nothing else here would notice: a
+	// header field stepped over wrongly puts every column length one byte out,
+	// the columns still come apart into plausible slices, and the alteration a
+	// test then makes lands in some other field -- where the loader refuses
+	// anyway, for a reason the test is not about. Removing the purge floor from
+	// the walk above passed every case in this file before this was added.
+	left := &reader{buf: r.buf}
+	n, ok := left.uvarint()
+	if !ok || n > uint64(len(left.buf)) {
+		t.Fatalf("the columns did not end on the duplicate-deletion table: %d bytes left over",
+			len(r.buf))
+	}
+	for range n {
+		for range 4 {
+			if _, ok := left.uvarint(); !ok {
+				t.Fatal("the duplicate-deletion table runs short, so the columns ended in the wrong place")
+			}
+		}
+	}
+	if len(left.buf) != 0 {
+		t.Fatalf("the split left %d bytes past the duplicate-deletion table", len(left.buf))
 	}
 	return snap[:at], cols, r.buf
 }
@@ -978,10 +1109,10 @@ func TestLoadStillAcceptsVersionFive(t *testing.T) {
 		t.Fatalf("version 5 keeps %d tombstones, the current version %d",
 			was.Tombstones(), now.Tombstones())
 	}
-	// Re-encoding an old snapshot writes the current version, and nothing was
-	// collected in it, so its floor is empty.
-	if fresh := was.Snapshot(); fresh[4] != snapshotVersion {
-		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersion)
+	// Re-encoding an old snapshot writes version 8: nothing was purged in it, so
+	// it has nothing version 9 exists to say. See Doc.formatVersion.
+	if fresh := was.Snapshot(); fresh[4] != snapshotVersionV8 {
+		t.Fatalf("re-encoding wrote version %d, want %d", fresh[4], snapshotVersionV8)
 	}
 }
 
