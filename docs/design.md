@@ -763,11 +763,14 @@ every vector, because handing out the live ones would put the position a server
 measures a client against under the control of the thing being measured.
 
 One thing this loader deliberately does not insist on is that a part's bytes are
-the *current* encoding. A text part written by an older build is still read by
-`Load` and written back in the current form, so a snapshot this package accepts is
-normalised on load while one it produced reloads to itself byte for byte.
-Refusing the older form would buy an exact fixed point on arbitrary input at the
-price of the migration that form exists for.
+the version the part's own document would write. A text is written at version 8
+by a document that has purged nothing and at 9 by one that has, and both are read
+here, so a composite whose text has since purged is not refused for carrying the
+other number. It used to say more than that: every version back to 1 was read and
+normalised on load, which is why the fuzz target asserts its fixed point on what
+the loader produced rather than on what it was given. Those readers went with
+#99 — there are no production servers and nothing holds those bytes — so the only
+input this decoder now accepts and does not return unchanged is none.
 
 ### A name
 

@@ -255,26 +255,6 @@ func TestAWriteAboveTheCollectedClockIsOrdinary(t *testing.T) {
 	}
 }
 
-// A version 1 map snapshot still loads and comes back having collected nothing.
-func TestLoadMapStillAcceptsVersionOne(t *testing.T) {
-	raw := encodeMapSnapshot(uint64(1), uint64(1), uint64(1), uint64(1),
-		"k", uint64(1), uint64(1), uint64(1), []byte{1}, uint64(1), []byte("v"))
-	// Rebuild it at version 1: the same body without the collected clock.
-	old := append([]byte{}, mapMagic[:]...)
-	old = append(old, mapVersionV1)
-	old = append(old, raw[len(mapMagic)+2:]...)
-	m, err := LoadMap(2, old)
-	if err != nil {
-		t.Fatalf("a version 1 map snapshot did not load: %v", err)
-	}
-	if m.CollectedBelow() != 0 {
-		t.Fatalf("a map loaded from version 1 came back having collected below %d", m.CollectedBelow())
-	}
-	if fresh := m.Snapshot(); fresh[len(mapMagic)] != mapVersion {
-		t.Fatalf("re-encoding wrote version %d, want %d", fresh[len(mapMagic)], mapVersion)
-	}
-}
-
 // A composite collects its map parts and leaves the rest alone.
 func TestACompositeCollectsItsMaps(t *testing.T) {
 	c := NewComposite(1)
@@ -311,6 +291,18 @@ func TestACompositeCollectsItsMaps(t *testing.T) {
 	}
 	if body.String() != "AAA" {
 		t.Fatalf("the text reads %q, want %q", body.String(), "AAA")
+	}
+	// And the composite says so. That answer is what tells a newcomer replaying
+	// this history that the bytes it produces are allowed to differ here: the
+	// clock a map collected under is in the snapshot and in no operation. It is
+	// asserted here rather than left to the fuzzer's corpus, which is where it
+	// used to be established and where a seed that stops decoding takes it away
+	// without saying anything.
+	if !c.collected() {
+		t.Fatal("a composite that has collected does not say it has")
+	}
+	if fresh := NewComposite(2); fresh.collected() {
+		t.Fatal("a composite that has collected nothing says it has")
 	}
 }
 

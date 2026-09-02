@@ -34,8 +34,8 @@ func (f Format) String() string {
 //
 // A set rather than a range, because the versions are not contiguous and
 // assuming they were is a mistake this package has already made: version 7 of a
-// text is reserved for the purge and refused here, so this build reads 1 to 6
-// and 8. A peer told "up to 8" would send a 7 and be refused.
+// text is reserved for the purge and refused here, so this build reads 8 and 9
+// and nothing between. A peer told "up to 9" would send a 7 and be refused.
 //
 // Empty for a format this build does not know, which is how a peer built later
 // can name one and be understood to have said something rather than nothing.
@@ -54,24 +54,13 @@ func Reads(f Format) []byte {
 	case FormatText:
 		return append([]byte(nil), textFormats...)
 	case FormatList:
-		return upTo(listVersion)
+		return []byte{listVersion}
 	case FormatMap:
-		return upTo(mapVersion)
+		return []byte{mapVersion}
 	case FormatComposite:
-		return upTo(compositeSnapshotVersion)
+		return []byte{compositeSnapshotVersion}
 	}
 	return nil
-}
-
-// upTo is every version from one to highest, for the formats that have no gaps
-// in them. Written once rather than three times so that a format acquiring a gap
-// has to say so here rather than being described wrongly by a shared helper.
-func upTo(highest byte) []byte {
-	out := make([]byte, 0, highest)
-	for v := byte(1); v <= highest; v++ {
-		out = append(out, v)
-	}
-	return out
 }
 
 // Writes reports the version of a format this build produces.

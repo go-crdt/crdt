@@ -1110,6 +1110,11 @@ func encodeMapSnapshot(parts ...any) []byte {
 }
 
 func TestMapLoadRejects(t *testing.T) {
+	// None of these is a version this build does not know: an unknown version is
+	// refused by TestFormatsMatchTheLoaders, which tries all 255 of them against
+	// every loader. "no collected clock" is the version byte and nothing after
+	// it, which the current version says has a clock.
+	//
 	// One site at sequence 3, then whatever the case under test supplies.
 	header := func(records ...any) []byte {
 		return encodeMapSnapshot(append([]any{uint64(1), uint64(1), uint64(3)}, records...)...)
@@ -1120,7 +1125,8 @@ func TestMapLoadRejects(t *testing.T) {
 		"foreign magic":                         []byte("xxxxx\x01"),
 		"a text snapshot":                       New(1).Snapshot(),
 		"no version":                            []byte("crdtm"),
-		"future version":                        []byte("crdtm\x02"),
+		"no collected clock":                    []byte("crdtm\x02"),
+		"no vector":                             encodeMapSnapshot(),
 		"truncated vector":                      encodeMapSnapshot(uint64(2), uint64(1)),
 		"vector site without a sequence number": encodeMapSnapshot(uint64(1), uint64(1)),
 		"sequence number of zero":               encodeMapSnapshot(uint64(1), uint64(1), uint64(0)),
