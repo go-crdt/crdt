@@ -68,9 +68,13 @@ func (c *Composite) ApplyAbsorbed(batches ...PartOps) ([]PartOps, error) {
 	}
 	var out []PartOps
 	for _, b := range batches {
-		// Each part validates with the same function that has just passed
-		// here, so these cannot fail; the errors are dropped rather than turned
-		// into branches no input can reach, as [Composite.Apply] does.
+		// Text and list validate with the same function that has just passed
+		// here, so those two cannot fail and their errors are dropped rather
+		// than turned into branches no input can reach. A map can: a write
+		// below its collect floor resurrects a tombstone and is refused as
+		// [ErrStranded] — by [Composite.Apply] too, and a relay must not
+		// swallow what a client would be told. It is returned, as Apply does,
+		// with what was absorbed before it, so a server can still pass that on.
 		got := PartOps{Part: b.Part}
 		switch b.Part.Kind {
 		case PartText:
@@ -78,7 +82,10 @@ func (c *Composite) ApplyAbsorbed(batches ...PartOps) ([]PartOps, error) {
 		case PartList:
 			got.List, _ = c.list(b.Part.Name).ApplyAbsorbed(b.List...)
 		default:
-			got.Map, _ = c.mapPart(b.Part.Name).ApplyAbsorbed(b.Map...)
+			var err error
+			if got.Map, err = c.mapPart(b.Part.Name).ApplyAbsorbed(b.Map...); err != nil {
+				return out, err
+			}
 		}
 		if len(got.Text)+len(got.List)+len(got.Map) > 0 {
 			out = append(out, got)
