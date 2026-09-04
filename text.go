@@ -418,20 +418,27 @@ func (d *Doc) split(b *block, i int) *block {
 		id:       b.idAt(i),
 		clock:    b.clockAt(i),
 		originID: b.idAt(i - 1),
-		text:     b.text[i:len(b.text):len(b.text)],
 		next:     b.next,
+		gone:     b.gone,
 	}
-	// Dividing the supplementary count needs the characters read, so it is done
-	// only for a block that has any — which for a document with no emoji in it is
-	// no block at all.
-	if b.nsup != 0 {
-		right.nsup = countSup(right.text)
-		b.nsup -= right.nsup
+	// A purged run has no text to divide; its length lives in its deletions,
+	// which cutDels splits below, so both halves keep size() = their span.
+	if !b.gone {
+		right.text = b.text[i:len(b.text):len(b.text)]
+		// Dividing the supplementary count needs the characters read, so it is
+		// done only for a block that has any — which for a document with no
+		// emoji in it is no block at all.
+		if b.nsup != 0 {
+			right.nsup = countSup(right.text)
+			b.nsup -= right.nsup
+		}
 	}
 	if len(b.dels) > 0 {
 		right.dels = b.cutDels(i)
 	}
-	b.text = b.text[:i:i]
+	if !b.gone {
+		b.text = b.text[:i:i]
+	}
 	right.prev = b
 	if right.next != nil {
 		right.next.prev = right
@@ -882,12 +889,17 @@ func beforeChar(clock uint64, id ID, at *block, i int) bool {
 func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 	at, i, _ := d.lookupChar(origin)
 	i++
+	// size(), not len(text): a purged run has dropped its characters but kept
+	// its length, and an insertion whose origin is INSIDE such a run must be
+	// placed within it, exactly where a replica that never purged places it.
+	// Reading len(at.text) here made a gone run unsplittable, so the character
+	// walked past the whole run and two replicas diverged for ever.
 	for budget := scanBudget; ; {
-		if i < len(at.text) {
+		if i < at.size() {
 			if !beforeChar(clock, id, at, i) {
 				break // the character here sorts first; the new one goes before it
 			}
-			i = len(at.text) // the rest of this run sorts after; step over it
+			i = at.size() // the rest of this run sorts after; step over it
 			continue
 		}
 		next := at.next
@@ -899,13 +911,13 @@ func (d *Doc) place(id ID, clock uint64, origin ID, ch rune) (*block, int) {
 			// descent, and a peer sending operations that all name one origin
 			// makes it as long as the document. The index finds its end.
 			at = d.lastOver(at, clock, id)
-			i = len(at.text)
+			i = at.size()
 			break
 		}
 		budget--
-		at, i = next, len(next.text)
+		at, i = next, next.size()
 	}
-	if i < len(at.text) {
+	if i < at.size() {
 		d.split(at, i)
 	}
 

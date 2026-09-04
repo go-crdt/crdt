@@ -52,8 +52,8 @@ func inspect(d *Doc) []string {
 		if b.prev != prev {
 			say("block %v's prev points at %v, not %v", b.id, idOf(b.prev), idOf(prev))
 		}
-		if len(b.text) == 0 {
-			say("block %v holds no characters", b.id)
+		if b.size() == 0 {
+			say("block %v holds nothing, not even a purged length", b.id)
 		}
 		// Deleted stretches ascend, do not overlap, and stay inside the run.
 		at := 0
@@ -63,13 +63,15 @@ func inspect(d *Doc) []string {
 				say("block %v has deletions out of order at %d", b.id, r.from)
 			case r.from >= r.to:
 				say("block %v has an empty deletion [%d,%d)", b.id, r.from, r.to)
-			case int(r.to) > len(b.text):
-				say("block %v deletes past its end: [%d,%d) of %d", b.id, r.from, r.to, len(b.text))
+			case int(r.to) > b.size():
+				say("block %v deletes past its end: [%d,%d) of %d", b.id, r.from, r.to, b.size())
 			}
 			at = int(r.to)
 		}
-		// Every character's identity is its own, exactly once in the document.
-		for i := range b.text {
+		// Every character's identity is its own, exactly once in the document —
+		// a purged run keeps its identities although it dropped its characters,
+		// so this counts size() positions, not len(text).
+		for i := 0; i < b.size(); i++ {
 			id := b.idAt(i)
 			if ids[id] {
 				say("identity %v belongs to two characters", id)
@@ -89,7 +91,7 @@ func inspect(d *Doc) []string {
 		if nsup != b.nsup {
 			say("block %v says %d supplementary characters and has %d", b.id, b.nsup, nsup)
 		}
-		total += len(b.text)
+		total += b.size()
 		visible += b.visibleFrom(0)
 		for i, r := range b.text {
 			if r > 0xFFFF && b.aliveAt(i) {
@@ -212,7 +214,7 @@ func inspect(d *Doc) []string {
 			if n > 0 && b.id.Seq <= last {
 				say("bySite[%d] is out of order at %v", site, b.id)
 			}
-			last = b.id.Seq + uint64(len(b.text)) - 1
+			last = b.id.Seq + uint64(b.size()) - 1
 			if !seen[b] {
 				say("bySite[%d] holds %v, which is not in the list", site, b.id)
 			}
