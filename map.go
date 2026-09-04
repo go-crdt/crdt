@@ -928,6 +928,16 @@ func LoadMap(site SiteID, snapshot []byte) (*Map, error) {
 	if len(r.buf) != 0 {
 		return nil, ErrMalformed
 	}
+	// The records that carried the highest clocks are exactly the tombstones
+	// Collect drops, so a collected snapshot can understate the clock this
+	// replica had reached — and collectedBelow is a clock it had certainly
+	// seen. Every write it mints from now on has to be above that floor, or
+	// its first Set on a collected key is refused by every peer as a
+	// resurrection (ErrStranded) while the writer itself holds it: the one
+	// divergence a Lamport clock exists to prevent.
+	if m.clock < m.collectedBelow {
+		m.clock = m.collectedBelow
+	}
 
 	// The Lamport clock must be at least as high as anything the map records,
 	// including the sequence numbers of writes whose clocks the snapshot does not
