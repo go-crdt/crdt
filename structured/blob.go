@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"math"
 	"sort"
 
 	"github.com/go-crdt/crdt"
@@ -363,6 +364,15 @@ func decodeManifest(value []byte) (total int, keys []string, ok bool) {
 	// A file of no bytes has no chunks, and a file of some bytes has some: a
 	// manifest saying otherwise cannot be assembled and is not read.
 	if (size == 0) != (count == 0) {
+		return 0, nil, false
+	}
+	// size is a uint64 a peer wrote, and it is returned as an int. A value past
+	// what an int holds becomes negative on a 64-bit build and a truncated,
+	// unrelated number on a 32-bit one — where it can even equal the assembled
+	// length and pass Get off as complete. It cannot be a real length here
+	// anyway: the chunks that would make up size bytes are len(rest)/32 of them,
+	// bounded just above by the bytes actually present. Refuse it.
+	if size > math.MaxInt {
 		return 0, nil, false
 	}
 	keys = make([]string, 0, count)
