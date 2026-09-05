@@ -5,7 +5,6 @@ import (
 	"compress/flate"
 	"encoding/binary"
 	"io"
-	"math"
 	"slices"
 	"sort"
 	"unicode/utf8"
@@ -610,6 +609,26 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 // at the end of this function, where the rest of the run is folded in: every
 // later character of a purged run is placed by the same two comparisons, on
 // inputs the run header already gave, and they answer the same way every time.
+// maxDocumentLength is how many characters one document may hold.
+//
+// It is not a policy about how much anybody should write; it is the width the
+// rest of the package is built in. [Doc.Snapshot] reserves 5+2*d.total, and
+// d.total is an int -- thirty-two bits on 386, arm and mips, which this
+// repository builds and vets for. A gibibyte of characters keeps 5+2*total
+// inside an int32 with room to spare, and is four times more text than the
+// largest document anybody has reported, so the bound is unreachable by a
+// document and reachable only by a snapshot that claims one.
+//
+// A purged run is where the claim is cheap, since it carries a length and no
+// characters -- which is why the bound is checked there against the running
+// total rather than per run.
+const maxDocumentLength = 1 << 29
+
+// The reservation this bound exists for, asserted where it cannot drift: this
+// declaration does not compile if 5+2*maxDocumentLength leaves an int32, which
+// is the int [Doc.Snapshot] reserves with on 386, arm and mips.
+const _ int32 = 5 + 2*maxDocumentLength
+
 func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
 	id, ok1 := steppedID(c.sites, c.seqs, lastRunSeq)
 	clock, ok2 := c.clocks.uvarint()
@@ -715,10 +734,22 @@ func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginS
 		// A delRange keeps its offsets in thirty-two bits and [block.size] reads
 		// the last one as the run's length, so a longer run would be described
 		// by records that cannot describe it: the arithmetic above has already
-		// wrapped by the time they are read. Refused rather than trusted to
-		// disagree with itself, which is how it was refused before -- by
-		// running out of memory first.
-		if length > math.MaxUint32 {
+		// wrapped by the time they are read.
+		//
+		// maxDocumentLength is the tighter of the two, and it bounds the
+		// DOCUMENT rather than the run: a purged run costs its bytes to read
+		// now, so what it can still make expensive is everything downstream
+		// that is sized from the length -- [Doc.Snapshot] reserves 5+2*d.total
+		// before writing a byte. Measured before this bound: an 83-byte
+		// snapshot claiming 2^32-1 purged characters read in three kilobytes
+		// and then wrote itself back by reserving eight gigabytes. On a 32-bit
+		// target the same arithmetic does not merely reserve, it wraps
+		// negative and panics in makeslice, out of bytes a peer sent.
+		//
+		// Counted against the running total, so many runs cannot do what one
+		// may not: the subtraction is on the left because d.total+length is
+		// itself the overflow being avoided.
+		if length > uint64(maxDocumentLength-d.total) {
 			return ErrMalformed
 		}
 		for _, del := range dels {
@@ -841,6 +872,9 @@ func (d *Doc) emplace(c character) error {
 	}
 	b, i := d.place(c.id, c.clock, c.origin, c.ch)
 	if b.next != nil || i != len(b.text)-1 {
+		return ErrMalformed
+	}
+	if d.total == maxDocumentLength {
 		return ErrMalformed
 	}
 	d.total++

@@ -282,3 +282,96 @@ func TestAReloadedPurgedRunLiftsTheDocumentClock(t *testing.T) {
 			next[0].Clock, last)
 	}
 }
+
+// A snapshot may not claim more characters than a document can hold.
+//
+// Reading a purged run costs its bytes now, which is the fix above. What a
+// length can still make expensive is everything sized FROM it, and the nearest
+// of those is the encoder: [Doc.Snapshot] reserves 5+2*d.total before it writes
+// a byte. Measured on this branch before the document-wide bound, an 83-byte
+// snapshot claiming 2^32-1 purged characters read in about three kilobytes and
+// then wrote itself back by reserving eight gigabytes — the bomb moved rather
+// than went. On a 32-bit target the same arithmetic wraps negative and panics
+// inside makeslice, out of bytes a peer sent, and this repository builds and
+// vets for 386, arm and mips.
+//
+// The bound is the document's, not the run's, so several runs cannot do what
+// one may not.
+func TestLoadRefusesADocumentLongerThanOneCanBe(t *testing.T) {
+	t.Run("one run past the bound", func(t *testing.T) {
+		const n = maxDocumentLength + 1
+		f := purgedRun()
+		f.runs[0].length = n
+		f.runs[0].dels = [][4]uint64{{0, n, 1, n + 1}}
+		f.sites = [][2]uint64{{1, 2 * n}}
+		f.purgedBelow = n + 1
+		raw := f.build()
+		if _, err := Load(2, raw); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("a %d-byte snapshot claiming %d characters loaded with %v, want ErrMalformed", len(raw), n, err)
+		}
+	})
+
+	// Two runs, neither past the bound on its own, together past it: the bound
+	// is the document's. Both are impeccable otherwise — the second continues
+	// the first's sequence and names its last character as its origin — which
+	// is what makes this about the total and nothing else.
+	t.Run("two runs that together pass it", func(t *testing.T) {
+		const a, b = maxDocumentLength - 1, 2
+		f := twoPurgedRuns(a, b)
+		raw := f.build()
+		if _, err := Load(2, raw); !errors.Is(err, ErrMalformed) {
+			t.Fatalf("a %d-byte snapshot claiming %d+%d characters loaded with %v, want ErrMalformed", len(raw), a, b, err)
+		}
+	})
+}
+
+// twoPurgedRuns is two consecutive purged runs of a and b characters from one
+// site: inserts take sequence numbers 1..a+b, the deletions that follow take
+// a+b+1..2(a+b), and the second run's origin is the first run's last character.
+func twoPurgedRuns(a, b uint64) runBuilder {
+	f := purgedRun()
+	f.runs[0].length = a
+	f.runs[0].dels = [][4]uint64{{0, a, 1, a + b + 1}}
+	f.runs = append(f.runs, encodedRun{
+		site: 1, seq: a + 1, clock: a + 1,
+		originSite: 1, originSeq: a,
+		length: b, purged: true,
+		dels: [][4]uint64{{0, b, 1, a + b + 1 + a}},
+	})
+	f.sites = [][2]uint64{{1, 2 * (a + b)}}
+	f.purgedBelow = a + b + 1
+	return f
+}
+
+// And the bound is not so tight that it refuses what it should carry: a purged
+// run of exactly the bound loads, and cheaply.
+//
+// It is loaded and not re-encoded here on purpose. Writing it back reserves
+// 5+2*maxDocumentLength bytes -- that reservation is the whole reason the bound
+// has the value it has, and making a unit test reserve a gigabyte to watch it
+// succeed would be measuring the machine. That the reservation stays inside an
+// int is asserted where it belongs, at compile time, beside the constant.
+func TestADocumentAtTheBoundStillLoads(t *testing.T) {
+	f := purgedRun()
+	const n = maxDocumentLength
+	f.runs[0].length = n
+	f.runs[0].dels = [][4]uint64{{0, n, 1, n + 1}}
+	f.sites = [][2]uint64{{1, 2 * n}}
+	f.purgedBelow = n + 1
+	raw := f.build()
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	d, err := Load(2, raw)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("a purged run of exactly the bound was refused: %v", err)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 1<<20 {
+		t.Fatalf("reading a %d-byte snapshot at the bound allocated %d bytes", len(raw), grew)
+	}
+	if d.Len() != 0 {
+		t.Fatalf("a wholly purged document shows %d characters", d.Len())
+	}
+}
