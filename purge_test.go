@@ -403,16 +403,19 @@ func TestLoadAcceptsAHandBuiltPurgedRun(t *testing.T) {
 // A purged run may not reach past what its site has issued: with no text to
 // bound it, the version vector is the only thing that does.
 //
-// The first two cases below would be refused with or without that bound, by the
-// ledger a few lines later -- a run reaching past its site names operations the
-// vector never promised, and a snapshot that does not account for exactly the
-// operations it claims is refused whole. What the bound changes is *when*, and
-// the third case is the one that shows it: a purged run costs nothing in the
-// text column, so a crafted length is not held by the bytes the way every other
-// run's is, and reading one means writing out that many characters before
-// anything is checked. Take the bound away and that case does not fail, it
-// hangs. This was measured by taking it away: the case ran past a twenty-second
-// timeout, and the two above still passed.
+// All three cases land on ledger.claimSpan, which is where that bound lives:
+// the run's characters are claimed as one stretch, and a stretch reaching past
+// what its site promised is refused before anything is built from it. Take the
+// refusal away -- `&& false` on claimSpan's first condition -- and all three
+// load, the ledger having been told that eight operations account for nine, or
+// for 2^50.
+//
+// The bound used to be written out here instead, and the reason it had to be
+// was that reading a purged run meant writing out its characters first: the
+// third case did not fail without it, it hung. That is no longer true of
+// either half. Nothing is written out, so removing the bound now costs a
+// wrong answer rather than a timeout -- which is why it is checked here and
+// not left to the arithmetic.
 func TestLoadRefusesAPurgedRunPastItsVersion(t *testing.T) {
 	past := purgedRun()
 	past.runs[0].length = 9 // the vector promises eight

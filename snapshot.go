@@ -5,7 +5,9 @@ import (
 	"compress/flate"
 	"encoding/binary"
 	"io"
+	"math"
 	"slices"
+	"sort"
 	"unicode/utf8"
 )
 
@@ -597,6 +599,16 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 // readRun decodes one run and adopts its characters one by one, so that a run
 // gets exactly the checks each of its characters would get on its own: the
 // shorter encoding buys space, not trust.
+//
+// A purged run is the exception, and it has to be: it carries no characters at
+// all, only a length, so adopting them one by one means writing out a million
+// characters that were never read in order to throw them away. What it costs to
+// read would then be what it says rather than what it holds, and what it says
+// is one uvarint away from any number the version vector will promise. So its
+// identities are claimed as stretches, in one go, and only its first character
+// is integrated. That is not a weaker check, and the argument is at the fold
+// below: every later character of a purged run is placed by the same two
+// comparisons, on inputs the run header already gave, with the same answer.
 func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
 	id, ok1 := steppedID(c.sites, c.seqs, lastRunSeq)
 	clock, ok2 := c.clocks.uvarint()
@@ -641,38 +653,28 @@ func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginS
 	// A run of no characters says nothing and would let a snapshot claim any
 	// number of them; each character costs at least a value still to be read.
 	//
-	// A purged run costs nothing in the text column, so what holds its length is
-	// the version vector instead: every character is an operation the vector
-	// promises, and they run consecutively from the run's own identity, so the
-	// run cannot reach past what its site has issued.
-	bound := c.text.remaining()
-	if gone {
-		if promised := l.vv[id.Site]; promised >= id.Seq {
-			bound = promised - id.Seq + 1
-		} else {
-			bound = 0
-		}
-	}
-	if length == 0 || length > bound || clock > MaxClock ||
+	// A purged run costs nothing in the text column, so the bytes do not hold
+	// it; what holds it is [ledger.claimSpan] below, and saying so twice would
+	// mean two places to keep true.
+	if length == 0 || (!gone && length > c.text.remaining()) || clock > MaxClock ||
 		clock < id.Seq || !origin.wellFormed() || !id.wellFormed() {
 		return ErrMalformed
 	}
-	// A purged run is adopted with characters that are never read: it is
-	// entirely deleted, which is checked below, so nothing can see them, and
-	// they are dropped again once the run is in. Going through the ordinary path
-	// rather than around it is what keeps a purged run placed exactly where an
-	// unpurged one would be.
-	text := make([]rune, 0, c.text.hint(length))
-	for range length {
-		if gone {
-			text = append(text, ' ')
-			continue
+	// A purged run is integrated with one character that is never read: it is
+	// entirely deleted, which is checked below, so nothing can see it, and it is
+	// dropped again once the run is in. Going through the ordinary path with the
+	// first character rather than around it is what keeps a purged run placed
+	// exactly where an unpurged one would be.
+	text := []rune{' '}
+	if !gone {
+		text = make([]rune, 0, c.text.hint(length))
+		for range length {
+			ch, ok := c.text.uvarint()
+			if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
+				return ErrMalformed
+			}
+			text = append(text, rune(ch))
 		}
-		ch, ok := c.text.uvarint()
-		if !ok || ch > utf8.MaxRune || (ch >= 0xD800 && ch <= 0xDFFF) {
-			return ErrMalformed
-		}
-		text = append(text, rune(ch))
 	}
 
 	// The deleted stretches, as gaps and lengths. They must ascend, not overlap
@@ -700,6 +702,30 @@ func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginS
 		at = from + span
 	}
 
+	if gone {
+		// The run's identities, claimed as two stretches rather than one at a
+		// time: the characters, and the deletions that account for them. This is
+		// where a purged run's length is held -- claimSpan refuses a stretch
+		// reaching past what its site has issued, which is the bound that used
+		// to be written out above, said once and in the place that enforces it.
+		if !l.claimSpan(id, length) {
+			return ErrMalformed
+		}
+		// A delRange keeps its offsets in thirty-two bits and [block.size] reads
+		// the last one as the run's length, so a longer run would be described
+		// by records that cannot describe it: the arithmetic above has already
+		// wrapped by the time they are read. Refused rather than trusted to
+		// disagree with itself, which is how it was refused before -- by
+		// running out of memory first.
+		if length > math.MaxUint32 {
+			return ErrMalformed
+		}
+		for _, del := range dels {
+			if !l.claimSpan(del.id, uint64(del.to-del.from)) {
+				return ErrMalformed
+			}
+		}
+	}
 	cursor := 0
 	for i, ch := range text {
 		c := character{
@@ -717,6 +743,13 @@ func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginS
 		if cursor < len(dels) && dels[cursor].holds(i) {
 			c.delID = dels[cursor].continuesTo(uint32(i))
 		}
+		if gone {
+			// Its claims were made whole, above; what is left is where it goes.
+			if err := d.emplace(c); err != nil {
+				return err
+			}
+			continue
+		}
 		if err := d.adopt(c, l); err != nil {
 			return err
 		}
@@ -733,13 +766,39 @@ func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginS
 		if covered != length {
 			return ErrMalformed
 		}
-		b, _, known := d.lookupChar(ID{Site: id.Site, Seq: id.Seq + length - 1})
-		if !known || b.id != id || uint64(len(b.text)) != length {
+		b, _, known := d.lookupChar(id)
+		if !known || b.id != id || len(b.text) != 1 {
 			return ErrMalformed
+		}
+		// The rest of the run, which was not integrated and did not need to be.
+		//
+		// Character k of a purged run names character k-1 as its origin, and
+		// character k-1 is the last character of the document at that moment --
+		// the character before it landed there, and this one is checked to. So
+		// place walks from a block that is last, finds nothing after it, splits
+		// nothing, and extends it: same site, and the sequence and the clock
+		// both continue by construction, because they were read as one run
+		// header. It appends in place, every time, and the only inputs are the
+		// fields already checked above. The work is done once over the stretch
+		// instead of once per character; nothing is taken on trust that was not
+		// taken on trust before.
+		//
+		// The deletions replace the single record integration left behind,
+		// joined the way [Doc.runs] joins them on the way out, so that a reader
+		// handed two records a writer would have written as one holds what that
+		// writer held.
+		var joined []delRange
+		for _, del := range dels {
+			joined = appendDel(joined, del)
 		}
 		b.gone = true
 		b.text = nil
 		b.nsup = 0
+		b.dels = joined
+		d.total += int(length - 1)
+		if last := clock + length - 1; last > d.clock {
+			d.clock = last
+		}
 	}
 	return nil
 }
@@ -765,13 +824,20 @@ func (d *Doc) adopt(c character, l *ledger) error {
 	if !l.claim(c.id) {
 		return ErrMalformed
 	}
-	if _, _, known := d.lookupChar(c.origin); !known {
-		return ErrMalformed
-	}
 	if !c.delID.IsRoot() && !l.claim(c.delID) {
 		return ErrMalformed
 	}
+	return d.emplace(c)
+}
 
+// emplace is adopt without the claims: where the character goes, and what that
+// costs the document's counters. A purged run claims the identities of its
+// whole stretch at once and then integrates only its first character, so the
+// two halves are separate.
+func (d *Doc) emplace(c character) error {
+	if _, _, known := d.lookupChar(c.origin); !known {
+		return ErrMalformed
+	}
 	b, i := d.place(c.id, c.clock, c.origin, c.ch)
 	if b.next != nil || i != len(b.text)-1 {
 		return ErrMalformed
@@ -794,14 +860,33 @@ func (d *Doc) adopt(c character, l *ledger) error {
 
 // A ledger tracks which operations a snapshot has accounted for, so that Load
 // can insist on exactly the set the version vector promises.
+//
+// Most identities arrive one at a time and are held in seen. A purged run's do
+// not: it stands for a stretch of consecutive operations it does not carry, and
+// naming them one by one would cost the reader what the run says rather than
+// what it holds. Those arrive as spans -- per site, ascending, disjoint, and
+// merged where they touch, so that a document really typed and really purged
+// leaves one entry behind rather than one per keystroke.
+//
+// The two halves have to agree, because an operation counted twice is an
+// operation the version vector promised that nothing accounted for, and the
+// counts alone cannot tell: claim looks for the identity it is given inside the
+// spans, and complete looks for the spans over the identities already seen,
+// which is the same collision arriving in the other order.
 type ledger struct {
 	vv     VersionVector
 	seen   map[ID]struct{}
 	counts map[SiteID]uint64
+	spans  map[SiteID][]span
 }
 
+// A span is the half-open stretch of sequence numbers [from, to) that one site
+// issued and one purged run accounts for.
+type span struct{ from, to uint64 }
+
 // claim records one operation identity, rejecting anything the version vector
-// does not cover and anything claimed twice.
+// does not cover and anything claimed twice -- whether it was claimed on its own
+// or as part of a stretch.
 func (l *ledger) claim(id ID) bool {
 	if id.IsRoot() || !l.vv.Includes(id) {
 		return false
@@ -809,16 +894,78 @@ func (l *ledger) claim(id ID) bool {
 	if _, dup := l.seen[id]; dup {
 		return false
 	}
+	if covers(l.spans[id.Site], id.Seq) {
+		return false
+	}
 	l.seen[id] = struct{}{}
 	l.counts[id.Site]++
 	return true
 }
 
+// claimSpan records n consecutive operation identities from id in one entry,
+// rejecting a stretch the version vector does not cover whole and one that
+// overlaps a stretch already claimed.
+//
+// The version vector is what bounds n, and for a purged run it is the only
+// thing that does: the run carries no characters, so nothing about the bytes
+// says how long it is. Every character of it is an operation the vector
+// promises, and they run consecutively from the run's own identity, so the run
+// cannot reach past what its site has issued.
+func (l *ledger) claimSpan(id ID, n uint64) bool {
+	// The first identity of the stretch, then its last: the same two refusals
+	// claim makes, over a range rather than a point.
+	if id.IsRoot() || !l.vv.Includes(id) || n > l.vv[id.Site]-id.Seq+1 {
+		return false
+	}
+	from, to := id.Seq, id.Seq+n
+	list := l.spans[id.Site]
+	// The first stretch that could reach this one, and then whether it does.
+	at := sort.Search(len(list), func(i int) bool { return list[i].to > from })
+	if at < len(list) && list[at].from < to {
+		return false
+	}
+	list = append(list, span{})
+	copy(list[at+1:], list[at:])
+	list[at] = span{from: from, to: to}
+	// Joined to either neighbour it touches, so that a document purged run by
+	// run leaves one entry rather than one per run.
+	if at+1 < len(list) && list[at].to == list[at+1].from {
+		list[at].to = list[at+1].to
+		list = append(list[:at+1], list[at+2:]...)
+	}
+	if at > 0 && list[at-1].to == list[at].from {
+		list[at-1].to = list[at].to
+		list = append(list[:at], list[at+1:]...)
+	}
+	if l.spans == nil {
+		l.spans = map[SiteID][]span{}
+	}
+	l.spans[id.Site] = list
+	l.counts[id.Site] += n
+	return true
+}
+
+// covers reports whether one of these stretches holds the sequence number seq.
+// They ascend and do not overlap, so the search is a bisection.
+func covers(list []span, seq uint64) bool {
+	at := sort.Search(len(list), func(i int) bool { return list[i].to > seq })
+	return at < len(list) && list[at].from <= seq
+}
+
 // complete reports whether every operation the version vector promises was
-// claimed. Sequence numbers have no gaps, so counting them is enough.
+// claimed, exactly once. Sequence numbers have no gaps, so counting them is
+// almost enough: a stretch claimed after a sequence number already seen on its
+// own counts one operation twice and leaves another unaccounted for, and the
+// total is the same either way. That is the one collision claim cannot refuse
+// as it happens -- the stretch was not there yet -- so it is looked for here.
 func (l *ledger) complete() bool {
 	for site, seq := range l.vv {
 		if l.counts[site] != seq {
+			return false
+		}
+	}
+	for id := range l.seen {
+		if covers(l.spans[id.Site], id.Seq) {
 			return false
 		}
 	}

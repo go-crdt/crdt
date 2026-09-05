@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"bytes"
+	"errors"
 	"runtime"
 	"strings"
 	"testing"
@@ -90,4 +91,117 @@ func TestAPurgedDocumentSnapshotsToAlmostNothing(t *testing.T) {
 	}
 	t.Logf("a real %d-character document, typed and deleted and purged, is %d bytes",
 		length, len(real.Snapshot()))
+}
+
+// The stretch a purged run claims is bounded by what its site has issued, and
+// so is the stretch its deletions claim. The version vector is the only thing
+// that bounds either, because a purged run carries no bytes to be bounded by.
+func TestLoadRefusesAPurgedRunWhoseDeletionsReachPastItsSite(t *testing.T) {
+	past := purgedRun()
+	// The four deletions are 6@1 through 9@1, and the vector promises eight.
+	past.runs[0].dels = [][4]uint64{{0, 4, 1, 6}}
+	if _, err := Load(2, past.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run deleted by operations its site never issued loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// A delRange holds its offsets in thirty-two bits, and block.size reads the
+// last one as the run's length. A run longer than that is described by records
+// whose arithmetic has already wrapped -- and they can be made to add up: two
+// records of 2^31 cover 2^32 characters as far as the sum is concerned, while
+// the second one's end truncates to zero. Before the length was refused
+// outright the reader was saved from this by running out of memory first, which
+// is not a check.
+func TestLoadRefusesAPurgedRunLongerThanItsDeletionsCanDescribe(t *testing.T) {
+	const length = 1 << 32
+	const half = length / 2
+	wide := purgedRun()
+	wide.sites = [][2]uint64{{1, 2 * length}}
+	wide.purgedBelow = length
+	wide.runs[0].length = length
+	wide.runs[0].dels = [][4]uint64{
+		{0, half, 1, length + 1},
+		{0, half, 1, length + 1 + half},
+	}
+	if _, err := Load(2, wide.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run of 2^32 characters loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// Two purged runs may not claim the same operations. Each stands for a stretch
+// of identities nothing else in the snapshot mentions, so overlapping stretches
+// are two runs saying they are the same characters.
+func TestLoadRefusesTwoPurgedRunsClaimingTheSameOperations(t *testing.T) {
+	twice := purgedRun()
+	twice.sites = [][2]uint64{{1, 16}}
+	twice.runs = append(twice.runs, encodedRun{
+		site: 1, seq: 3, clock: 3, originSite: 1, originSeq: 4,
+		length: 4, purged: true,
+		dels: [][4]uint64{{0, 4, 1, 9}},
+	})
+	if _, err := Load(2, twice.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("two purged runs over one stretch of operations loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// Nor may a character claim an identity a purged run has already claimed. The
+// run does not carry that character, so nothing else would notice: the counts
+// add up, and the document is left holding two blocks that say they are the
+// same operation.
+func TestLoadRefusesACharacterInsideAPurgedRunsStretch(t *testing.T) {
+	inside := purgedRun()
+	// 2@1 is the second character of the purged run, and here it is again.
+	inside.runs = append(inside.runs, encodedRun{
+		site: 1, seq: 2, clock: 2, originSite: 1, originSeq: 1,
+		text: []rune("x"),
+	})
+	if _, err := Load(2, inside.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a character inside a purged run's stretch loaded with %v, want ErrMalformed", err)
+	}
+}
+
+// And the same collision the other way round, which is the one the counting
+// cannot see. The character is claimed first, on its own; the purged run that
+// covers it is claimed after, when there is nothing left to compare it with.
+// Site 1 promises seven operations and the snapshot spends seven -- one of them
+// twice, so 4@1 is promised and accounted for by nothing at all.
+func TestLoadRefusesAPurgedRunCoveringACharacterAlreadyRead(t *testing.T) {
+	after := runBuilder{
+		sites:       [][2]uint64{{1, 7}},
+		purgedBelow: 6,
+		runs: []encodedRun{
+			{site: 1, seq: 3, clock: 3, text: []rune("x")},
+			{
+				site: 1, seq: 1, clock: 4, originSite: 1, originSeq: 3,
+				length: 3, purged: true,
+				dels: [][4]uint64{{0, 3, 1, 5}},
+			},
+		},
+	}
+	if _, err := Load(2, after.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run covering a character already read loaded with %v, want ErrMalformed", err)
+	}
+
+	// The control: the same seven operations with the character one place
+	// further on, where the run does not reach. It loads, so what the refusal
+	// above catches is the collision and not the shape of the fixture.
+	clear := after
+	clear.runs = append([]encodedRun{}, after.runs...)
+	clear.runs[0].seq, clear.runs[0].clock = 4, 4
+	clear.runs[1].originSeq = 4
+	if _, err := Load(2, clear.build()); err != nil {
+		t.Fatalf("the snapshot it varies from does not load: %v", err)
+	}
+}
+
+// A purged run is placed by integrating its first character, and that character
+// gets the checks any other gets: its origin has to be a character the document
+// holds.
+func TestLoadRefusesAPurgedRunWithNoOrigin(t *testing.T) {
+	orphan := purgedRun()
+	orphan.runs[0].originSite = 1
+	orphan.runs[0].originSeq = 99
+	if _, err := Load(2, orphan.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run inserted after a character that does not exist loaded with %v, want ErrMalformed", err)
+	}
 }
