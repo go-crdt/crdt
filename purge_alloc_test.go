@@ -228,3 +228,57 @@ func TestLoadRefusesAPurgedRunThatDidNotLandAtTheEnd(t *testing.T) {
 		t.Fatalf("the snapshot it varies from does not load: %v", err)
 	}
 }
+
+// A purged run stands for characters at clocks its first character's does not
+// reach, and the document's clock has to clear the last of them. It is not a
+// bookkeeping detail: the run keeps its length, so integration still compares
+// against every clock it covers, and a replica that reloads with its clock too
+// low mints operations that sort inside a run they arrived after.
+//
+// Reading the run one character at a time raised the clock as a side effect of
+// reading the last one. Reading it in one go has to say so.
+func TestAReloadedPurgedRunLiftsTheDocumentClock(t *testing.T) {
+	// Site 1's characters have to sit far above its own sequence numbers for
+	// this to be visible at all, and that is what a second site is for: 200
+	// characters from site 2 put site 1's four at clocks 201 to 204, while the
+	// highest sequence number anywhere is 200.
+	peer := New(2)
+	ops, err := peer.Insert(0, strings.Repeat("x", 200))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mine := New(1)
+	if err := mine.Apply(ops...); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mine.Insert(mine.Len(), "abcd"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mine.Delete(200, 4); err != nil {
+		t.Fatal(err)
+	}
+	if got := mine.Purge(); got != 4 {
+		t.Fatalf("Purge() discarded %d characters, want 4", got)
+	}
+
+	// What the last discarded character's clock was, taken from the document
+	// that still remembers, so the number below is not one this test invented.
+	const last = 204
+	if got := mine.PurgedBelow(); got != last {
+		t.Fatalf("the purge floor is %d, want %d", got, last)
+	}
+
+	back, err := Load(3, mine.Snapshot())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	next, err := back.Insert(0, "z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next[0].Clock <= last {
+		t.Fatalf("the first operation after reloading has clock %d, and the run it "+
+			"was read after ends at %d: the reloaded replica mints inside a run it holds",
+			next[0].Clock, last)
+	}
+}
