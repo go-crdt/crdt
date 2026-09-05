@@ -46,6 +46,13 @@ import "errors"
 // operation naming one still finds it, and an ordinary edit from a peer that
 // never purged applies unchanged.
 //
+// Reading one back costs what it holds rather than what it says. That is worth
+// writing down because the opposite is what a purged run invites: it names a
+// million characters in a uvarint and carries none of them, so a reader that
+// wrote them out to throw them away would turn a hundred bytes into hundreds of
+// megabytes, on input a peer chooses. [Load] integrates the first character of
+// such a run and claims the rest as a stretch; see readRun in snapshot.go.
+//
 // Purge reports how many characters it discarded.
 func (d *Doc) Purge() int {
 	d.flush()
