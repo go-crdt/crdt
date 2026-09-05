@@ -403,19 +403,22 @@ func TestLoadAcceptsAHandBuiltPurgedRun(t *testing.T) {
 // A purged run may not reach past what its site has issued: with no text to
 // bound it, the version vector is the only thing that does.
 //
-// All three cases land on ledger.claimSpan, which is where that bound lives:
-// the run's characters are claimed as one stretch, and a stretch reaching past
-// what its site promised is refused before anything is built from it. Take the
-// refusal away -- `&& false` on claimSpan's first condition -- and all three
-// load, the ledger having been told that eight operations account for nine, or
-// for 2^50.
+// Every case here lands on ledger.claimSpan, which is where that bound lives:
+// a purged run claims its characters as one stretch, and a stretch reaching
+// past what its site promised is refused before anything is built from it.
 //
-// The bound used to be written out here instead, and the reason it had to be
-// was that reading a purged run meant writing out its characters first: the
-// third case did not fail without it, it hung. That is no longer true of
-// either half. Nothing is written out, so removing the bound now costs a
-// wrong answer rather than a timeout -- which is why it is checked here and
-// not left to the arithmetic.
+// The first three would be refused with or without it, by the ledger a few
+// lines later -- a run reaching past its site names operations the vector never
+// promised, and a snapshot that does not account for exactly the operations it
+// claims is refused whole. That was true before the bound moved here, and the
+// reason it still mattered was that reading a purged run meant writing out its
+// characters first: the third case did not fail without the bound, it hung, and
+// that was measured by taking it away.
+//
+// Nothing is written out any more, so that argument is gone and this test would
+// pass with the bound removed. The fourth case is what replaces it: there the
+// counting cannot help, because the operations the run names are the right
+// number and the wrong ones.
 func TestLoadRefusesAPurgedRunPastItsVersion(t *testing.T) {
 	past := purgedRun()
 	past.runs[0].length = 9 // the vector promises eight
@@ -436,6 +439,18 @@ func TestLoadRefusesAPurgedRunPastItsVersion(t *testing.T) {
 	huge.runs[0].length = 1 << 50
 	if _, err := Load(2, huge.build()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("a purged run of 2^50 characters loaded with %v, want ErrMalformed", err)
+	}
+
+	// And the deletions that account for a purged run are a stretch of the same
+	// kind, bounded the same way. This is the case the bound is for: four
+	// characters and four deletions is eight operations, which is exactly what
+	// the vector promises, so the ledger's counting is satisfied -- and two of
+	// the eight are 9@1 and 10@1, which the vector never promised at all. Take
+	// claimSpan's first refusal away and this snapshot loads.
+	beyond := purgedRun()
+	beyond.runs[0].dels = [][4]uint64{{0, 4, 1, 6}} // 6@1 through 9@1, and 8 is the promise
+	if _, err := Load(2, beyond.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run deleted by operations its site never issued loaded with %v, want ErrMalformed", err)
 	}
 }
 

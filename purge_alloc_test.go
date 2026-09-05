@@ -93,18 +93,6 @@ func TestAPurgedDocumentSnapshotsToAlmostNothing(t *testing.T) {
 		length, len(real.Snapshot()))
 }
 
-// The stretch a purged run claims is bounded by what its site has issued, and
-// so is the stretch its deletions claim. The version vector is the only thing
-// that bounds either, because a purged run carries no bytes to be bounded by.
-func TestLoadRefusesAPurgedRunWhoseDeletionsReachPastItsSite(t *testing.T) {
-	past := purgedRun()
-	// The four deletions are 6@1 through 9@1, and the vector promises eight.
-	past.runs[0].dels = [][4]uint64{{0, 4, 1, 6}}
-	if _, err := Load(2, past.build()); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("a purged run deleted by operations its site never issued loaded with %v, want ErrMalformed", err)
-	}
-}
-
 // A delRange holds its offsets in thirty-two bits, and block.size reads the
 // last one as the run's length. A run longer than that is described by records
 // whose arithmetic has already wrapped -- and they can be made to add up: two
