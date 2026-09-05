@@ -606,9 +606,10 @@ func Load(site SiteID, snapshot []byte) (*Doc, error) {
 // read would then be what it says rather than what it holds, and what it says
 // is one uvarint away from any number the version vector will promise. So its
 // identities are claimed as stretches, in one go, and only its first character
-// is integrated. That is not a weaker check, and the argument is at the fold
-// below: every later character of a purged run is placed by the same two
-// comparisons, on inputs the run header already gave, with the same answer.
+// is integrated. That is not a weaker check, and why it is not is written out
+// at the end of this function, where the rest of the run is folded in: every
+// later character of a purged run is placed by the same two comparisons, on
+// inputs the run header already gave, and they answer the same way every time.
 func (d *Doc) readRun(c *columns, l *ledger, lastDelSeq, lastRunSeq, lastOriginSeq map[SiteID]uint64) error {
 	id, ok1 := steppedID(c.sites, c.seqs, lastRunSeq)
 	clock, ok2 := c.clocks.uvarint()
@@ -942,6 +943,8 @@ func (l *ledger) claimSpan(id ID, n uint64) bool {
 		list[at-1].to = list[at].to
 		list = append(list[:at], list[at+1:]...)
 	}
+	// Built lazily: a list snapshot's ledger has no such map, and a text
+	// snapshot with nothing purged never asks for one.
 	if l.spans == nil {
 		l.spans = map[SiteID][]span{}
 	}
