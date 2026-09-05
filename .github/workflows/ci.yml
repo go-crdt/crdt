@@ -117,10 +117,19 @@ jobs:
       - name: Time it
         run: go test -run '^$' -bench EditingTrace -benchtime 3x ./...
 
-  # Run the suite on the six supported 64-bit targets. amd64/arm64 run natively;
+  # Run the suite on the supported 64-bit targets. amd64/arm64 run natively;
   # the rest run under qemu-user. A CRDT has to agree with itself across
   # architectures — a replica on s390x and one on amd64 are peers in the same
-  # session, and the snapshot they exchange is compared byte for byte.
+  # session only if they write the same bytes.
+  #
+  # That comparison is real and it is in the suite these lanes run:
+  # TestTheEncodingIsTheSameBytesEverywhere builds one document from a fixed
+  # script and compares its snapshot against testdata/golden-composite.snapshot,
+  # so every lane is compared against the SAME file rather than against itself.
+  # Big-endian s390x and little-endian amd64 agreeing with that file is the two
+  # of them agreeing with each other. (This comment used to claim the lanes
+  # exchanged a snapshot and compared it byte for byte; nothing did, until the
+  # golden file.)
   arch-native:
     name: arch ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
@@ -136,6 +145,36 @@ jobs:
         with:
           go-version: stable
       - run: go env GOARCH && go test ./...
+
+  # The 32-bit targets, built and vetted rather than run: qemu-user for them is
+  # another install and another hour, and what a 32-bit target risks is a width,
+  # not a behaviour — an int64 narrowed to int, a length that wraps. The
+  # compiler catches those, and until this lane existed nothing did: the
+  # structured package's tests could not be BUILT for any 32-bit GOARCH (a
+  # 1<<60 constant), so a lane added later would have failed before running
+  # anything.
+  arch-32bit:
+    name: arch ${{ matrix.goarch }} (build)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [386, arm, mips]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Build and vet, tests included
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go build ./...
+          go vet ./...
+          go test -c -o /dev/null ./...
+          go test -c -o /dev/null ./structured
+          go test -c -o /dev/null ./awareness
 
   arch-qemu:
     name: arch ${{ matrix.goarch }} (qemu)
