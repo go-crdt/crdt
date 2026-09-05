@@ -132,29 +132,36 @@ func TestLoadRefusesTwoPurgedRunsClaimingTheSameOperations(t *testing.T) {
 	}
 }
 
-// Nor may a character claim an identity a purged run has already claimed. The
-// run does not carry that character, so nothing else would notice: the counts
-// add up, and the document is left holding two blocks that say they are the
-// same operation.
-func TestLoadRefusesACharacterInsideAPurgedRunsStretch(t *testing.T) {
-	inside := purgedRun()
-	// 2@1 is the second character of the purged run, and here it is again.
-	inside.runs = append(inside.runs, encodedRun{
-		site: 1, seq: 2, clock: 2, originSite: 1, originSeq: 1,
-		text: []rune("x"),
-	})
-	if _, err := Load(2, inside.build()); !errors.Is(err, ErrMalformed) {
+// A character may not claim an identity a purged run claims, in either order.
+// The run does not carry that character, so nothing else notices: both cases
+// below spend exactly the seven operations site 1 promises, one of them twice,
+// which leaves 4@1 promised and accounted for by nothing at all. Counting
+// cannot see that. Putting the stretches over the identities seen on their own,
+// once, at the end, can -- and has to be at the end, because whichever of the
+// two came first was claimed when the other did not yet exist.
+func TestLoadRefusesACharacterAndAPurgedRunOverOneOperation(t *testing.T) {
+	// The purged run first: 1@1 through 3@1 discarded, deleted by 5@1 through
+	// 7@1, and then 2@1 again as a character of its own.
+	runFirst := runBuilder{
+		sites:       [][2]uint64{{1, 7}},
+		purgedBelow: 3,
+		runs: []encodedRun{
+			{
+				site: 1, seq: 1, clock: 1,
+				length: 3, purged: true,
+				dels: [][4]uint64{{0, 3, 1, 5}},
+			},
+			{site: 1, seq: 2, clock: 5, originSite: 1, originSeq: 3, text: []rune("x")},
+		},
+	}
+	if _, err := Load(2, runFirst.build()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("a character inside a purged run's stretch loaded with %v, want ErrMalformed", err)
 	}
-}
 
-// And the same collision the other way round, which is the one the counting
-// cannot see. The character is claimed first, on its own; the purged run that
-// covers it is claimed after, when there is nothing left to compare it with.
-// Site 1 promises seven operations and the snapshot spends seven -- one of them
-// twice, so 4@1 is promised and accounted for by nothing at all.
-func TestLoadRefusesAPurgedRunCoveringACharacterAlreadyRead(t *testing.T) {
-	after := runBuilder{
+	// And the character first, which is the order the counting cannot be made to
+	// notice as it happens: 3@1 is read, and the run that swallows it arrives
+	// after.
+	charFirst := runBuilder{
 		sites:       [][2]uint64{{1, 7}},
 		purgedBelow: 6,
 		runs: []encodedRun{
@@ -166,30 +173,58 @@ func TestLoadRefusesAPurgedRunCoveringACharacterAlreadyRead(t *testing.T) {
 			},
 		},
 	}
-	if _, err := Load(2, after.build()); !errors.Is(err, ErrMalformed) {
+	if _, err := Load(2, charFirst.build()); !errors.Is(err, ErrMalformed) {
 		t.Fatalf("a purged run covering a character already read loaded with %v, want ErrMalformed", err)
 	}
 
 	// The control: the same seven operations with the character one place
-	// further on, where the run does not reach. It loads, so what the refusal
-	// above catches is the collision and not the shape of the fixture.
-	clear := after
-	clear.runs = append([]encodedRun{}, after.runs...)
+	// further on, where the run does not reach. It loads, so what the two
+	// refusals catch is the collision and not the shape of the fixture.
+	clear := charFirst
+	clear.runs = append([]encodedRun{}, charFirst.runs...)
 	clear.runs[0].seq, clear.runs[0].clock = 4, 4
 	clear.runs[1].originSeq = 4
 	if _, err := Load(2, clear.build()); err != nil {
-		t.Fatalf("the snapshot it varies from does not load: %v", err)
+		t.Fatalf("the snapshot they vary from does not load: %v", err)
 	}
 }
 
 // A purged run is placed by integrating its first character, and that character
-// gets the checks any other gets: its origin has to be a character the document
-// holds.
-func TestLoadRefusesAPurgedRunWithNoOrigin(t *testing.T) {
-	orphan := purgedRun()
-	orphan.runs[0].originSite = 1
-	orphan.runs[0].originSeq = 99
-	if _, err := Load(2, orphan.build()); !errors.Is(err, ErrMalformed) {
-		t.Fatalf("a purged run inserted after a character that does not exist loaded with %v, want ErrMalformed", err)
+// gets the check every other one gets: it has to land at the end of the
+// document, because that is what says the order the snapshot states is the
+// order integration produces.
+//
+// Here it does not. The run says it was inserted after 1@1, which is the first
+// of two characters, so integration puts it between them -- and everything else
+// about the snapshot is impeccable: its deletions cover it, its block is its
+// own, and the six operations site 1 promises are spent exactly once each. Only
+// the position is a lie, and only this check refuses it.
+func TestLoadRefusesAPurgedRunThatDidNotLandAtTheEnd(t *testing.T) {
+	midway := runBuilder{
+		sites:       [][2]uint64{{1, 6}},
+		purgedBelow: 4,
+		runs: []encodedRun{
+			{site: 1, seq: 1, clock: 1, text: []rune("ab")},
+			{
+				// A clock of 4 rather than 3, so that this run starts a block
+				// of its own instead of continuing the one before it -- which
+				// is what makes the position the only thing under test.
+				site: 1, seq: 3, clock: 4, originSite: 1, originSeq: 1,
+				length: 2, purged: true,
+				dels: [][4]uint64{{0, 2, 1, 5}},
+			},
+		},
+	}
+	if _, err := Load(2, midway.build()); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a purged run inserted into the middle of a run loaded with %v, want ErrMalformed", err)
+	}
+
+	// The control: the same run inserted after the second character, which is
+	// where integration does put it.
+	end := midway
+	end.runs = append([]encodedRun{}, midway.runs...)
+	end.runs[1].originSeq = 2
+	if _, err := Load(2, end.build()); err != nil {
+		t.Fatalf("the snapshot it varies from does not load: %v", err)
 	}
 }

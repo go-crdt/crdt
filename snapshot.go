@@ -870,9 +870,10 @@ func (d *Doc) emplace(c character) error {
 //
 // The two halves have to agree, because an operation counted twice is an
 // operation the version vector promised that nothing accounted for, and the
-// counts alone cannot tell: claim looks for the identity it is given inside the
-// spans, and complete looks for the spans over the identities already seen,
-// which is the same collision arriving in the other order.
+// counts alone cannot tell -- they add up either way. Stretches are kept from
+// colliding with each other as they are claimed, which is cheap because they
+// are few and sorted; a stretch colliding with an identity seen on its own is
+// looked for once, in complete, whichever of the two arrived first.
 type ledger struct {
 	vv     VersionVector
 	seen   map[ID]struct{}
@@ -885,16 +886,20 @@ type ledger struct {
 type span struct{ from, to uint64 }
 
 // claim records one operation identity, rejecting anything the version vector
-// does not cover and anything claimed twice -- whether it was claimed on its own
-// or as part of a stretch.
+// does not cover and anything claimed twice.
+//
+// It does not look in the stretches, and that is deliberate: complete looks for
+// them over everything seen, which catches an identity claimed before its
+// stretch as well as one claimed after, and a refusal here would only make the
+// second of those two cases arrive earlier. Both spellings refuse exactly the
+// same snapshots -- measured by taking this one away, which changed no verdict
+// -- and a guard that no test can distinguish is a line that looks like a
+// safeguard and is not.
 func (l *ledger) claim(id ID) bool {
 	if id.IsRoot() || !l.vv.Includes(id) {
 		return false
 	}
 	if _, dup := l.seen[id]; dup {
-		return false
-	}
-	if covers(l.spans[id.Site], id.Seq) {
 		return false
 	}
 	l.seen[id] = struct{}{}
@@ -954,10 +959,11 @@ func covers(list []span, seq uint64) bool {
 
 // complete reports whether every operation the version vector promises was
 // claimed, exactly once. Sequence numbers have no gaps, so counting them is
-// almost enough: a stretch claimed after a sequence number already seen on its
-// own counts one operation twice and leaves another unaccounted for, and the
-// total is the same either way. That is the one collision claim cannot refuse
-// as it happens -- the stretch was not there yet -- so it is looked for here.
+// almost enough: a stretch and an identity over the same operation count it
+// twice and leave another unaccounted for, and the total is the same either
+// way. So the stretches are put over everything seen, here, at the end -- which
+// is the only place both orders of that collision can be seen at once, the
+// earlier of the two having been claimed when the other did not yet exist.
 func (l *ledger) complete() bool {
 	for site, seq := range l.vv {
 		if l.counts[site] != seq {
