@@ -174,7 +174,12 @@ func TestALengthFromAPeerIsCheckedBeforeItIsBelieved(t *testing.T) {
 		// One real digest, and a length saying the file is an exabyte. Get used
 		// to reserve that much before looking at a single chunk.
 		digest := sha256.Sum256([]byte("a chunk nobody stored"))
-		value := binary.AppendUvarint(nil, 1<<60)
+		// A gibibyte, not 1<<60: the claim only has to be absurd next to the
+		// nothing this replica holds, and it has to fit in an int on a 32-bit
+		// target or this file does not compile there — which is what kept the
+		// package's tests off every 32-bit architecture until it was measured.
+		const huge = 1 << 30
+		value := binary.AppendUvarint(nil, huge)
 		value = binary.AppendUvarint(value, 1)
 		value = append(value, digest[:]...)
 
@@ -182,7 +187,7 @@ func TestALengthFromAPeerIsCheckedBeforeItIsBelieved(t *testing.T) {
 		if _, err := b.manifest.Set("huge.bin", value); err != nil {
 			t.Fatal(err)
 		}
-		if size, ok := b.Size("huge.bin"); !ok || size != 1<<60 {
+		if size, ok := b.Size("huge.bin"); !ok || size != huge {
 			t.Fatalf("Size = %d, %v — the manifest is readable, which is the point of Size", size, ok)
 		}
 		var before, after runtime.MemStats
