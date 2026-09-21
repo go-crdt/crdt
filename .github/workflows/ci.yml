@@ -50,10 +50,7 @@ jobs:
           COVERPKG=$(go list ./... | paste -sd, -)
           go test -coverpkg="$COVERPKG" -coverprofile=cover.out ./...
           go tool cover -func=cover.out | tail -n 25
-          cov=$(go tool cover -func=cover.out | tail -1 | awk '{print $3}' | tr -d '%')
-          echo "coverage: ${cov}%"
-          awk -v t="$cov" 'BEGIN { exit !(t+0 >= 100.0) }' || {
-            echo "::error::coverage ${cov}% < 100%"; exit 1; }
+          "$GITHUB_WORKSPACE/.github/coverage-gate.sh" cover.out
 
   # The point of writing the merge logic in Go is that the browser runs the same
   # code. This job proves it: the whole suite, convergence properties included,

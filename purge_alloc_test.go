@@ -375,3 +375,54 @@ func TestADocumentAtTheBoundStillLoads(t *testing.T) {
 		t.Fatalf("a wholly purged document shows %d characters", d.Len())
 	}
 }
+
+// The document bound again, one character at a time.
+//
+// TestLoadRefusesADocumentLongerThanOneCanBe reaches the bound through a purged
+// run, which can CLAIM a length in a handful of bytes. [Doc.emplace] holds the
+// same bound for characters that are actually materialised, and that one cannot
+// be reached from a snapshot at any price: d.total counts real characters, so a
+// document at the bound is 2^29 of them. It is a backstop, and a backstop nothing
+// exercises is an assumption.
+//
+// So the state is arranged rather than grown, which is the same reason
+// dirstore's file operations are variables: there is no way to make half a
+// gigabyte of characters on demand.
+//
+// The control comes first and is what makes the refusal mean anything. emplace
+// returns ErrMalformed from three different checks — an unknown origin, a
+// character that did not land at the end, and this bound — so a test that only
+// sees ErrMalformed has not identified which. Below the bound the very same
+// character is ACCEPTED; at the bound it is refused.
+func TestEmplaceRefusesACharacterPastTheDocumentBound(t *testing.T) {
+	next := func() (*Doc, character) {
+		d := New(1)
+		if _, err := d.Insert(0, "a"); err != nil {
+			t.Fatal(err)
+		}
+		origin := ID{Site: 1, Seq: 1}
+		if _, _, known := d.lookupChar(origin); !known {
+			t.Fatalf("the document does not hold %v", origin)
+		}
+		return d, character{
+			id:     ID{Site: 1, Seq: 2},
+			clock:  d.clock + 1,
+			origin: origin,
+			ch:     'b',
+		}
+	}
+
+	control, c := next()
+	if err := control.emplace(c); err != nil {
+		t.Fatalf("below the bound the same character was refused: %v", err)
+	}
+	if control.total != 2 {
+		t.Fatalf("the control holds %d characters, want 2", control.total)
+	}
+
+	d, c := next()
+	d.total = maxDocumentLength
+	if err := d.emplace(c); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a character past the bound gave %v, want ErrMalformed", err)
+	}
+}
