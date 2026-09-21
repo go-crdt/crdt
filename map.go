@@ -223,7 +223,7 @@ func ParseMapOps(data []byte) ([]MapOp, error) {
 	rest := data[used:]
 	// An operation is at least four bytes, so a count larger than the remaining
 	// bytes allow is a corrupt header — refuse it before allocating for it.
-	if count > uint64(len(rest)) {
+	if impossibleCount(count, len(rest), 4) {
 		return nil, ErrMalformed
 	}
 	ops := make([]MapOp, 0, count)

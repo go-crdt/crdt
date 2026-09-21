@@ -335,7 +335,7 @@ func ParseOps(data []byte) ([]Op, error) {
 	rest := data[used:]
 	// An operation is at least four bytes, so a count larger than the remaining
 	// bytes allow is a corrupt header — refuse it before allocating for it.
-	if count > uint64(len(rest)) {
+	if impossibleCount(count, len(rest), 4) {
 		return nil, ErrMalformed
 	}
 	ops := make([]Op, 0, count)
@@ -351,4 +351,27 @@ func ParseOps(data []byte) ([]Op, error) {
 		return nil, ErrMalformed
 	}
 	return ops, nil
+}
+
+// impossibleCount reports a count no remaining bytes could describe, for a header
+// that says how many records of a known minimum size follow.
+//
+// Divide rather than multiply. count*each is uint64 arithmetic and wraps, so a
+// count of 1<<62 with each of 4 is zero and passes every check; structured/blob.go
+// met that and says so, and this is the same rule named once instead of restated
+// at each header.
+//
+// It exists because the restating had already drifted. Four of these headers
+// carried a comment saying an operation is at least four or six bytes and then
+// compared against the byte count itself, allowing one record per byte. Measured
+// on ParseListOps before this: a 1 MiB header claiming 1 Mi operations reserved
+// 96 MiB, a ratio of 96 to 1 at every input size, because a ListOp is 96 bytes.
+//
+// each is the smallest number of bytes one record can occupy, and understating it
+// is the safe direction: the bound is then looser than it could be. Overstating it
+// would refuse documents that are perfectly good, so it is the encoder's floor
+// rather than a guess — measured, one text operation encodes to seven bytes where
+// its header claims four.
+func impossibleCount(count uint64, left, each int) bool {
+	return count > uint64(left)/uint64(each)
 }

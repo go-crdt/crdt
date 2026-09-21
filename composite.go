@@ -677,7 +677,7 @@ func ParsePartOps(data []byte) ([]PartOps, error) {
 	// A batch is at least four bytes — a kind, a name of at least one byte with
 	// its length, and a count — so a count larger than the remaining bytes allow
 	// is a corrupt header. Refuse it before allocating for it.
-	if count > uint64(len(rest)) {
+	if impossibleCount(count, len(rest), 4) {
 		return nil, ErrMalformed
 	}
 	batches := make([]PartOps, 0, count)
@@ -715,7 +715,7 @@ func decodePartOps(data []byte) (PartOps, []byte, error) {
 	}
 	count, ok := r.uvarint()
 	// An operation is at least four bytes whichever kind it is.
-	if !ok || count > uint64(len(r.buf)) {
+	if !ok || impossibleCount(count, len(r.buf), 4) {
 		return PartOps{}, nil, ErrMalformed
 	}
 	var err error
