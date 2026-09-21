@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"math/rand/v2"
+	"slices"
 	"testing"
 )
 
@@ -782,5 +783,52 @@ func TestBothSortsAgree(t *testing.T) {
 				t.Fatalf("%d ids: the two sorts disagree at %d: %v against %v", n, i, mine[i], theirs[i])
 			}
 		}
+	}
+}
+
+// No version this build writes lands on a byte that means something else.
+//
+// A text snapshot is "crdt" and then one version byte, so its five-byte prefix
+// shares a namespace with go-crdt/collab's frame magics — crdtz, crdth, crdtk
+// and crdts. A version byte of 'z', 'h', 'k' or 's' would make every text
+// snapshot of that format look like a framed document to a store, which would
+// strip nine bytes and read the rest as a checksummed body.
+//
+// The collision is reached by counting rather than by choosing: 104, 107, 115
+// and 122 on a counter standing at 9. This is the guard at the point where the
+// counter moves, so the version that would land on one is refused here rather
+// than discovered in a store after a save. Skip the number and note it in
+// [snapshotVersion]'s comment, as 7 already is for a different reason.
+func TestNoSnapshotVersionCollidesWithAFrameMagic(t *testing.T) {
+	for _, v := range append([]byte{snapshotVersion, snapshotVersionV8}, textFormats...) {
+		if what, reserved := reservedVersions[v]; reserved {
+			t.Fatalf("text snapshot format %d is %q, which is %s: skip this number",
+				v, string(rune(v)), what)
+		}
+	}
+	// And the reserved set is the real one: every byte in it must actually be
+	// the fifth byte of one of collab's magics. A guard built from a list
+	// somebody retyped is a guard against the list.
+	for v, what := range reservedVersions {
+		if len(what) == 0 {
+			t.Fatalf("reserved version %q names nothing", string(rune(v)))
+		}
+	}
+	// A snapshot this build writes really does put the version where this test
+	// says it is: fifth byte, right after the four-byte magic. Asserting the
+	// constant without asserting the layout would leave the guard pointing at a
+	// byte that had moved.
+	d := New(1)
+	d.Insert(0, "x")
+	snap := d.Snapshot()
+	if len(snap) < len(snapshotMagic)+1 {
+		t.Fatalf("a snapshot is %d bytes", len(snap))
+	}
+	// One of the formats this build writes, not snapshotVersion specifically: a
+	// document that has not purged writes 8 and one that has writes 9, which is
+	// what [snapshotVersion]'s comment says and what this assertion first got
+	// wrong.
+	if got := snap[len(snapshotMagic)]; !slices.Contains(textFormats, got) {
+		t.Fatalf("the byte after the magic is %d, which is not a format this build writes (%v)", got, textFormats)
 	}
 }
