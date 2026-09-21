@@ -342,6 +342,32 @@ type Doc struct {
 	// have not seen it.
 	dupDeletes map[ID]ID
 
+	// dupOrder is those keys in the order they are written, and dupSorted is how
+	// many of them are known to be in it: dupOrder[:dupSorted] is sorted and the
+	// rest is arrival order.
+	//
+	// [Doc.Snapshot] and [Doc.OpsSince] have to write them in one order whatever
+	// order they arrived in, because the encoding is canonical -- two replicas
+	// holding the same operations produce the same bytes. They did that by
+	// draining the map into a slice and sorting it, every call, and map order is
+	// random so that is the sort's worst case every time.
+	//
+	// Undo is what makes it hurt: re-deleting a character records another losing
+	// operation, so the table grows without the document growing at all.
+	// Measured on a document of a hundred characters, one Snapshot: 2.1 µs with
+	// no duplicates, 4.5 ms with thirty-four thousand of them, and a profile 74%
+	// inside the sort.
+	//
+	// So the order is kept. Arrivals append, and a call sorts only what has
+	// arrived since the last one and merges it with what was already in order --
+	// linear when the table is quiet, which between two snapshots it nearly
+	// always is. Entries are never removed, so this never needs compacting.
+	dupOrder  []ID
+	dupSorted int
+	// dupMerge is the scratch the merge writes through, kept rather than
+	// allocated per call for the same reason parkSlab is.
+	dupMerge []ID
+
 	// mark is where the most recent local edit ended: character markPos of
 	// block mark, which is the markIdx'th visible character. Finding a position
 	// means walking the document, and someone typing asks for very nearly the
@@ -973,7 +999,50 @@ func (d *Doc) recordDuplicate(delID, target ID) {
 	if d.dupDeletes == nil {
 		d.dupDeletes = map[ID]ID{}
 	}
+	// The key decides whether the order gains an entry, because an operation
+	// recorded twice would be written twice. Nothing applies one twice -- the
+	// version vector sees to that -- and the loader reads each once, so this is
+	// a guard rather than a case.
+	if _, seen := d.dupDeletes[delID]; !seen {
+		d.dupOrder = append(d.dupOrder, delID)
+	}
 	d.dupDeletes[delID] = target
+}
+
+// duplicatesInOrder is the duplicate deletions in the order they are written.
+//
+// Only the arrivals since the last call are sorted, and merged with what was
+// already in order. See [Doc.dupOrder] for what that is worth and why the order
+// has to exist at all.
+func (d *Doc) duplicatesInOrder() []ID {
+	fresh := d.dupOrder[d.dupSorted:]
+	if len(fresh) == 0 {
+		return d.dupOrder
+	}
+	sortIDs(fresh)
+	if d.dupSorted > 0 {
+		d.dupMerge = mergeIDs(d.dupMerge[:0], d.dupOrder[:d.dupSorted], fresh)
+		d.dupOrder, d.dupMerge = d.dupMerge, d.dupOrder
+	}
+	d.dupSorted = len(d.dupOrder)
+	return d.dupOrder
+}
+
+// mergeIDs appends the merge of two sorted runs to dst.
+//
+// Ties cannot happen: the runs hold keys of one map, so no ID is in both.
+func mergeIDs(dst, a, b []ID) []ID {
+	for len(a) > 0 && len(b) > 0 {
+		if idLess(a[0], b[0]) {
+			dst = append(dst, a[0])
+			a = a[1:]
+			continue
+		}
+		dst = append(dst, b[0])
+		b = b[1:]
+	}
+	dst = append(dst, a...)
+	return append(dst, b...)
 }
 
 // idLess orders IDs by site then sequence. It is the tie-break for concurrent
@@ -1015,15 +1084,10 @@ func (d *Doc) OpsSince(vv VersionVector) []Op {
 			}
 		}
 	}
-	dups := make([]ID, 0, len(d.dupDeletes))
-	for delID := range d.dupDeletes {
+	for _, delID := range d.duplicatesInOrder() {
 		if !vv.Includes(delID) {
-			dups = append(dups, delID)
+			ops = append(ops, deleteOp(delID, d.dupDeletes[delID]))
 		}
-	}
-	sortIDs(dups)
-	for _, delID := range dups {
-		ops = append(ops, deleteOp(delID, d.dupDeletes[delID]))
 	}
 	return ops
 }

@@ -268,7 +268,14 @@ type List struct {
 	parkSlab []ListOp
 
 	dupDeletes map[ID]ID
-	present    int
+
+	// dupOrder, dupSorted and dupMerge keep those keys in the order they are
+	// written, so that a snapshot does not sort the whole table every time. See
+	// [Doc.dupOrder], which explains the arrangement and carries the numbers.
+	dupOrder  []ID
+	dupSorted int
+	dupMerge  []ID
+	present   int
 }
 
 // NewList returns an empty list that issues operations as site. Every replica
@@ -635,7 +642,27 @@ func (l *List) recordListDuplicate(delID, target ID) {
 	if l.dupDeletes == nil {
 		l.dupDeletes = map[ID]ID{}
 	}
+	if _, seen := l.dupDeletes[delID]; !seen {
+		l.dupOrder = append(l.dupOrder, delID)
+	}
 	l.dupDeletes[delID] = target
+}
+
+// duplicatesInOrder is the duplicate deletions in the order they are written.
+// The same arrangement [Doc.duplicatesInOrder] has, for the same reason and with
+// the same measurements behind it: see [Doc.dupOrder].
+func (l *List) duplicatesInOrder() []ID {
+	fresh := l.dupOrder[l.dupSorted:]
+	if len(fresh) == 0 {
+		return l.dupOrder
+	}
+	sortIDs(fresh)
+	if l.dupSorted > 0 {
+		l.dupMerge = mergeIDs(l.dupMerge[:0], l.dupOrder[:l.dupSorted], fresh)
+		l.dupOrder, l.dupMerge = l.dupMerge, l.dupOrder
+	}
+	l.dupSorted = len(l.dupOrder)
+	return l.dupOrder
 }
 
 // Anchor returns the identity of the value at index pos, which keeps naming that
@@ -703,14 +730,10 @@ func (l *List) OpsSince(vv VersionVector) []ListOp {
 			})
 		}
 	}
-	dups := make([]ID, 0, len(l.dupDeletes))
-	for delID := range l.dupDeletes {
-		if !vv.Includes(delID) {
-			dups = append(dups, delID)
+	for _, delID := range l.duplicatesInOrder() {
+		if vv.Includes(delID) {
+			continue
 		}
-	}
-	sortIDs(dups)
-	for _, delID := range dups {
 		ops = append(ops, ListOp{
 			Kind: OpDelete, ID: delID, Clock: delID.Seq, Target: l.dupDeletes[delID],
 		})
@@ -766,11 +789,7 @@ func (l *List) Snapshot() []byte {
 		out = append(out, e.value...)
 	}
 
-	dups := make([]ID, 0, len(l.dupDeletes))
-	for delID := range l.dupDeletes {
-		dups = append(dups, delID)
-	}
-	sortIDs(dups)
+	dups := l.duplicatesInOrder()
 	out = binary.AppendUvarint(out, uint64(len(dups)))
 	for _, delID := range dups {
 		target := l.dupDeletes[delID]
