@@ -274,11 +274,7 @@ func (d *Doc) Snapshot() []byte {
 		out = append(out, col...)
 	}
 
-	dups := make([]ID, 0, len(d.dupDeletes))
-	for delID := range d.dupDeletes {
-		dups = append(dups, delID)
-	}
-	sortIDs(dups)
+	dups := d.duplicatesInOrder()
 	out = binary.AppendUvarint(out, uint64(len(dups)))
 	for _, delID := range dups {
 		target := d.dupDeletes[delID]
