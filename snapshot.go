@@ -52,10 +52,54 @@ var snapshotMagic = [...]byte{'c', 'r', 'd', 't'}
 // write the purge's earlier shape under it, and those bytes are not these.
 // Reusing the number would mean reading them as this format and believing the
 // answer.
+//
+// Four numbers are RESERVED and must be skipped when this counter reaches them:
+// see [reservedVersions].
 const (
 	snapshotVersion   = 9
 	snapshotVersionV8 = 8
 )
+
+// reservedVersions are the format numbers a text snapshot must never carry,
+// because a five-byte prefix somewhere else already means them.
+//
+// A text snapshot is [snapshotMagic] -- four bytes, "crdt" -- and then one
+// version byte. go-crdt/collab frames a stored document with a FIVE-byte magic
+// in the same space: crdtz, crdth and crdtk for the three framings it has
+// written, and crdts for its site list. Its unframing reads the first five bytes
+// and hands anything it does not recognise straight back, which is how it reads
+// documents written before the framing existed.
+//
+// So a text snapshot whose version byte is 'z', 'h' or 'k' IS one of those
+// prefixes, and collab takes the document for a frame. Measured, in collab's
+// TestATextSnapshotWhoseVersionLandsOnAFrameMagic, on a real snapshot with its
+// version byte changed:
+//
+//   - 'h' and 'z' are read as the compressed framings, so brotli is handed
+//     document bytes and refuses them.
+//   - 'k' is the bad one. Four bytes of the document become a checksum, the rest
+//     is compared against it, and the refusal says the document HAS BEEN
+//     CORRUPTED -- of a document nothing has touched. An operator reading that
+//     goes looking for a failing disk.
+//   - 's' is collab's site list rather than a document framing, so unframing
+//     does not claim it and hands it back untouched. It is reserved on the
+//     weaker ground that the magic exists in the same space and is one reader
+//     away from being the case above; skipping a fourth number out of 256 costs
+//     nothing.
+//
+// What makes this worth a constant rather than a remark is that the collision is
+// reached by COUNTING. It is not a name anybody would choose badly; it is 104,
+// 107, 115 and 122 on a counter standing at 9. Nothing goes wrong until the
+// version that lands on one, and then it goes wrong quietly, in a store, after
+// a save -- and for 'k' it goes wrong while blaming the disk.
+//
+// TestNoSnapshotVersionCollidesWithAFrameMagic holds this.
+var reservedVersions = map[byte]string{
+	'z': "collab's crdtz frame",
+	'h': "collab's crdth frame",
+	'k': "collab's crdtk frame",
+	's': "collab's crdts site list",
+}
 
 // textFormats is every version of a text snapshot this build reads, ascending.
 //
