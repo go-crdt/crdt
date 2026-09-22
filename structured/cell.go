@@ -101,8 +101,18 @@ func decodeCell(data []byte) (Cell, bool) {
 	c := Cell{Kind: CellKind(kind), Text: text}
 	if c.Kind == CellFormula {
 		n, ok := rd.uvarint()
-		// Each reference is four varints of at least one byte each.
-		if !ok || n > uint64(len(rd.buf)) {
+		// Each reference is four varints of at least one byte each, so DIVIDE:
+		// comparing the count against the byte total itself allowed one
+		// reference per byte, and a CellRef is 32 bytes. Measured before this, at
+		// every size from a kibibyte to a mebibyte, 32 bytes reserved per byte
+		// received.
+		//
+		// The premise was already written here and not applied, which is what
+		// stating a rule in prose at each header does to it -- multi.go's own
+		// comment vouched for "the rule ParsePartOps states and decodeCell
+		// keeps", and decodeCell did not keep it. See crdt.impossibleCount, which
+		// names the rule once for the headers a subpackage can reach.
+		if !ok || n > uint64(len(rd.buf))/4 {
 			return Cell{}, false
 		}
 		// A formula with no references keeps a nil slice, so it re-encodes to the
