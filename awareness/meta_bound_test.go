@@ -35,11 +35,16 @@ func TestAMetaCountLargerThanTheBytesAllowIsRefusedBeforeReserving(t *testing.T)
 			if err == nil {
 				t.Fatalf("a claim of %d entries in %d bytes was accepted", n, n)
 			}
-			// A refusal costs a handful of bytes. The ceiling is generous and far
-			// under one entry per byte, which is what it is here to catch.
-			const ceiling = 1 << 12
-			if spent := after.TotalAlloc - before.TotalAlloc; spent > ceiling {
-				t.Fatalf("refusing the claim cost %d bytes, want under %d: it reserved for the claim before refusing it", spent, ceiling)
+			// The ceiling is the INPUT, not a fixed number of bytes.
+			//
+			// What is being asserted is that refusing does not cost something
+			// proportional to the claim: it was 80 bytes per byte received, so a
+			// ceiling of one leaves eighty times' margin. A fixed ceiling does
+			// not travel -- 4 KiB passed here and failed on riscv64 under qemu at
+			// 5 256 bytes, which is runtime noise between two ReadMemStats calls
+			// and not a reservation.
+			if spent := after.TotalAlloc - before.TotalAlloc; spent > uint64(len(data)) {
+				t.Fatalf("refusing a claim of %d entries cost %d bytes for %d bytes of input: it reserved for the claim before refusing it", n, spent, len(data))
 			}
 		})
 	}
