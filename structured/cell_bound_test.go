@@ -35,9 +35,14 @@ func TestAReferenceCountLargerThanTheBytesAllowIsRefusedBeforeReserving(t *testi
 			if ok {
 				t.Fatalf("a claim of %d references in %d bytes was accepted", n, n)
 			}
-			const ceiling = 1 << 12
-			if spent := after.TotalAlloc - before.TotalAlloc; spent > ceiling {
-				t.Fatalf("refusing the claim cost %d bytes, want under %d: it reserved for the claim before refusing it", spent, ceiling)
+			// The ceiling is the INPUT, not a fixed number of bytes: what is
+			// asserted is that refusing does not cost something PROPORTIONAL to
+			// the claim, and it was 32 bytes per byte received. A fixed ceiling
+			// measures the architecture instead -- the same assertion in the
+			// awareness half of this work passed here and failed on riscv64 under
+			// qemu, on runtime noise between two ReadMemStats calls.
+			if spent := after.TotalAlloc - before.TotalAlloc; spent > uint64(len(data)) {
+				t.Fatalf("refusing a claim of %d references cost %d bytes for %d bytes of input: it reserved for the claim before refusing it", n, spent, len(data))
 			}
 		})
 	}
