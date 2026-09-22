@@ -35,14 +35,23 @@ func TestAMetaCountLargerThanTheBytesAllowIsRefusedBeforeReserving(t *testing.T)
 			if err == nil {
 				t.Fatalf("a claim of %d entries in %d bytes was accepted", n, n)
 			}
-			// The ceiling is the INPUT, not a fixed number of bytes.
+			// The allocation is asserted only where the SIGNAL EXCEEDS THE NOISE,
+			// which the small case does not.
 			//
-			// What is being asserted is that refusing does not cost something
-			// proportional to the claim: it was 80 bytes per byte received, so a
-			// ceiling of one leaves eighty times' margin. A fixed ceiling does
-			// not travel -- 4 KiB passed here and failed on riscv64 under qemu at
-			// 5 256 bytes, which is runtime noise between two ReadMemStats calls
-			// and not a reservation.
+			// Runtime noise between two ReadMemStats calls has been measured at
+			// 5 256 bytes on riscv64 under qemu and something similar on arm64 --
+			// more than a kibibyte of input, so at that size any ceiling is
+			// either above the defect or below the noise. Two goes at a number
+			// were two goes at the wrong question: a measurement whose noise
+			// floor exceeds its effect is not a measurement.
+			//
+			// At a mebibyte the defect reserved 84 MB. A ceiling of one times the
+			// input leaves four orders of magnitude over the noise, so that is
+			// where the claim is made, and the small case asserts only the
+			// refusal.
+			if n < 1<<20 {
+				return
+			}
 			if spent := after.TotalAlloc - before.TotalAlloc; spent > uint64(len(data)) {
 				t.Fatalf("refusing a claim of %d entries cost %d bytes for %d bytes of input: it reserved for the claim before refusing it", n, spent, len(data))
 			}
