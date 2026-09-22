@@ -21,6 +21,14 @@ func FuzzUpdate(f *testing.F) {
 	}
 	f.Add(gone)
 	f.Add([]byte{})
+	// A header that claims more meta entries than the bytes after it could hold.
+	// The decoder reserved a map from this number before reading an entry, so a
+	// kibibyte claimed eighty; kept as a seed because what makes it interesting
+	// is a sentence rather than a hash. See
+	// TestAMetaCountLargerThanTheBytesAllowIsRefusedBeforeReserving.
+	f.Add(append(presenceHeader(1<<10), make([]byte, 1<<10)...))
+	// And the largest claim there is, where any multiplication would wrap.
+	f.Add(presenceHeader(1 << 62))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var u Update

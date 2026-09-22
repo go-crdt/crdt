@@ -247,12 +247,31 @@ func (u *Update) UnmarshalBinary(data []byte) error {
 	anchor, ok1 := d.varint()
 	head, ok2 := d.varint()
 	count, ok3 := d.uvarint()
-	if !ok1 || !ok2 || !ok3 || count > uint64(len(d.buf)) {
+	// One meta entry is two lengths and what they name, so it cannot be less
+	// than two bytes: divide rather than compare against the byte count itself.
+	// This is crdt's impossibleCount, written out because a subpackage cannot
+	// reach it and there is no internal package to put it in -- the duplication
+	// is a package boundary rather than carelessness. See that function for why
+	// dividing is the direction that cannot wrap.
+	//
+	// What it is worth here is more than in a document, because presence is
+	// FANNED OUT: the server decodes an update and then broadcasts the same
+	// bytes to every other participant, each of whom decodes it too. Measured
+	// before this, at every size from a kibibyte to a mebibyte: 80 bytes
+	// allocated per byte received, so a mebibyte of presence cost the server 84
+	// MB and every participant another 84 MB.
+	if !ok1 || !ok2 || !ok3 || count > uint64(len(d.buf))/2 {
 		return ErrMalformed
 	}
 	out.Cursor = Cursor{Anchor: int(anchor), Head: int(head)}
 	if count > 0 {
-		out.Meta = make(map[string]string, count)
+		// Not sized from count. A map hint is only a hint, and this one is a
+		// number a peer chose: sized from it, a header claiming the most the
+		// check above allows still reserves about forty bytes for every two it
+		// was sent. Growing as the entries actually decode ties the allocation
+		// to the bytes that arrived, and costs a rehash or two on an update
+		// large enough for that to matter -- which a cursor and a name are not.
+		out.Meta = make(map[string]string)
 	}
 	for range count {
 		k, ok1 := d.text()
