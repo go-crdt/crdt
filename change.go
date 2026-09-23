@@ -27,7 +27,11 @@ type Change struct {
 // operation that arrives before the operations it depends on is buffered until
 // they do, so the caller needs no ordered delivery.
 //
-// A malformed operation is rejected and nothing in the batch is applied.
+// A malformed operation is rejected and nothing in the batch is applied, and so
+// is an operation wearing the name of one this replica has already applied while
+// saying something else -- [ErrCollidingID], which is a collision between two
+// replicas that chose the same site and not a duplicate. A duplicate says the
+// same thing and is still ignored in silence.
 func (d *Doc) Apply(ops ...Op) error {
 	_, err := d.applyWith(false, ops, nil)
 	return err
@@ -47,9 +51,18 @@ func (d *Doc) ApplyChanges(ops ...Op) ([]Change, error) {
 }
 
 func (d *Doc) applyWith(watching bool, ops []Op, absorbed *[]Op) ([]Change, error) {
+	// Both checks are made over the whole batch before any of it lands, which is
+	// what keeps the promise above: nothing is applied when one operation is
+	// refused. A collision costs one index lookup, and only for an operation
+	// this replica has already applied -- so the batch that pays for it is a
+	// peer resending what it thinks we might have missed, and the batch that
+	// does not is somebody typing.
 	for _, op := range ops {
 		if err := op.validate(); err != nil {
 			return nil, err
+		}
+		if d.collides(op) {
+			return nil, ErrCollidingID
 		}
 	}
 	if watching {

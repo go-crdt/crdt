@@ -99,6 +99,52 @@ var ErrInvalidOp = errors.New("crdt: invalid operation")
 // ErrMalformed reports bytes that are not a valid encoding.
 var ErrMalformed = errors.New("crdt: malformed encoding")
 
+// ErrCollidingID reports two different operations wearing one name: one this
+// replica has already applied, and an arriving one with the same ID whose
+// character is not the one it holds.
+//
+// An ID is (site, sequence number), and a site number is claimed rather than
+// proved — [DeriveSiteID] is a pure function of a name, so two replicas can
+// choose the same site by accident as easily as on purpose. When they do, each
+// mints operations the other will file under names it already has, and
+// [VersionVector.Includes] cannot tell them apart: that is what a version vector
+// IS, a statement about how far a site has counted and not about what it said.
+//
+// Without this the consequence is silent and permanent. A replica discards what
+// it has never seen as already-seen, or grafts the part of the other's history
+// that runs past its own onto its own -- and both replicas then report the SAME
+// version vector while holding different text, so each believes it is
+// completely caught up with the other and neither will ever ask for anything
+// again. Measured in collab's
+// TestAFederatedPeerCanSpeakAsAnotherServersUser.
+//
+// # What it is and is not
+//
+// It is a guard on a premise, not a policy. The skip it sits in front of assumes
+// that applying an operation twice cannot change anything; this checks that
+// assumption instead of trusting it, so a genuine duplicate -- which a transport
+// may deliver freely, and which compares equal -- is still ignored in silence.
+//
+// It is a diagnostic rather than a defence, and the difference matters. It fires
+// when the collision has a consequence, which is exactly when the arriving
+// content differs, so an accidental collision names itself at the first
+// character that disagrees. It does not stop somebody who means it: an attacker
+// who can read the document can reproduce the operations it already holds
+// exactly and diverge only after them, which this cannot see and nothing here
+// can. Refusing that needs authority over a site name -- a signature, or a
+// declared set of sites a link may speak for -- which is go-crdt/collab#175.
+//
+// # Only the text can answer, and that is a property of the structures
+//
+// A document keeps every character it was ever told about until a purge or a
+// collect drops it, so a text part can be asked what it holds under a name. A
+// map keeps one record per key rather than one per operation, so an operation
+// that has since been superseded leaves nothing to compare; a list is the same.
+// The strength of a content check therefore differs by part type, which is one
+// reason it cannot be the answer on its own: an authority check does not vary
+// like that.
+var ErrCollidingID = errors.New("crdt: two operations share one ID")
+
 // ErrUnknownFormat reports a snapshot this build cannot read because it does not
 // know the format version, rather than because the bytes are damaged.
 //
