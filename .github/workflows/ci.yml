@@ -302,3 +302,66 @@ jobs:
         with:
           name: fuzz-failure-${{ matrix.target }}
           path: testdata/fuzz/
+
+  # The hostile targets, which the matrix above does not name.
+  #
+  # structured/hostile_test.go holds fifteen of this module's thirty-five fuzz
+  # targets, and none of them was fuzzed: they ran their seed corpus and stopped.
+  # That is the file whose whole purpose is bytes nobody should have sent.
+  #
+  # Batched into ONE job rather than added to the matrix, and that is the point of
+  # it. The comment on the matrix above says fifteen parallel fuzzers already
+  # oversubscribe a runner several times over, and that this is what makes the
+  # coordinator report a deadline having found nothing. Fifteen more would make a
+  # known false-red more likely, so these share one slot instead: at 700 000 to a
+  # million executions in ten seconds on a laptop, 30 seconds each is ample, and
+  # the whole batch costs less wall-clock than one lane of the matrix.
+  #
+  # Every target runs even after one fails, because a fuzz lane that stops at the
+  # first finding tells you less than it found.
+  fuzz-hostile:
+    name: fuzz (hostile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Fuzz every hostile target
+        run: |
+          targets=$(grep -rhoE 'func (Fuzz[A-Za-z0-9_]+)' structured/hostile_test.go | awk '{print $2}' | sort)
+          if [ -z "$targets" ]; then
+            echo "::error::no hostile fuzz targets found; this lane has stopped asking anything"
+            exit 1
+          fi
+          echo "targets: $(echo $targets | tr '\n' ' ')"
+          failed=""
+          for t in $targets; do
+            echo "--- $t"
+            if go test -run '^$' -fuzz "^$t\$" -fuzztime 30s -parallel 2 \
+                -timeout 5m ./structured 2>&1 | tee fuzz.log; then
+              continue
+            fi
+            if grep -q 'Failing input written to' fuzz.log; then
+              echo "::error::$t found a failing input"
+              failed="$failed $t"
+              continue
+            fi
+            if grep -q 'context deadline exceeded' fuzz.log; then
+              execs=$(grep -o 'execs: [0-9]*' fuzz.log | tail -1)
+              echo "::warning::$t: the fuzz deadline arrived while a worker was still in an input; ${execs:-no execs reported}, no failing input. The loaded runner, not the code."
+              continue
+            fi
+            echo "::error::$t failed"
+            failed="$failed $t"
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::these targets failed:$failed"
+            exit 1
+          fi
+      - name: Upload any failing input
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-failure-hostile
+          path: structured/testdata/fuzz/
