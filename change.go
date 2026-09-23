@@ -28,6 +28,12 @@ type Change struct {
 // they do, so the caller needs no ordered delivery.
 //
 // A malformed operation is rejected and nothing in the batch is applied.
+//
+// An operation wearing the name of one this replica has already applied while
+// saying something else is also rejected -- [ErrCollidingID] -- and the batch
+// stops there, so what came before it in the batch has been applied and what
+// comes after has not. A duplicate says the same thing and is still ignored in
+// silence.
 func (d *Doc) Apply(ops ...Op) error {
 	_, err := d.applyWith(false, ops, nil)
 	return err
@@ -57,7 +63,12 @@ func (d *Doc) applyWith(watching bool, ops []Op, absorbed *[]Op) ([]Change, erro
 		defer func() { d.collect = nil }()
 	}
 	for _, op := range ops {
-		d.admit(op, absorbed)
+		// admit's error was discarded while it could not fail. It can now: see
+		// [ErrCollidingID], and see [Composite.applyWith] for what dropping the
+		// same kind of error cost when a map stopped being unable to fail.
+		if err := d.admit(op, absorbed); err != nil {
+			return nil, err
+		}
 	}
 	if !watching {
 		return nil, nil

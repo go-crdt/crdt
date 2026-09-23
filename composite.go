@@ -814,21 +814,25 @@ func (c *Composite) applyWith(watching bool, batches []PartOps) ([]PartChange, e
 		return c.applyWatching(batches)
 	}
 	for _, b := range batches {
-		// A text and a list validate with the same function that has just passed
-		// here and report nothing else, so those two cannot fail and their
-		// errors are dropped rather than turned into branches no test could
-		// reach. A map is not in that position any more: [Map.Collect] gave it
-		// [ErrStranded], which is about the state of this replica rather than
-		// about the batch, and validation cannot see it coming.
+		// A list validates with the same function that has just passed here and
+		// reports nothing else, so it cannot fail and its error is dropped
+		// rather than turned into a branch no test could reach. A text and a map
+		// are not in that position: [Map.Collect] gave a map [ErrStranded] and a
+		// text has [ErrCollidingID], both of which are about the state of this
+		// replica rather than about the batch, and validation cannot see either
+		// coming.
 		//
-		// Dropping that one was worse than an unreachable branch. The operation
-		// is refused, the caller is told the batch was applied, and everything
-		// the same site sent afterwards waits for a predecessor that will never
+		// Dropping the map's was worse than an unreachable branch, and it is why
+		// the text's is not dropped now that there is one. The operation is
+		// refused, the caller is told the batch was applied, and everything the
+		// same site sent afterwards waits for a predecessor that will never
 		// arrive: measured in one chaos run, sixty-three errors thrown away and
 		// a replica left holding fifteen hundred operations back for good.
 		switch b.Part.Kind {
 		case PartText:
-			_ = c.text(b.Part.Name).Apply(b.Text...)
+			if err := c.text(b.Part.Name).Apply(b.Text...); err != nil {
+				return nil, err
+			}
 		case PartList:
 			_ = c.list(b.Part.Name).Apply(b.List...)
 		default:
@@ -844,8 +848,8 @@ func (c *Composite) applyWith(watching bool, batches []PartOps) ([]PartChange, e
 //
 // Batches are accumulated by part rather than reported one per batch, because a
 // caller may send two batches for one part and a view wants one account of it.
-// A text's and a list's errors are dropped for the reason they are in
-// [Composite.applyWith]; a map's is returned, for the reason given there too.
+// A list's error is dropped for the reason it is in [Composite.applyWith]; a
+// text's and a map's are returned, for the reason given there too.
 func (c *Composite) applyWatching(batches []PartOps) ([]PartChange, error) {
 	byPart := map[Part]*PartChange{}
 	record := func(p Part) *PartChange {
@@ -859,7 +863,10 @@ func (c *Composite) applyWatching(batches []PartOps) ([]PartChange, error) {
 	for _, b := range batches {
 		switch b.Part.Kind {
 		case PartText:
-			changes, _ := c.text(b.Part.Name).ApplyChanges(b.Text...)
+			changes, err := c.text(b.Part.Name).ApplyChanges(b.Text...)
+			if err != nil {
+				return nil, err
+			}
 			if len(changes) > 0 {
 				at := record(b.Part)
 				at.Text = append(at.Text, changes...)

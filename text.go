@@ -769,13 +769,39 @@ func (d *Doc) Delete(pos, length int) ([]Op, error) {
 // by the hundred thousand in a test and by the million in a document, and
 // twenty-four bytes each is how a suite that fits in a browser's four gigabytes
 // stops fitting.
+// collides reports an arriving operation that this replica has already applied
+// under the same ID and whose character is not the one it holds. See
+// [ErrCollidingID] for what that means and what it is worth.
+//
+// It answers false whenever it cannot answer, which is the only safe direction:
+// a deletion creates no character and so is never found (its own sequence
+// number belongs to no run, and lookupChar reports the gap rather than a
+// neighbour's character), a purged run no longer knows what it said, and a
+// collected character is gone entirely. Each of those is a case where this
+// replica has nothing to compare, not a case where it agrees.
+func (d *Doc) collides(op Op) bool {
+	if op.Kind != OpInsert || !d.vv.Includes(op.ID) {
+		return false
+	}
+	b, off, ok := d.lookupChar(op.ID)
+	if !ok || b.gone || off < 0 {
+		return false
+	}
+	return b.text[off] != op.Char
+}
+
 func (d *Doc) admit(op Op, absorbed *[]Op) error {
 	queue := []Op{op}
 	for len(queue) > 0 {
 		next := queue[len(queue)-1]
 		queue = queue[:len(queue)-1]
 		if d.vv.Includes(next.ID) {
-			continue // already applied; applying twice must not change anything
+			// already applied; applying twice must not change anything, and
+			// this is where that premise is checked rather than trusted.
+			if d.collides(next) {
+				return ErrCollidingID
+			}
+			continue
 		}
 		if !d.ready(next) {
 			d.park(next)
