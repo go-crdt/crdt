@@ -125,6 +125,74 @@ var ErrMalformed = errors.New("crdt: malformed encoding")
 // assumption instead of trusting it, so a genuine duplicate -- which a transport
 // may deliver freely, and which compares equal -- is still ignored in silence.
 //
+// # Where it is checked, and what that does and does not promise
+//
+// At the skip, as each operation is offered. So a batch stops at the first
+// collision it reaches: often before anything of it has landed, and not as a
+// guarantee -- a batch whose collision comes late has applied what came before
+// it. This names a collision; it is not a boundary.
+//
+// The position cost two earlier attempts, both caught by FuzzApply within a
+// second of being written.
+//
+// # It can arrive on a replay rather than on the first pass
+//
+// An operation whose causal predecessor has not arrived is PARKED before it
+// reaches the skip, so it is held without being compared. Its twin -- an
+// operation of the same ID saying something else -- may land afterwards, and the
+// parked one is then a collision nobody has looked at. Offered again, which a
+// transport may do freely, it reaches the skip and is refused. So a message can
+// be accepted once and refused on a replay.
+//
+// Two ways to close that were tried and neither is worth its price. Walking every
+// parked operation at the end of each Apply made the test suite take seventy
+// seconds instead of twelve, because a history delivered back to front parks a
+// chain as long as itself and each Apply then walks all of it. Walking only what
+// the same call parked is cheap and does not close it: the composite applies one
+// batch per part per call, so a twin arriving in the next batch of the same
+// message still slips past -- FuzzParsePartOps found that in forty-four seconds.
+//
+// The cost of leaving it is bounded and the benefit is not worth more: by the
+// time a collision exists the document is already wrong, and an error that
+// arrives on the next delivery still arrives. Indexing parked operations by their
+// own ID would close it, and that is a structure to keep and maintain for a case
+// that only a broken or hostile sender reaches.
+//
+// A batch may contain its own collision: two operations with one ID and
+// different characters, which no honest replica can produce because a site's
+// sequence number rises once per operation.
+//
+//   - Checked BEFORE anything lands -- which keeps [Doc.Apply]'s promise that a
+//     refusal changes nothing -- neither of the two is applied yet, so nothing
+//     collides: the batch is ACCEPTED and one of them silently dropped. Replay
+//     the same bytes, which a transport may do freely, and the dropped one now
+//     collides with the applied one, so they are REFUSED.
+//   - Checked AT THE SKIP alone, an operation can still slip past: one whose
+//     predecessor is missing is parked BEFORE the skip is reached, its twin
+//     lands, and the batch is accepted -- then refused on the replay, when the
+//     parked one is offered again and the twin is there. Hence the walk over
+//     what this call parked.
+//
+// Both made the answer depend on the interleaving, and an answer that changes
+// between two identical calls is worse than either answer given twice. The first
+// made it depend on something worse still: how a transport chose to BATCH the
+// operations, so two replicas told the same things in a different number of
+// messages would disagree about whether they were acceptable.
+//
+// A third position, a walk over the whole batch after applying it, is consistent
+// and costs too much: every operation the batch just landed is then "already
+// seen" and pays an index lookup for nothing, which measured +18% on
+// BenchmarkApplyRemote against +0 for the check that only looks where the
+// information already is.
+//
+// So the guarantee here is that a collision is NAMED, not that it is kept out.
+// Keeping it out means refusing the operations before they reach Apply, which is
+// a decision about who may speak for a site and belongs at the boundary:
+// [github.com/go-crdt/collab.Config.AuthorizeOperations], and go-crdt/collab#175.
+//
+// The inputs are kept: testdata/fuzz/FuzzApply/d82de10c3d0a704d and
+// testdata/fuzz/FuzzParsePartOps/d0076032193cd682.
+//
 // It is a diagnostic rather than a defence, and the difference matters. It fires
 // when the collision has a consequence, which is exactly when the arriving
 // content differs, so an accidental collision names itself at the first

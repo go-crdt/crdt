@@ -2,6 +2,7 @@ package crdt
 
 import (
 	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf16"
@@ -88,7 +89,20 @@ func FuzzApply(f *testing.F) {
 		}
 		before := string(d.Snapshot())
 		if err := d.Apply(parsed...); err != nil {
-			t.Fatalf("replaying an accepted batch was rejected: %v", err)
+			if !errors.Is(err, ErrCollidingID) {
+				t.Fatalf("replaying an accepted batch was rejected: %v", err)
+			}
+			// Two operations of one ID saying different things, one of them
+			// parked on the first pass and so not compared until it was offered
+			// again. No replica issues that pair. [ErrCollidingID] says why
+			// finding it on the first pass costs more than it is worth -- and a
+			// fresh replica must still answer the same way, which is what says
+			// the answer follows from the operations.
+			fresh := New(99)
+			if err2 := fresh.Apply(parsed...); err2 != nil && !errors.Is(err2, ErrCollidingID) {
+				t.Fatalf("a fresh replica answered %v", err2)
+			}
+			return
 		}
 		if got := string(d.Snapshot()); got != before {
 			t.Fatal("replaying an accepted batch changed the document")

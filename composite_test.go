@@ -1660,13 +1660,40 @@ func FuzzParsePartOps(f *testing.F) {
 		}
 		// Whatever it accepts, a composite must apply, and replaying it must
 		// change nothing.
+		//
+		// With one exception, and it is a property of the operations rather than
+		// of this decoder: a message may carry two operations with one ID and
+		// different characters, which no replica can produce because a site's
+		// sequence number rises once per operation. [ErrCollidingID] refuses
+		// that.
+		//
+		// What is asserted about it here is narrow on purpose. A FRESH replica
+		// given the same message must answer the same way, so the answer follows
+		// from the message and not from how it was batched -- this target caught
+		// two versions of the check that failed exactly that. What is NOT
+		// asserted is that a replica which accepted the message accepts it
+		// again: an operation held for a missing predecessor is not compared
+		// until it is offered once more, so the refusal may arrive on the replay.
+		// [ErrCollidingID] says why closing that costs more than it is worth.
 		into := NewComposite(99)
 		if err := into.Apply(batches...); err != nil {
-			t.Fatalf("applying accepted batches was rejected: %v", err)
+			if !errors.Is(err, ErrCollidingID) {
+				t.Fatalf("applying accepted batches was rejected: %v", err)
+			}
+			again := NewComposite(99)
+			if err2 := again.Apply(batches...); !errors.Is(err2, ErrCollidingID) {
+				t.Fatalf("a fresh replica answered %v where the first said ErrCollidingID", err2)
+			}
+			return
 		}
 		before := into.Snapshot()
 		if err := into.Apply(batches...); err != nil {
-			t.Fatalf("replaying accepted batches was rejected: %v", err)
+			if !errors.Is(err, ErrCollidingID) {
+				t.Fatalf("replaying accepted batches was rejected: %v", err)
+			}
+			// A collision that was parked on the first pass, and compared on
+			// this one. See [ErrCollidingID].
+			return
 		}
 		if !bytes.Equal(into.Snapshot(), before) {
 			t.Fatal("replaying an accepted message changed the document")

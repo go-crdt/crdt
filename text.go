@@ -796,7 +796,12 @@ func (d *Doc) admit(op Op, absorbed *[]Op) error {
 		next := queue[len(queue)-1]
 		queue = queue[:len(queue)-1]
 		if d.vv.Includes(next.ID) {
-			continue // already applied; applying twice must not change anything
+			// already applied; applying twice must not change anything, and
+			// this is where that premise is checked rather than trusted.
+			if d.collides(next) {
+				return ErrCollidingID
+			}
+			continue
 		}
 		if !d.ready(next) {
 			d.park(next)

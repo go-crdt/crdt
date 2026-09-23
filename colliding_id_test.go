@@ -26,9 +26,14 @@ func TestApplyRefusesAnOperationWearingAnAppliedName(t *testing.T) {
 	if err := mine.Apply(forged...); !errors.Is(err, ErrCollidingID) {
 		t.Fatalf("Apply returned %v, want ErrCollidingID", err)
 	}
-	// Nothing in the batch was applied, as Apply promises for a refusal.
+	// Here nothing of the forgery landed, because the batch's first operation is
+	// the one that collides and admit stops there. That is worth asserting and
+	// worth not over-promising: the batch stops at the FIRST collision it
+	// reaches, so a batch whose collision comes late has applied what came
+	// before it. This is a report that usually arrives in time, not a boundary.
+	// The boundary is go-crdt/collab#175.
 	if got := mine.String(); got != "GENUINE" {
-		t.Errorf("after the refusal the document holds %q, want it untouched", got)
+		t.Errorf("the document holds %q, want the forgery to have stopped at the first collision", got)
 	}
 	// And the tail is what made it dangerous: without the guard those
 	// operations graft onto this replica's own, because they are past its own
@@ -172,19 +177,20 @@ func TestTheGuardIsSilentWhereItCannotJudge(t *testing.T) {
 // twenty thousand operations, against a control with the check compiled out:
 //
 //	                        ns per resent operation
-//	with the check                           16.705
-//	without it                               12.175
+//	with the check                            17.89
+//	without it                                12.99
 //
-// So 4.5 ns an operation, +37% on this path, and 90 µs for the whole twenty
-// thousand. The spread inside each arm after its first run is under 1%, which is
-// why a 37% difference can be stated at all.
+// So 4.9 ns an operation, +38% on this path, and 98 µs for the whole twenty
+// thousand. The spread inside each arm is under 2%, which is why a 38%
+// difference can be stated at all.
 //
 // The ordinary path -- operations this replica has not seen, which is somebody
-// typing -- was measured the same way through BenchmarkApplyRemote: 343 514 ns
-// against 341 886, a 0.5% difference inside a control arm that itself spanned
-// ±13%. That is below the noise, so the honest claim is that no cost is
-// measurable there, not that there is none. An operation that is new fails the
-// version-vector test and stops, so what it pays is one map lookup.
+// typing -- was measured the same way through BenchmarkApplyRemote and gave
+// 349 052 ns with the check against 355 446 without it: the arm carrying the
+// check came out FASTER, which is not a result but a noise floor, the control
+// having spent two of its eight runs near 440 000. So no cost is measurable
+// there, which is not the same as there being none. An operation this replica has
+// not seen fails the version-vector test and stops before the index lookup.
 func BenchmarkApplyAResendOfWhatWeHold(b *testing.B) {
 	d := New(7)
 	ops, err := d.Insert(0, string(make([]rune, 0, 20000))+randomish(20000))
@@ -207,6 +213,40 @@ func randomish(n int) string {
 		out[i] = rune('a' + i%26)
 	}
 	return string(out)
+}
+
+// A batch that contains its own collision must get the same answer every time.
+//
+// This is what FuzzApply found within a second of the check being made before
+// the batch landed instead of as it lands: with nothing applied yet, neither of
+// two operations sharing an ID collides with anything, so the batch was accepted
+// and one of them silently dropped -- and replaying the same bytes then refused
+// them, because by that point the dropped one disagreed with the applied one. A
+// transport may replay freely, so an answer that changes between two identical
+// calls is worse than either answer given twice.
+//
+// No honest replica can produce such a batch: a site's sequence number rises
+// once per operation. It is the shape of a collision arriving in one piece.
+func TestABatchContainingItsOwnCollisionAnswersTheSameEveryTime(t *testing.T) {
+	for _, order := range []string{"a first", "b first"} {
+		t.Run(order, func(t *testing.T) {
+			a := Op{Kind: OpInsert, ID: ID{Site: 7, Seq: 1}, Clock: 1, Char: 'a'}
+			b := Op{Kind: OpInsert, ID: ID{Site: 7, Seq: 1}, Clock: 1, Char: 'b'}
+			batch := []Op{a, b}
+			if order == "b first" {
+				batch = []Op{b, a}
+			}
+			d := New(9)
+			first := d.Apply(batch...)
+			if !errors.Is(first, ErrCollidingID) {
+				t.Fatalf("the first pass returned %v, want ErrCollidingID", first)
+			}
+			// The same bytes again, which is what a transport may do.
+			if second := d.Apply(batch...); !errors.Is(second, ErrCollidingID) {
+				t.Fatalf("the replay returned %v, want the same refusal", second)
+			}
+		})
+	}
 }
 
 // The guard has to reach the caller through a Composite, which is how every
