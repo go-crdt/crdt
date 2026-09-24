@@ -2,6 +2,10 @@ package crdt
 
 import (
 	"errors"
+	"reflect"
+	"slices"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -249,15 +253,18 @@ func TestABatchContainingItsOwnCollisionAnswersTheSameEveryTime(t *testing.T) {
 	}
 }
 
-// The guard has to reach the caller through a Composite, which is how every
-// consumer of this package applies operations.
+// Every way into a Composite has to hand a collision up, and there are three.
 //
-// It is tested rather than assumed because a Composite dropped a text part's
+// This is tested rather than assumed because a Composite dropped a text part's
 // error on purpose, with a comment saying a text could not fail -- true until
-// this. The same file records what dropping a map's cost when that stopped being
-// true: sixty-three errors thrown away and a replica holding fifteen hundred
-// operations back for good.
-func TestACompositeHandsTheCollisionToItsCaller(t *testing.T) {
+// [ErrCollidingID]. Two of the three switches were then fixed and the third was
+// not, and the one left behind was [Composite.ApplyAbsorbed]: the path a relay
+// actually takes. So for one release the error existed, was documented, was
+// tested at the Doc level, and was unreachable from the only consumer there is.
+//
+// The count is asserted too. A fourth entry point would otherwise be added with
+// the same switch and the same omission, and nothing would say so.
+func TestEveryCompositeEntryPointHandsUpACollision(t *testing.T) {
 	forge := func(t *testing.T) []PartOps {
 		t.Helper()
 		theirs := NewComposite(7)
@@ -282,18 +289,37 @@ func TestACompositeHandsTheCollisionToItsCaller(t *testing.T) {
 		}
 		return mine
 	}
-	// Both entry points, because they are two different switches over the part
-	// kinds and only one of them was reached by the first version of this.
-	t.Run("Apply", func(t *testing.T) {
-		mine := mineWith(t)
-		if err := mine.Apply(forge(t)...); !errors.Is(err, ErrCollidingID) {
-			t.Fatalf("Composite.Apply returned %v, want ErrCollidingID", err)
+	entries := map[string]func(*Composite, []PartOps) error{
+		"Apply": func(c *Composite, b []PartOps) error { return c.Apply(b...) },
+		"ApplyChanges": func(c *Composite, b []PartOps) error {
+			_, err := c.ApplyChanges(b...)
+			return err
+		},
+		"ApplyAbsorbed": func(c *Composite, b []PartOps) error {
+			_, err := c.ApplyAbsorbed(b...)
+			return err
+		},
+	}
+	for name, apply := range entries {
+		t.Run(name, func(t *testing.T) {
+			if err := apply(mineWith(t), forge(t)); !errors.Is(err, ErrCollidingID) {
+				t.Fatalf("Composite.%s returned %v, want ErrCollidingID", name, err)
+			}
+		})
+	}
+
+	// And that the three above are all of them.
+	var found []string
+	ct := reflect.TypeOf(&Composite{})
+	for i := range ct.NumMethod() {
+		if n := ct.Method(i).Name; strings.HasPrefix(n, "Apply") {
+			found = append(found, n)
 		}
-	})
-	t.Run("ApplyChanges", func(t *testing.T) {
-		mine := mineWith(t)
-		if _, err := mine.ApplyChanges(forge(t)...); !errors.Is(err, ErrCollidingID) {
-			t.Fatalf("Composite.ApplyChanges returned %v, want ErrCollidingID", err)
-		}
-	})
+	}
+	sort.Strings(found)
+	want := []string{"Apply", "ApplyAbsorbed", "ApplyChanges"}
+	if !slices.Equal(found, want) {
+		t.Errorf("a Composite has Apply methods %v, and this test covers %v -- "+
+			"a new one needs a case here, because the last one added went a release without the error", found, want)
+	}
 }
