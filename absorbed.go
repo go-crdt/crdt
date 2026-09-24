@@ -68,17 +68,28 @@ func (c *Composite) ApplyAbsorbed(batches ...PartOps) ([]PartOps, error) {
 	}
 	var out []PartOps
 	for _, b := range batches {
-		// Text and list validate with the same function that has just passed
-		// here, so those two cannot fail and their errors are dropped rather
-		// than turned into branches no input can reach. A map can: a write
-		// below its collect floor resurrects a tombstone and is refused as
-		// [ErrStranded] — by [Composite.Apply] too, and a relay must not
-		// swallow what a client would be told. It is returned, as Apply does,
-		// with what was absorbed before it, so a server can still pass that on.
+		// A list validates with the same function that has just passed here, so
+		// it cannot fail and its error is dropped rather than turned into a
+		// branch no input can reach. A text and a map can, and both are returned
+		// with what earlier PARTS absorbed, so a server can still pass that on: a
+		// map write below its collect floor resurrects a tombstone
+		// ([ErrStranded]), and a text operation wearing the name of one already
+		// applied while saying something else is [ErrCollidingID].
+		//
+		// A relay must not swallow what a client would be told, and this is the
+		// path a relay actually takes -- collab's applyOperations calls this one,
+		// not Apply. The text error was dropped here for one release while
+		// [Composite.Apply] and [Composite.applyWatching] returned it, which made
+		// ErrCollidingID unreachable from the only consumer that exists.
+		// TestEveryCompositeEntryPointHandsUpACollision is what holds all three
+		// to it.
 		got := PartOps{Part: b.Part}
 		switch b.Part.Kind {
 		case PartText:
-			got.Text, _ = c.text(b.Part.Name).ApplyAbsorbed(b.Text...)
+			var err error
+			if got.Text, err = c.text(b.Part.Name).ApplyAbsorbed(b.Text...); err != nil {
+				return out, err
+			}
 		case PartList:
 			got.List, _ = c.list(b.Part.Name).ApplyAbsorbed(b.List...)
 		default:
