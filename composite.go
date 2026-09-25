@@ -668,7 +668,19 @@ func AppendPartOps(dst []byte, batches []PartOps) ([]byte, error) {
 // produces or consumes, and it would be a fourth format to keep canonical,
 // fuzzed and held to its coverage for no caller. A caller that really has one
 // batch writes AppendPartOps(nil, batches[:1]).
-func ParsePartOps(data []byte) ([]PartOps, error) {
+func ParsePartOps(data []byte) ([]PartOps, error) { return ParsePartOpsLimit(data, 0) }
+
+// ParsePartOpsLimit is [ParsePartOps] with a ceiling on how many operations the whole
+// message may claim: zero is unlimited, and any other value refuses a larger claim
+// with [ErrTooManyOps] before reserving for it.
+//
+// The ceiling is for the MESSAGE and not for each batch, because a message is what
+// arrives and what a reservation is paid for. A thousand batches of a thousand
+// operations costs the same as one of a million, and a per-batch bound would refuse
+// the second while waving the first through.
+//
+// See [ErrTooManyOps] for why the number is the caller's rather than this package's.
+func ParsePartOpsLimit(data []byte, max int) ([]PartOps, error) {
 	count, used := uvarint(data)
 	if used <= 0 {
 		return nil, ErrMalformed
@@ -681,8 +693,15 @@ func ParsePartOps(data []byte) ([]PartOps, error) {
 		return nil, ErrMalformed
 	}
 	batches := make([]PartOps, 0, count)
+	// One budget for the message, spent by whichever batches claim operations. Nil
+	// is unlimited, which keeps the unbounded path free of the accounting.
+	var budget *int
+	if max > 0 {
+		left := max
+		budget = &left
+	}
 	for range count {
-		b, tail, err := decodePartOps(rest)
+		b, tail, err := decodePartOps(rest, budget)
 		if err != nil {
 			return nil, err
 		}
@@ -700,7 +719,7 @@ func ParsePartOps(data []byte) ([]PartOps, error) {
 // A part that could not name anything is refused as [PartOps.validate] refuses
 // it, rather than as malformed bytes: the bytes were read, and what they say is
 // a batch nothing could apply.
-func decodePartOps(data []byte) (PartOps, []byte, error) {
+func decodePartOps(data []byte, budget *int) (PartOps, []byte, error) {
 	if len(data) == 0 {
 		return PartOps{}, nil, ErrMalformed
 	}
@@ -721,11 +740,11 @@ func decodePartOps(data []byte) (PartOps, []byte, error) {
 	var err error
 	switch b.Part.Kind {
 	case PartText:
-		b.Text, err = decodeBatch(r, count, decodeOp)
+		b.Text, err = decodeBatch(r, count, decodeOp, budget)
 	case PartList:
-		b.List, err = decodeBatch(r, count, decodeListOp)
+		b.List, err = decodeBatch(r, count, decodeListOp, budget)
 	default:
-		b.Map, err = decodeBatch(r, count, decodeMapOp)
+		b.Map, err = decodeBatch(r, count, decodeMapOp, budget)
 	}
 	if err != nil {
 		return PartOps{}, nil, err
@@ -738,7 +757,15 @@ func decodePartOps(data []byte) (PartOps, []byte, error) {
 // they share this rather than repeating it, and each decoder validates what it
 // returns — the clock ceiling included — so nothing a batch carries is weaker
 // than what the same operation would be held to arriving alone.
-func decodeBatch[T any](r *reader, count uint64, decode func([]byte) (T, []byte, error)) ([]T, error) {
+func decodeBatch[T any](r *reader, count uint64, decode func([]byte) (T, []byte, error), budget *int) ([]T, error) {
+	// Spent before the reservation, not after it, which is the whole point of a
+	// budget: the allocation this guards is the one a claim buys.
+	if budget != nil {
+		if count > uint64(*budget) {
+			return nil, ErrTooManyOps
+		}
+		*budget -= int(count)
+	}
 	ops := make([]T, 0, count)
 	for range count {
 		op, tail, err := decode(r.buf)

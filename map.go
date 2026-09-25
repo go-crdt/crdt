@@ -215,7 +215,12 @@ func AppendMapOps(dst []byte, ops []MapOp) ([]byte, error) {
 }
 
 // ParseMapOps decodes a batch written by AppendMapOps.
-func ParseMapOps(data []byte) ([]MapOp, error) {
+func ParseMapOps(data []byte) ([]MapOp, error) { return ParseMapOpsLimit(data, 0) }
+
+// ParseMapOpsLimit is [ParseMapOps] with a ceiling on how many operations the message may
+// claim: zero is unlimited, and any other value refuses a larger claim with
+// [ErrTooManyOps] before reserving for it. See [ErrTooManyOps].
+func ParseMapOpsLimit(data []byte, max int) ([]MapOp, error) {
 	count, used := uvarint(data)
 	if used <= 0 {
 		return nil, ErrMalformed
@@ -225,6 +230,9 @@ func ParseMapOps(data []byte) ([]MapOp, error) {
 	// bytes allow is a corrupt header — refuse it before allocating for it.
 	if impossibleCount(count, len(rest), 4) {
 		return nil, ErrMalformed
+	}
+	if max > 0 && count > uint64(max) {
+		return nil, ErrTooManyOps
 	}
 	ops := make([]MapOp, 0, count)
 	for range count {
