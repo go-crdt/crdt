@@ -205,7 +205,12 @@ func AppendListOps(dst []byte, ops []ListOp) ([]byte, error) {
 }
 
 // ParseListOps decodes a batch written by AppendListOps.
-func ParseListOps(data []byte) ([]ListOp, error) {
+func ParseListOps(data []byte) ([]ListOp, error) { return ParseListOpsLimit(data, 0) }
+
+// ParseListOpsLimit is [ParseListOps] with a ceiling on how many operations the message may
+// claim: zero is unlimited, and any other value refuses a larger claim with
+// [ErrTooManyOps] before reserving for it. See [ErrTooManyOps].
+func ParseListOpsLimit(data []byte, max int) ([]ListOp, error) {
 	count, used := uvarint(data)
 	if used <= 0 {
 		return nil, ErrMalformed
@@ -215,6 +220,9 @@ func ParseListOps(data []byte) ([]ListOp, error) {
 	// bytes allow is a corrupt header — refuse it before allocating for it.
 	if impossibleCount(count, len(rest), 6) {
 		return nil, ErrMalformed
+	}
+	if max > 0 && count > uint64(max) {
+		return nil, ErrTooManyOps
 	}
 	ops := make([]ListOp, 0, count)
 	for range count {

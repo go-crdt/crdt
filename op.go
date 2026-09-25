@@ -99,6 +99,28 @@ var ErrInvalidOp = errors.New("crdt: invalid operation")
 // ErrMalformed reports bytes that are not a valid encoding.
 var ErrMalformed = errors.New("crdt: malformed encoding")
 
+// ErrTooManyOps reports a message claiming more operations than the caller allowed.
+//
+// It is not corruption. The counted headers are already checked against the bytes
+// that follow them -- a claim of more records than the remaining bytes could hold is
+// [ErrMalformed] -- so what this refuses is a message that is honest and too big:
+// the worst claim those checks permit still reserves sixteen to twenty-four times
+// the input, because that is the ratio of a record in memory to the smallest encoded
+// one. A gibibyte of real operations is therefore sixteen to twenty-four gibibytes
+// reserved, for an honest sender as much as a hostile one.
+//
+// Which is why the bound is the CALLER's and not this package's. A ceiling picked
+// here would be a guess about somebody's machine, and this package has been wrong
+// that way before: an allocation ceiling chosen for one architecture failed on
+// riscv64 over runtime noise that had nothing to do with the code. So [ParseOps] and
+// its three siblings bound nothing, and [ParseOpsLimit] and its three take the
+// number from whoever knows the machine.
+//
+// The layering is HPACK's, which is worth naming because this follows it
+// deliberately: a decoder there offers SetMaxStringLength and defaults to
+// unlimited, and the server sets it. See go-crdt/collab#169.
+var ErrTooManyOps = errors.New("crdt: more operations than allowed")
+
 // ErrCollidingID reports two different operations wearing one name: one this
 // replica has already applied, and an arriving one with the same ID whose
 // character is not the one it holds.
@@ -441,7 +463,13 @@ func AppendOps(dst []byte, ops []Op) ([]byte, error) {
 }
 
 // ParseOps decodes a batch written by AppendOps.
-func ParseOps(data []byte) ([]Op, error) {
+func ParseOps(data []byte) ([]Op, error) { return ParseOpsLimit(data, 0) }
+
+// ParseOpsLimit is [ParseOps] with a ceiling on how many operations the message may
+// claim: zero is unlimited, and any other value refuses a larger claim with
+// [ErrTooManyOps] before reserving for it. See [ErrTooManyOps] for why the number is
+// the caller's.
+func ParseOpsLimit(data []byte, max int) ([]Op, error) {
 	count, used := uvarint(data)
 	if used <= 0 {
 		return nil, ErrMalformed
@@ -451,6 +479,9 @@ func ParseOps(data []byte) ([]Op, error) {
 	// bytes allow is a corrupt header — refuse it before allocating for it.
 	if impossibleCount(count, len(rest), 4) {
 		return nil, ErrMalformed
+	}
+	if max > 0 && count > uint64(max) {
+		return nil, ErrTooManyOps
 	}
 	ops := make([]Op, 0, count)
 	for range count {
