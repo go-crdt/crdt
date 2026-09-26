@@ -33,23 +33,35 @@ import (
 //
 // What it found, on an Apple M4 Max with other work on the machine:
 //
-//	visible chars   digest     snapshot   digest/snapshot
-//	        1 000   44.9 µs      5.5 µs        8.1–8.8x
-//	       10 000    452 µs     47.5 µs        9.3–9.8x
-//	      100 000   4.55 ms      440 µs      10.1–10.5x
+//	visible chars   digest   snapshot   digest/snapshot   rejected combiner
+//	        1 000   9.3 µs     4.7 µs         1.96x              44.7 µs
+//	       10 000    92 µs      48 µs         1.88-1.93x          448 µs
+//	      100 000   948 µs     444 µs         2.08-2.20x         4.56 ms
 //
-// So a walk costs about ten times the snapshot a fresh join already pays over
-// the same blocks. At the join rate collab measured -- one per participant per
+// So a walk costs about twice the snapshot a fresh join already pays over the
+// same blocks. At the join rate collab measured -- one per participant per
 // session -- that is affordable, and now known rather than guessed. At the
 // acknowledgement rate it measured -- one per participant per KEYSTROKE -- it is
 // not, and no implementation of this walk would make it so. That is the decision
 // this file exists to support: compare where a replica concludes it is caught
 // up, not on every acknowledgement.
 //
-// The first version accumulated into a big.Int and cost 20 to 27 times a
-// snapshot. Nearly all of that was allocating and reducing per character rather
-// than walking, which is worth writing down because the obvious implementation
-// is the slow one by a factor of two and a half.
+// The last column is the construction that was rejected, kept measured rather
+// than remembered: hashing each character separately and combining the results
+// with an order-independent sum costs 4.8 times the walk, at every size. It was
+// reached for to escape the AVL's shape, and is not needed, because the LIST is
+// already in document order and every converged replica walks it the same way.
+//
+// Two other things this measurement decided, both of them corrections:
+//
+// An earlier accumulator used a big.Int and cost 20 to 27 times a snapshot --
+// nearly all of it allocating and reducing per character rather than walking.
+// Four lanes of wrapping addition is the 4.8x above.
+//
+// And the first version of Doc.Digest wrote its three fields in three calls of
+// eight bytes, which cost 2.62 ms where one call of twenty-four costs 948 µs.
+// Same bytes, same digest, nearly three times the time, and it was in code
+// written the same hour as this table.
 //
 // What remains is one SHA-256 per visible character, and that is a floor rather
 // than an inefficiency: a digest per RUN would be far cheaper and would not be
@@ -87,6 +99,14 @@ func digestOfVisible(d *Doc) [4]uint64 {
 	return acc
 }
 
+// digestOfVisible is the construction that was REJECTED, kept so that the
+// reason stays measurable rather than remembered: it hashes each character
+// separately and combines the results with wrapping addition, which is
+// independent of the order it visits them in.
+//
+// That independence is what it was reached for, and it is not needed: the list
+// is already canonical, because two replicas that have converged hold the same
+// visible characters in the same order. What it costs is measured below.
 func docOfSize(t *testing.T, n int) *Doc {
 	t.Helper()
 	d := New(1)
@@ -115,13 +135,21 @@ func TestWhatADigestWalkCostsAgainstASnapshot(t *testing.T) {
 		// Both orders, so a drift across the run cannot be read as an effect.
 		ratio := map[string]float64{}
 		for _, order := range []string{"digest first", "snapshot first"} {
-			var digest, snap []time.Duration
+			var digest, snap, combined []time.Duration
 			for range rounds {
-				timeDigest := func() {
+				timeCombined := func() {
 					start := time.Now()
 					got := digestOfVisible(d)
-					digest = append(digest, time.Since(start))
+					combined = append(combined, time.Since(start))
 					if got == ([4]uint64{}) {
+						t.Fatal("empty digest")
+					}
+				}
+				timeDigest := func() {
+					start := time.Now()
+					got := d.Digest()
+					digest = append(digest, time.Since(start))
+					if got == (Digest{}) {
 						t.Fatal("empty digest")
 					}
 				}
@@ -136,15 +164,17 @@ func TestWhatADigestWalkCostsAgainstASnapshot(t *testing.T) {
 				if order == "digest first" {
 					timeDigest()
 					timeSnap()
+					timeCombined()
 				} else {
+					timeCombined()
 					timeSnap()
 					timeDigest()
 				}
 			}
-			md, ms := median(digest), median(snap)
+			md, ms, mc := median(digest), median(snap), median(combined)
 			ratio[order] = float64(md) / float64(ms)
-			t.Logf("%7d chars, %-14s: digest %8v, snapshot %8v, digest/snapshot %.2fx",
-				n, order, md, ms, ratio[order])
+			t.Logf("%7d chars, %-14s: digest %8v, snapshot %8v, digest/snapshot %.2fx, rejected combiner %8v (%.1fx the digest)",
+				n, order, md, ms, ratio[order], mc, float64(mc)/float64(md))
 		}
 
 		a, b := ratio["digest first"], ratio["snapshot first"]
