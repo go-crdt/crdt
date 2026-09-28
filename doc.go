@@ -9,6 +9,34 @@
 // would invalidate. Deletions are tombstones, so an insertion may still refer to
 // a character another replica has already removed.
 //
+// # Where a concurrent word lands, which convergence does not decide
+//
+// Converging on the same text is not the same as converging on the text a
+// person would have written, and RGA is known to leave one case open. When two
+// people type at the same place, and one of them typed twice there without the
+// two runs being contiguous — typed a word, moved the cursor BACK, typed
+// another — the other person's word may end up BETWEEN those two runs.
+//
+// "Hello!", User 1 typing " reader" and then " dear" at the same anchor, User 2
+// concurrently typing " Alice" there, merges to one of:
+//
+//	Hello dear reader Alice!
+//	Hello dear Alice reader!    <- the other person's word, split into yours
+//	Hello Alice dear reader!
+//
+// Every replica agrees on which, and which one it is comes from the tie-break
+// between equal Lamport clocks rather than from anything either person did. It
+// is not a defect of this implementation: Kleppmann, Gomes, Mulligan &
+// Beresford proved RGA free of the SEVERE anomaly — two concurrent words jumbled
+// character by character, which Logoot and LSEQ do exhibit — and showed this
+// lesser one remains ("Interleaving anomalies in collaborative text editors",
+// PaPoC '19, §3). Their §3.1 gives a fix that changes what an operation carries,
+// which is a format decision and not taken here.
+//
+// TestWhereAConcurrentWordLandsAmongTwoOfYourOwn holds what is actually
+// promised: every merge order agrees, and the result is one of those three. A
+// fourth would be the severe anomaly and a real defect.
+//
 // # Determinism
 //
 // The package never reads the wall clock and never draws random numbers, so the
