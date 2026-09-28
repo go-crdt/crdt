@@ -118,3 +118,85 @@ func TestWhereAConcurrentWordLandsAmongTwoOfYourOwn(t *testing.T) {
 		})
 	}
 }
+
+// The minimal pair from the same literature, and the one that pins a GUARANTEE
+// rather than a limitation.
+//
+// Weidner & Kleppmann, "The Art of the Fugue", Appendix A.1, define both
+// anomalies on three characters:
+//
+//	forward   one user inserts a then b, another concurrently inserts x;
+//	          interleaving iff a merged outcome is "axb"
+//	backward  one user inserts b and then PREPENDS a, another inserts x;
+//	          interleaving iff a merged outcome is "axb"
+//
+// RGA is PROVED free of the forward one. That makes "axb" from the forward
+// history a defect in this implementation rather than a property of the
+// algorithm — which is why it is asserted here and why the test above, which
+// only checks that the outcome is one the algorithm admits, does not cover it.
+//
+// Their A.1.8 derives the backward case for RGA and lands on "axb". Measured
+// here it appears when the writer of a and b holds the lower site identity,
+// which is that derivation's "Assuming A < B".
+func TestTwoOfYourCharactersStayTogetherWhenYouTypeForwards(t *testing.T) {
+	// history builds the three-character example and returns the merge.
+	history := func(t *testing.T, mine, theirs SiteID, backward, mineFirst bool) string {
+		t.Helper()
+		a, b := New(mine), New(theirs)
+		if backward {
+			if _, err := a.Insert(0, "b"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Insert(0, "a"); err != nil { // prepended
+				t.Fatal(err)
+			}
+		} else {
+			if _, err := a.Insert(0, "a"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := a.Insert(1, "b"); err != nil { // typed on
+				t.Fatal(err)
+			}
+		}
+		if _, err := b.Insert(0, "x"); err != nil {
+			t.Fatal(err)
+		}
+		first, second := a, b
+		if !mineFirst {
+			first, second = b, a
+		}
+		merged, err := Load(99, first.Snapshot())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := merged.Apply(second.OpsSince(merged.Version())...); err != nil {
+			t.Fatal(err)
+		}
+		return merged.String()
+	}
+
+	for _, sites := range []struct{ mine, theirs SiteID }{{1, 2}, {2, 1}} {
+		for _, mineFirst := range []bool{true, false} {
+			forward := history(t, sites.mine, sites.theirs, false, mineFirst)
+			if forward == "axb" {
+				t.Errorf("typing forwards merged to %q with sites %d and %d: RGA is proved free of"+
+					" forward interleaving, so this is a defect here and not the algorithm",
+					forward, sites.mine, sites.theirs)
+			}
+			// And the two characters must still both be there, or the case
+			// above would be satisfied by losing one.
+			if len(forward) != 3 {
+				t.Errorf("typing forwards merged to %q, want all three characters", forward)
+			}
+
+			// The backward case is the known one. It is not asserted either
+			// way -- which of the outcomes appears is a tie-break nothing
+			// promises -- but it must converge and keep every character.
+			backward := history(t, sites.mine, sites.theirs, true, mineFirst)
+			if len(backward) != 3 {
+				t.Errorf("prepending merged to %q, want all three characters", backward)
+			}
+			t.Logf("sites %d/%d: forwards %q, backwards %q", sites.mine, sites.theirs, forward, backward)
+		}
+	}
+}
