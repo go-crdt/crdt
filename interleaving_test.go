@@ -36,10 +36,14 @@ import (
 // character-level interleaving, which is the severe anomaly RGA is proved not
 // to have, and would be a real defect here.
 //
-// The paper also gives the fix (§3.1): carry, with each insertion, the set of
-// insertions that shared its reference character at the time it was made. That
-// changes what an operation is, so it is a format decision rather than a patch,
-// and it is not taken here.
+// That paper also proposes a fix, and the fix does not work: Weidner & Kleppmann
+// report that its non-interleaving property "cannot be satisfied by any
+// algorithm" and that its algorithm "is incorrect — it does not converge" ("The
+// Art of the Fugue", §3.2). What works is a different algorithm — Fugue, or
+// FugueMax, which is proved maximally non-interleaving — and that replaces how
+// concurrent insertions at one anchor are ordered, which is this package's
+// centre. So the outcomes below are what this design gives, not what it settles
+// for pending a patch.
 func TestWhereAConcurrentWordLandsAmongTwoOfYourOwn(t *testing.T) {
 	// The three merges RGA admits for figure 4. Anything else is a defect.
 	admitted := []string{

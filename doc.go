@@ -30,8 +30,27 @@
 // Beresford proved RGA free of the SEVERE anomaly — two concurrent words jumbled
 // character by character, which Logoot and LSEQ do exhibit — and showed this
 // lesser one remains ("Interleaving anomalies in collaborative text editors",
-// PaPoC '19, §3). Their §3.1 gives a fix that changes what an operation carries,
-// which is a format decision and not taken here.
+// PaPoC '19, §3).
+//
+// More precisely, and this is the distinction that names what is above: RGA is
+// proved free of FORWARD interleaving, where each person types left to right. It
+// exhibits BACKWARD interleaving, which is what moving the cursor back and typing
+// again produces, and which is not exotic — hitting backspace to fix a typo does
+// it, and so does prepending rows to a list or a spreadsheet.
+//
+// That 2019 paper proposes a fix, and the fix does not work. Weidner & Kleppmann
+// report it as two flaws ("The Art of the Fugue: Minimizing Interleaving in
+// Collaborative Text Editing", §3.2): the non-interleaving property it defines
+// "cannot be satisfied by any algorithm", and the algorithm it proposes "is
+// incorrect — it does not converge". So there is nothing here to weigh up and
+// decline.
+//
+// What does work is a different algorithm, not a patch to this one. Fugue and
+// FugueMax are proved to interleave "only in the rare situations where some
+// interleaving is inevitable", FugueMax satisfying their maximal non-interleaving
+// property, with performance their paper compares to Yjs on a real editing trace.
+// Adopting one would replace how this package orders concurrent insertions at a
+// shared anchor, which is its centre rather than a setting.
 //
 // TestWhereAConcurrentWordLandsAmongTwoOfYourOwn holds what is actually
 // promised: every merge order agrees, and the result is one of those three. A
