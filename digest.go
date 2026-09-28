@@ -62,6 +62,43 @@ import (
 // acknowledgement per participant per KEYSTROKE. So this is for the moment a
 // replica concludes it is caught up, and not for every message.
 //
+// # What the published answer would buy, and why it is not taken
+//
+// The field's state-based construction is the Merkle Search Tree (Auvolat &
+// Taïani, SRDS 2019), which Kleppmann's related work names as the counterpart to
+// his operation DAG. It buys something this does not:
+//
+//	"If their versions differ, they are able to identify which branches of the
+//	 tree contain changes, as branches that represent the same contents have the
+//	 same hash on both nodes, therefore allowing them to exchange only the
+//	 differing parts of the data set."
+//
+// This answers only whether two replicas differ. An MST would answer WHERE, and
+// that is worth wanting: a replica told only that it disagrees has nothing to do
+// next.
+//
+// Two things stop it being the answer here, and the second is the load-bearing
+// one.
+//
+// It implements an ordered set or map, over a totally ordered key space. A
+// [Map] is that; a [Doc] is not — a sequence's order is the document's, not its
+// identities'.
+//
+// And an MST's shape is derived from the CONTENT: "deterministic randomness
+// obtained by hashing the values is used to determine tree shape", each item
+// assigned a layer by the number of leading zeros of its hash. That is the same
+// property tree.go refuses for the index, in the same words as the objection
+// there — a shape a peer can compute is a shape a peer can choose, and this
+// package's inputs come from peers that need not be honest. The paper's
+// balance is probabilistic over hashes an honest writer produces; nothing in it
+// bounds a writer that grinds keys for long zero prefixes. In an open network
+// that is the threat, and "open networks" is the paper's own setting.
+//
+// So: a flat answer that cannot be ground, rather than a located one that can.
+// If the question ever becomes WHERE two replicas differ, the thing to reach for
+// is a shape this package fixes — the AVL it already keeps — and not one the
+// data chooses.
+//
 // # What it does not do
 //
 // It does not attribute, prevent or repair. It says two replicas differ, which is
