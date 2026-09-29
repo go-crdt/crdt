@@ -213,6 +213,45 @@ const impls = {
     free: c => c.doc.free(),
     jsHeap: false // WebAssembly memory again
   }
+,
+
+  // ---- Fugue (list-positions) ----------------------------------------------
+  //
+  // The algorithm from Weidner & Kleppmann, "The Art of the Fugue", by one of
+  // its authors. It is here because it is the answer to something this package
+  // does NOT do: RGA is proved free of forward interleaving and exhibits the
+  // backward kind, and Fugue is proved free of both. So this row prices the
+  // property rather than only the throughput.
+  //
+  // Driven through Text.insertAt / Text.deleteAt, which is the API its README
+  // gives for a collaborative text editor.
+  //
+  // Its saved document is TWO states: the characters and the order of the
+  // positions they sit at, which live in separate structures. Encoding only the
+  // first would understate it, so both are saved and measured together.
+  fugue: {
+    version: () => pkgVersion('list-positions'),
+    create () {
+      const { Text } = require('list-positions')
+      return { text: new Text() }
+    },
+    replay (c, patches) {
+      const t = c.text
+      for (let i = 0; i < patches.length; i++) {
+        const p = patches[i]
+        if (p[1] > 0) t.deleteAt(p[0], p[1])
+        if (p[2]) t.insertAt(p[0], p[2])
+      }
+      return c
+    },
+    text: c => c.text.toString(),
+    encoded: c => Buffer.from(JSON.stringify({
+      text: c.text.save(),
+      order: c.text.order.save()
+    })),
+    free: () => {}, // plain JS objects; the collector is the only owner
+    jsHeap: true
+  }
 }
 
 function main () {

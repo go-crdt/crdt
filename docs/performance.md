@@ -68,6 +68,40 @@ at 23.4 ms in the same session — level with diamond-types on this trace, by a
 measurement that agrees with this one to within 3%. The table stands as it was
 taken; the other implementations have not been re-run.
 
+### What non-interleaving costs
+
+The table above prices throughput. This row prices a **property**.
+
+`crdt` is an RGA, which is proved free of *forward* interleaving and exhibits the
+*backward* kind — type a word, move the cursor back, type another, and somebody
+else's concurrent word can land between yours. See `doc.go` and
+`TestTwoOfYourCharactersStayTogetherWhenYouTypeForwards`. Fugue (Weidner &
+Kleppmann, *The Art of the Fugue*) is proved free of both, and `list-positions`
+is its authors' implementation.
+
+So: what would that guarantee cost? Measured on 2026-09-29, all three in one
+session on a **loaded machine** (load average 19–24), which is why only the
+ratios are quoted and our own row was re-measured alongside rather than taken
+from the table above:
+
+| Implementation | Runs on | Replay (median) | × ours, this session |
+|---|---|---|---|
+| **go-crdt/crdt** | Go | **21.6 ms** | 1.0× |
+| list-positions 2.0.0 (Fugue) | JavaScript | **207.7 ms** | **9.6×** |
+| yjs 13.6.33 | JavaScript | 3 724 ms | 173× |
+
+Our 21.6 ms against the 18.4 ms in the table above puts the load's inflation at
+about 17%, so the ratios are not badly distorted; the absolute figures are not
+the point and should be re-taken on a quiet machine before being quoted.
+
+**About an order of magnitude**, then, and — worth saying because the Fugue paper
+compares itself to Yjs — roughly eighteen times faster than Yjs while doing more.
+
+Two things this does not measure. It crosses languages: Fugue here is
+JavaScript and we are Go, the same caveat the `Runs on` column carries for every
+other row. And its saved document is JSON — 493 KB against our 260 KB of binary —
+which compares encodings, not designs, so it is left out of the size table below.
+
 ### Document size, where we do badly
 
 Encoding the replayed document:
