@@ -62,11 +62,21 @@ is the fastest text CRDT anyone has published and it stays that way here. The
 honest reading of this table is that we are in its range — same order of
 magnitude, same trace, same machine — and ahead of everything else measured.
 
-Our row is 0.4.0. The index over runs described below arrived after this table
-was measured and takes the replay to 18.4 ms, on the Go benchmark that put 0.4.0
-at 23.4 ms in the same session — level with diamond-types on this trace, by a
-measurement that agrees with this one to within 3%. The table stands as it was
-taken; the other implementations have not been re-run.
+Our row is 0.4.0; the index over runs described below arrived after this table was
+measured. Paired against diamond-types with `paired.js --arms ours,diamond-types`
+— 25 interleaved rounds, so both arms meet the same machine — the current code
+replays in **20.9 ms** against its **18.8 ms**: **0.90×**. Every round but the
+first put the ratio between 0.87 and 1.00; the first is diamond-types' native
+module warming up, at 32.5 ms. Diamond-types is faster by about a tenth.
+
+An earlier version of this paragraph said we were *level* with it, from our
+18.4 ms against the 18.4 ms in the table. Those two numbers were taken in
+different sessions and never met the same machine — the same defect the Fugue row
+below was corrected for, and this time it fell our way. It is the reason
+`paired.js` exists.
+
+The table stands as it was taken, in blocks and before that instrument; the other
+implementations have not been re-run.
 
 ### What non-interleaving costs
 
