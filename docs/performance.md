@@ -100,8 +100,10 @@ median of the per-round ratios:
 | list-positions 2.0.0 (Fugue) | JavaScript | **177.2 ms** | **8.4×** |
 | yjs 13.6.33 | JavaScript | 3 170 ms | 152× |
 
-Two more runs put Fugue at 8.6× (two arms, 25 rounds) and 8.1× (the block
-control below, 15 rounds), and Yjs at 144×.
+The machine is the one above, sixteen cores, with `load1` between 7.0 and 9.4
+throughout: spare cores, which the section below shows is not a detail. Two more
+runs put Fugue at 8.6× (two arms, 25 rounds) and 8.1× (the block control below,
+15 rounds), and Yjs at 144×.
 
 **About an order of magnitude**, then, and — worth saying because the Fugue paper
 compares itself to Yjs — roughly eighteen times faster than Yjs while doing more.
