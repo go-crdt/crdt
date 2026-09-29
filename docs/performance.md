@@ -167,6 +167,13 @@ slow: ours 27.5 ms against 19.9–21.8, Fugue 215 ms against 171–191. `paired.
 records `load1` beside every timing so a reader can see what it said, not so a
 result can be justified by it.
 
+Why it survived: **this document already had the habit, for the comparison it
+makes often.** Every measurement of one of our releases against another says how
+it was taken — beside the release before it on the same machine in one session,
+and the UTF-16 pair alternately, build against build. It was the comparisons with
+*other* implementations, made rarely, that were left to whatever the machine was
+doing. The discipline was there; it had simply never been pointed outward.
+
 One thing this does *not* say: that running each implementation as its own
 command is wrong. `--block` does exactly that with the same processes and the
 same code, and on a machine whose load is steady it agrees with the interleaved
