@@ -1,10 +1,13 @@
 package crdt
 
 import (
+	"bufio"
 	"compress/gzip"
 	"encoding/json"
 	"os"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -209,4 +212,90 @@ func BenchmarkEditingTraceRemote(b *testing.B) {
 		}
 	}
 	b.ReportMetric(float64(b.Elapsed().Nanoseconds())/float64(b.N)/float64(len(ops)), "ns/op-applied")
+}
+
+// TestServeTraceReplays is the Go arm of the paired comparison in
+// docs/comparison/: one replay per line on stdin, one JSON line back, the
+// process staying warm between them, so that this implementation and the
+// JavaScript ones can be asked for a replay in rotation rather than run as a
+// block each.
+//
+// The reason to interleave is that a block per implementation gives each one a
+// different stretch of wall-clock time, and a machine whose load moves during
+// the comparison then charges that movement to whichever library happened to be
+// running. That is not a hypothetical: it is how the Fugue row in
+// docs/performance.md came out 14% too high, and how it was found.
+//
+// It is a test rather than a command so that the loader and the replay are the
+// ones the benchmark and the correctness test use. A second copy of them could
+// drift, and a comparison whose two sides are timed differently measures the
+// harness.
+//
+// Set CRDT_SERVE=1 to enable it; go test skips it otherwise.
+func TestServeTraceReplays(t *testing.T) {
+	if os.Getenv("CRDT_SERVE") == "" {
+		t.Skip("CRDT_SERVE is not set; this is the paired-comparison worker, not a check")
+	}
+	patches, want := loadTrace(t)
+	out := json.NewEncoder(os.Stdout)
+	if err := out.Encode(map[string]any{
+		"implementation": "go-crdt/crdt", "edits": len(patches), "ready": true,
+	}); err != nil {
+		t.Fatalf("announcing readiness: %v", err)
+	}
+
+	// A request line may carry a repeat count, which is how the coordinator
+	// makes one arm's sample last as long as another's. That matters under
+	// contention: a 20 ms sample loses a whole scheduling quantum where a 200 ms
+	// one absorbs it, so comparing arms of very different duration measures the
+	// difference in duration as well as the difference in implementation.
+	in := bufio.NewScanner(os.Stdin)
+	for in.Scan() {
+		repeats := 1
+		if field := strings.TrimSpace(in.Text()); field != "" {
+			n, err := strconv.Atoi(field)
+			if err != nil || n < 1 {
+				t.Fatalf("a request line must be empty or a positive repeat count, got %q", field)
+			}
+			repeats = n
+		}
+		// One clock around all of the repeats, not one per replay. Summing short
+		// windows averages a delay; it does not remove it. Only a window that is
+		// actually longer can absorb a scheduling quantum the way a slower
+		// implementation's window does, which is the thing being asked about.
+		docs := make([]*Doc, 0, repeats)
+		start := time.Now()
+		for range repeats {
+			d := New(1)
+			for i, p := range patches {
+				if p.del > 0 {
+					if _, err := d.Delete(p.pos, p.del); err != nil {
+						t.Fatalf("patch %d, Delete(%d, %d): %v", i, p.pos, p.del, err)
+					}
+				}
+				if p.text != "" {
+					if _, err := d.Insert(p.pos, p.text); err != nil {
+						t.Fatalf("patch %d, Insert(%d, %q): %v", i, p.pos, p.text, err)
+					}
+				}
+			}
+			docs = append(docs, d)
+		}
+		elapsed := time.Since(start)
+		for _, d := range docs { // verification stays outside the clock
+			if got := d.String(); got != want {
+				t.Fatal("the replayed text is not the text the trace records")
+			}
+		}
+		if err := out.Encode(map[string]any{
+			"implementation": "go-crdt/crdt",
+			"replays":        repeats,
+			"ms":             float64(elapsed.Nanoseconds()) / 1e6 / float64(repeats),
+		}); err != nil {
+			t.Fatalf("reporting a replay: %v", err)
+		}
+	}
+	if err := in.Err(); err != nil {
+		t.Fatalf("reading the next request: %v", err)
+	}
 }

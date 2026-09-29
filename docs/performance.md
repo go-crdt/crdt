@@ -79,20 +79,19 @@ else's concurrent word can land between yours. See `doc.go` and
 Kleppmann, *The Art of the Fugue*) is proved free of both, and `list-positions`
 is its authors' implementation.
 
-So: what would that guarantee cost? Measured on 2026-09-29, all three in one
-session on a **loaded machine** (load average 19–24), which is why only the
-ratios are quoted and our own row was re-measured alongside rather than taken
-from the table above:
+So: what would that guarantee cost? Twenty rounds of
+[`docs/comparison/paired.js`](comparison/paired.js), which asks each arm for one
+replay in rotation rather than running each as its own command, and quotes the
+median of the per-round ratios:
 
-| Implementation | Runs on | Replay (median) | × ours, this session |
+| Implementation | Runs on | Replay (median) | × ours |
 |---|---|---|---|
-| **go-crdt/crdt** | Go | **21.6 ms** | 1.0× |
-| list-positions 2.0.0 (Fugue) | JavaScript | **207.7 ms** | **9.6×** |
-| yjs 13.6.33 | JavaScript | 3 724 ms | 173× |
+| **go-crdt/crdt** | Go | **20.9 ms** | 1.0× |
+| list-positions 2.0.0 (Fugue) | JavaScript | **177.2 ms** | **8.4×** |
+| yjs 13.6.33 | JavaScript | 3 170 ms | 152× |
 
-Our 21.6 ms against the 18.4 ms in the table above puts the load's inflation at
-about 17%, so the ratios are not badly distorted; the absolute figures are not
-the point and should be re-taken on a quiet machine before being quoted.
+Two more runs put Fugue at 8.6× (two arms, 25 rounds) and 8.1× (the block
+control below, 15 rounds), and Yjs at 144×.
 
 **About an order of magnitude**, then, and — worth saying because the Fugue paper
 compares itself to Yjs — roughly eighteen times faster than Yjs while doing more.
@@ -101,6 +100,68 @@ Two things this does not measure. It crosses languages: Fugue here is
 JavaScript and we are Go, the same caveat the `Runs on` column carries for every
 other row. And its saved document is JSON — 493 KB against our 260 KB of binary —
 which compares encodings, not designs, so it is left out of the size table below.
+
+#### The first version of this row said 9.6×, and that was 14% too high
+
+It was measured by running `bench.js fugue`, then `bench.js yjs`, then the Go
+benchmark: each arm its own command, each its own stretch of wall-clock time. The
+machine was busy, the text said so, and it excused itself on the reasoning that
+whatever the machine was doing landed on all three alike.
+
+It does not land on all three alike. That is worth more than the row it corrects.
+
+Under twelve busy loops, interleaved so that every arm meets the same machine:
+
+| | ours | Fugue | Fugue ÷ ours |
+|---|---|---|---|
+| spare cores | 20.9 ms | 177 ms | **8.4×** |
+| twelve busy loops | 42.5 ms (**×2.04**) | 227 ms (×1.28) | **5.4×** |
+
+Contention costs us twice what it costs Fugue, so a busy machine moves the ratio
+by a third — *towards* Fugue. Four things follow.
+
+**A busy machine flatters whatever you are slower than.** The penalty fell
+hardest on the fastest arm and least on the slowest — ours ×2.04, Fugue ×1.28,
+Yjs ×1.23 — so contention shrinks a lead rather than distributing itself. A
+comparison run on a loaded workstation understates whoever is winning, and the
+error is not noise: it has a direction.
+
+**Most of that is the length of the window, not the language.** A 21 ms
+measurement loses a whole scheduling quantum where a 180 ms one absorbs it, and
+the fastest implementation necessarily has the shortest window. Timing eight
+consecutive replays under one clock — `--repeats ours=8`, so our sample lasts
+168 ms like Fugue's — takes our inflation from ×2.04 to **×1.42** and the ratio
+from 5.4× back to 7.6×. That is more than half of the gap, and it is not all of
+it: at equal window length we still lose somewhat more than Fugue does.
+
+**The minimum recovers some of the rest, and the literature says why it cannot
+recover all of it.** Chen and Revels model the environment as adding delay and
+never removing it (*Robust benchmarking in noisy environments*, IEEE HPEC 2016,
+the strategy in Julia's `BenchmarkTools`): if every error term is positive then
+the smallest sample is the one with the least error in it, which is why they
+estimate with the minimum rather than the mean or the median. On the contended
+run the minimum does pull the ratio from 5.4× back to 7.4× without any change to
+how the arms are driven. But their equation (9) is the reason it stops there —
+repetition removes a delay that *sometimes* fires, not one that fires on every
+execution, and a starved CPU is the second kind. 7.4× is still 12% short of 8.4×.
+The minimum is a better estimator, not a substitute for a machine with a spare
+core.
+
+**A load average cannot label a measurement.** It is an exponential average over
+a minute, so it lags in both directions. The first round of the contended run
+read `load1` 10.69, a value the uncontended block control had spent its whole run
+inside, while the twelve busy loops were already there and every arm was already
+slow: ours 27.5 ms against 19.9–21.8, Fugue 215 ms against 171–191. `paired.js`
+records `load1` beside every timing so a reader can see what it said, not so a
+result can be justified by it.
+
+One thing this does *not* say: that running each implementation as its own
+command is wrong. `--block` does exactly that with the same processes and the
+same code, and on a machine whose load is steady it agrees with the interleaved
+form to within the spread — 8.1× against 8.4×. Blocks are not wrong; they are
+unprotected, and nothing in their output says which of the two they were. The
+table above them was taken that way, before `paired.js` existed, and has not been
+re-run.
 
 ### Document size, where we do badly
 

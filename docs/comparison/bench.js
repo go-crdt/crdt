@@ -2,7 +2,7 @@
 // diamond-types, so their numbers and ours come from the same machine, the same
 // trace and the same protocol.
 //
-//   node --expose-gc bench.js <impl> [--runs N] [--mem] [--limit N]
+//   node --expose-gc bench.js <impl> [--runs N] [--mem] [--limit N] [--serve]
 //
 // One file rather than one per library on purpose: the timing loop, the
 // verification and the memory reading are then provably identical for every
@@ -24,6 +24,7 @@
 
 const fs = require('fs')
 const path = require('path')
+const os = require('os')
 const { gzipSync } = require('node:zlib')
 const { loadTrace, stats, ms, heapUsed } = require('./common')
 
@@ -254,12 +255,70 @@ const impls = {
   }
 }
 
+// serve turns this file into a worker: one replay per line on stdin, one JSON
+// line back, with the process staying warm between them. It exists because a
+// comparison that runs each implementation as its own block of wall-clock time
+// cannot tell a difference between libraries from a drift in what the machine
+// was doing between the blocks. Interleaved — round-robin, one replay each —
+// every implementation meets the same machine, and each round is a paired
+// sample whose ratio survives a load that moves.
+//
+// Each line reports the one-minute load average beside the timing, so a reader
+// can see what the machine was doing rather than take it on trust.
+function serve (impl, patches, expected, meta) {
+  process.stdout.write(JSON.stringify({ ...meta, ready: true }) + '\n')
+  let buf = ''
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', chunk => {
+    buf += chunk
+    let i
+    while ((i = buf.indexOf('\n')) !== -1) {
+      const line = buf.slice(0, i).trim()
+      buf = buf.slice(i + 1)
+      // A request line may carry a repeat count, which is how the coordinator
+      // makes one arm's sample last as long as another's. That matters under
+      // contention: a 20 ms sample loses a whole scheduling quantum where a
+      // 200 ms one absorbs it, so comparing arms of very different duration
+      // measures the difference in duration as well as the implementations.
+      const repeats = line === '' ? 1 : Number(line)
+      if (!Number.isInteger(repeats) || repeats < 1) {
+        process.stderr.write(`a request line must be empty or a positive repeat count, got ${JSON.stringify(line)}\n`)
+        process.exit(1)
+      }
+      // One clock around all of the repeats, not one per replay. Summing short
+      // windows averages a delay; it does not remove it. Only a window that is
+      // actually longer can absorb a scheduling quantum the way a slower
+      // implementation's window does, which is the thing being asked about.
+      const made = []
+      const t0 = process.hrtime.bigint()
+      for (let n = 0; n < repeats; n++) made.push(impl.replay(impl.create(), patches))
+      const elapsed = process.hrtime.bigint() - t0
+      for (const c of made) { // verification stays outside the clock
+        const text = impl.text(c)
+        if (expected === null) expected = text
+        if (text !== expected) {
+          process.stderr.write('replayed text does not match the recorded final text\n')
+          process.exit(1)
+        }
+        impl.free(c)
+      }
+      process.stdout.write(JSON.stringify({
+        implementation: meta.implementation,
+        replays: repeats,
+        ms: +(ms(elapsed) / repeats).toFixed(3),
+        load1: +os.loadavg()[0].toFixed(2)
+      }) + '\n')
+    }
+  })
+  process.stdin.on('end', () => process.exit(0))
+}
+
 function main () {
   const args = process.argv.slice(2)
   const name = args[0]
   const impl = impls[name]
   if (!impl) {
-    console.error(`usage: node --expose-gc bench.js <${Object.keys(impls).join('|')}> [--runs N] [--mem] [--limit N]`)
+    console.error(`usage: node --expose-gc bench.js <${Object.keys(impls).join('|')}> [--runs N] [--mem] [--limit N] [--serve]`)
     process.exit(2)
   }
   const flag = (f, d) => {
@@ -312,6 +371,11 @@ function main () {
       serialized_bytes: impl.encoded(c).byteLength
     }))
     global.__keep = c // the reading above must not be of a collected document
+    return
+  }
+
+  if (args.includes('--serve')) {
+    serve(impl, patches, expected, meta)
     return
   }
 
