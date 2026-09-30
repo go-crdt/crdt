@@ -225,6 +225,19 @@ Encoding the replayed document:
 | *go-crdt/crdt 0.5.0* | *620 KB* |
 | *go-crdt/crdt 0.4.0, when this was measured* | *2 663 KB* |
 
+**Re-verified on 2026-09-30, and every row reproduces.** Sizes do not depend on
+what the machine was doing, so this half of the comparison was never exposed to
+what the timing table above had to be re-taken for — and saying so is only worth
+anything because it was checked: diamond-types at 108 996 bytes, Yjs at 159 929
+and 311 038, ours at 259 890, all to the byte.
+
+Each row is labelled with the version that produced it, and two of those
+versions have moved since without moving a format. **Automerge 3.5.0 encodes this
+document into exactly the same 129 103 bytes as 3.4.1** — the 6.9× it gained in
+speed cost nothing and bought nothing here — and loro 1.16.3 lands 33 bytes from
+1.15.1 on a 251 KB document. So the table is current to within those 33 bytes,
+not merely correct as taken.
+
 This is what the comparison was for. At 0.4.0 ours was between eight and
 twenty-four times larger than anyone else's, because `Snapshot` wrote one record
 per character while everyone else writes runs. Version 2 of the format writes
