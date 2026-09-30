@@ -557,9 +557,10 @@ there is no figure for them here rather than a bad one.
 
 | Implementation | Held after replay | Per visible character |
 |---|---|---|
-| **go-crdt/crdt 0.4.0** | **4 034 KiB** | **39.4 B** |
-| yjs 13.6.32, `gc: true` (default) | 5 678 KiB | 55.5 B |
-| yjs 13.6.32, `gc: false` | 7 573 KiB | 74.0 B |
+| **go-crdt/crdt**, today | **4 541 KiB** | **44.3 B** |
+| yjs 13.6.33, `gc: true` (default) | 5 680 KiB | 55.5 B |
+| yjs 13.6.33, `gc: false` | 7 256 KiB | 70.9 B |
+| *go-crdt/crdt 0.4.0, when this was first taken* | *4 034 KiB* | *39.4 B* |
 
 Per *visible* character, because that is the only count the two agree on: the
 document ends with 104 852 characters, and we additionally hold 77 463
@@ -568,8 +569,22 @@ page comes from. Yjs's
 default `gc: true` discards deleted content, so the `gc: false` row is the
 closer comparison — and we are below both.
 
-Ours varied by not one byte across three runs; Yjs's readings spanned 5678–5997
-KiB (`gc: true`) and 7255–7573 KiB (`gc: false`).
+Re-taken on 2026-09-30. **Yjs reproduces** — 5 680 KiB against the 5 678 first
+published, and the `gc: false` row lands on 7 256, the bottom of the 7255–7573
+that was recorded then. **Ours grew**, from 4 034 KiB at 0.4.0 to 4 541 today,
+and the two sections below account for it: the index over runs, and the second
+summary for UTF-16 offsets, which took a block header from 144 bytes to 160 and
+the document from 4 372 KiB to 4 541. That growth was measured when it was made
+rather than discovered here; what this table had wrong was only that it went on
+quoting 0.4.0 while the rest of the page had moved on.
+
+We are still below both Yjs rows, by less than the old number claimed: 44.3 bytes
+per visible character against 55.5 and 70.9.
+
+Ours read 4 541, 4 541 and 4 547 KiB over three runs — an earlier version of this
+paragraph said it "varied by not one byte", which was true of 0.4.0 and is not
+true now. Yjs read 5 680, 5 680 and 5 998 (`gc: true`) and 7 256 three times
+(`gc: false`).
 
 ### What this does not say
 
