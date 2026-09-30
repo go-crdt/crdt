@@ -44,39 +44,74 @@ clock. The harness is in [`docs/comparison/`](comparison/): one file with one
 timing loop and one adapter per library, so the measurement cannot differ
 between them.
 
-Apple M4 Max (16 cores, 128 GiB), macOS 26.6.1, Go 1.26.4 `darwin/arm64`,
-Node v26.4.0. Ten replays of the whole 259 778-edit trace per implementation;
-the median is quoted and the full spread is in the last column.
+Apple M4 Max (16 cores, 128 GiB), macOS 26.6.2, Go 1.26.4 `darwin/arm64`,
+Node v26.4.0. Twelve interleaved rounds of
+[`docs/comparison/paired.js`](comparison/paired.js) — one replay per arm in
+rotation, each process staying warm — on a machine whose `load1` fell from 4.7 to
+3.1 across the run and never rose above 6.7. The `×` column is the **median of
+the per-round ratios**, which is what pairing buys; the `min–max` column is the
+spread of the raw times.
 
 | Implementation | Runs on | Replay (median) | ns/edit | × ours | min–max |
 |---|---|---|---|---|---|
-| diamond-types 1.0.2 | Rust → WebAssembly | **18.4 ms** | 71 | **0.76×** | 17.7–23.8 ms |
-| **go-crdt/crdt 0.4.0** | Go | **24.1 ms** | 93 | 1.00× | 23.9–24.1 ms |
-| loro-crdt 1.14.1 | Rust → WebAssembly | 692 ms | 2 662 | 28.7× | 573–1007 ms |
-| yjs 13.6.32 | JavaScript | 3 079 ms | 11 851 | 127.6× | 3068–3141 ms |
-| @automerge/automerge-wasm 1.0.0-preview.0 | Rust → WebAssembly | 8 262 ms | 31 803 | 342.5× | 8235–8497 ms |
-| @automerge/automerge 3.4.1 | Rust → WebAssembly, JS wrapper | 26 492 ms | 101 980 | 1098× | 25 660–30 672 ms |
+| diamond-types 1.0.2 | Rust → WebAssembly | **18.5 ms** | 71 | **0.91×** | 17.7–31.4 ms |
+| **go-crdt/crdt** | Go | **20.0 ms** | 77 | 1.00× | 19.5–21.1 ms |
+| list-positions 2.0.0 (Fugue) | JavaScript | 173.1 ms | 666 | 8.74× | 168.5–211.2 ms |
+| loro-crdt 1.16.3 | Rust → WebAssembly | 186.2 ms | 717 | 9.31× | 185.1–213.4 ms |
+| yjs 13.6.33 | JavaScript | 3 101 ms | 11 936 | 156× | 3 073–3 216 ms |
+| @automerge/automerge 3.5.0 | Rust → WebAssembly, JS wrapper | 3 875 ms | 14 916 | 194× | 3 858–4 069 ms |
+| @automerge/automerge-wasm 1.0.0-preview.0 | Rust → WebAssembly | 8 247 ms | 31 748 | 411× | 8 197–8 394 ms |
 
-**diamond-types is faster than we are**, by a third, and that is the result. It
-is the fastest text CRDT anyone has published and it stays that way here. The
-honest reading of this table is that we are in its range — same order of
-magnitude, same trace, same machine — and ahead of everything else measured.
+**diamond-types is still faster than we are**, by about a tenth, and that is the
+result. It is the fastest text CRDT anyone has published and it stays that way
+here. Its one wide round — 31.4 ms against a median of 18.5 — is its native
+module warming up on the first round; every later round is within 17.7–20.2 ms.
 
-Our row is 0.4.0; the index over runs described below arrived after this table was
-measured. Paired against diamond-types with `paired.js --arms ours,diamond-types`
-— 25 interleaved rounds, so both arms meet the same machine — the current code
-replays in **20.9 ms** against its **18.8 ms**: **0.90×**. Every round but the
-first put the ratio between 0.87 and 1.00; the first is diamond-types' native
-module warming up, at 32.5 ms. Diamond-types is faster by about a tenth.
+The honest reading is that we are in its range on this trace, and ahead of
+everything else measured. What that costs in a property rather than throughput is
+the section after next.
 
-An earlier version of this paragraph said we were *level* with it, from our
-18.4 ms against the 18.4 ms in the table. Those two numbers were taken in
-different sessions and never met the same machine — the same defect the Fugue row
-below was corrected for, and this time it fell our way. It is the reason
-`paired.js` exists.
+### What re-taking it showed
 
-The table stands as it was taken, in blocks and before that instrument; the other
-implementations have not been re-run.
+The table this replaces was taken in blocks — each library its own command, its
+own stretch of wall-clock time — before `paired.js` existed. Re-taking it is how
+three things came out.
+
+**The instrument reproduces what did not change.** diamond-types and
+`automerge-wasm` are the same versions as before and land on the same numbers:
+18.4 → 18.5 ms and 8 262 → 8 247 ms. Yjs moved one patch release and 3 079 →
+3 101 ms. Nothing here says the new protocol measures differently from the old
+one, which is what makes the two rows that *did* move worth reading.
+
+**Automerge is 6.9× faster than it was, and the old figure was right when it was
+taken.** 3.4.1 published at 26 492 ms; 3.5.0 reads 3 875 ms. Installed side by
+side and run alternately on this machine, 3.4.1 reads 26 843–28 731 ms and 3.5.0
+reads 3 997–4 016 ms, so the change is the library's and not ours. It also
+reverses the bottom of the table: the JS wrapper is now **twice as fast as the
+raw WebAssembly binding** it wraps, where it used to be three times slower.
+
+**Loro reads 186 ms where 692 ms was published, and the version is not the
+reason.** `loro-crdt` moved 1.14.1 → 1.16.3, so that was the first thing to
+check: 1.14.1 reinstalled and run today reads 198–216 ms. The adapter has been
+touched by exactly one commit — the one that introduced this harness and
+published that table — and Node is the same v26.4.0, and the published protocol
+(`--runs 10`) reproduces at 192 ms. So: not the version, not the adapter, not the
+runtime, not the protocol.
+
+What is left is the state of the machine during that block, and the published row
+carries the mark of it — its spread was **573–1007 ms, a factor of 1.76**, where
+every other row in that table spanned 1.02 to 1.34. Contention of the right size
+does reach that magnitude: under twelve busy loops loro barely moves (191 → 197
+ms), but under thirty-two, three times oversubscribed, it reads 397–551 ms. That
+is the neighbourhood of the published figure without being a proof of it, and it
+is as far as this can be taken — the run itself is not repeatable.
+
+**That is the third thing a block design cost this document**, after the Fugue
+row being 14% out and the diamond-types comparison being made across two
+sessions. This one is the worst of the three and the least visible: a single row
+3.5× too slow while every row around it was correct, which is exactly what giving
+each library its own stretch of time allows and exactly what nothing in the
+output says.
 
 ### What non-interleaving costs
 
@@ -89,21 +124,12 @@ else's concurrent word can land between yours. See `doc.go` and
 Kleppmann, *The Art of the Fugue*) is proved free of both, and `list-positions`
 is its authors' implementation.
 
-So: what would that guarantee cost? Twenty rounds of
-[`docs/comparison/paired.js`](comparison/paired.js), which asks each arm for one
-replay in rotation rather than running each as its own command, and quotes the
-median of the per-round ratios:
-
-| Implementation | Runs on | Replay (median) | × ours |
-|---|---|---|---|
-| **go-crdt/crdt** | Go | **20.9 ms** | 1.0× |
-| list-positions 2.0.0 (Fugue) | JavaScript | **177.2 ms** | **8.4×** |
-| yjs 13.6.33 | JavaScript | 3 170 ms | 152× |
-
-The machine is the one above, sixteen cores, with `load1` between 7.0 and 9.4
-throughout: spare cores, which the section below shows is not a detail. Two more
-runs put Fugue at 8.6× (two arms, 25 rounds) and 8.1× (the block control below,
-15 rounds), and Yjs at 144×.
+So: what would that guarantee cost? It is the `list-positions` row in the table
+above — **173 ms against our 20 ms, 8.74×**. Four runs on four occasions put it
+at 8.13×, 8.40×, 8.60× and 8.74×, and they line up the way the section below
+predicts: the lowest came from the block control and the highest from the
+quietest machine, because contention costs our shorter arm more than it costs
+Fugue's and so pulls the ratio down.
 
 **About an order of magnitude**, then, and — worth saying because the Fugue paper
 compares itself to Yjs — roughly eighteen times faster than Yjs while doing more.
@@ -545,15 +571,18 @@ KiB (`gc: true`) and 7255–7573 KiB (`gc: false`).
   benchmark, on newer hardware and without the update observer his harness
   registers. Our encoded size for Yjs, 159 929 bytes, matches his published
   `docSize` exactly, which is the check that this harness reproduces his.
-- Automerge measured **slower** than the 14 326 ms dmonad publishes, on faster
-  hardware. He pins `@automerge/automerge@^2.1.10` and this is 3.4.1. That
-  difference was not investigated, and no claim of a regression is made from one
-  measurement. The `automerge-wasm` row is the same trace against Automerge's
-  Rust core with the JavaScript document wrapper removed, which puts about two
-  thirds of the cost in the wrapper.
+- Automerge 3.4.1 measured **slower** than the 14 326 ms dmonad publishes, on
+  faster hardware — he pins `@automerge/automerge@^2.1.10`. That was left
+  uninvestigated here, and **3.5.0 has since settled it in the other direction**:
+  3 875 ms, well under his figure, measured against 3.4.1 alternately on this
+  machine at 26 843–28 731 ms. The `automerge-wasm` row is the same trace against
+  Automerge's Rust core with the JavaScript document wrapper removed; at 3.4.1
+  that removed about two thirds of the cost, and at 3.5.0 it **adds** cost — the
+  wrapper is now twice as fast as the raw binding.
 - Wrapping the whole Yjs replay in a single `doc.transact` makes it *slower*,
-  9 406 ms against 3 079 ms, so the per-edit form used here is both what Yjs's
-  own benchmark does and the faster of the two.
+  9 406 ms against the 3 079 ms the same session measured for the per-edit form,
+  so the form used here is both what Yjs's own benchmark does and the faster of
+  the two.
 - One `Automerge.change` per edit, rather than one for the trace, costs about
   101 µs/edit over the first 20 000 edits — Automerge's own benchmark batches,
   and this is why.
