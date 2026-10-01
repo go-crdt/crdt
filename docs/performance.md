@@ -699,15 +699,15 @@ cost 4 758 bytes over one part and 47 979 over sixteen. That is the same argumen
 
 On a document of 10 000 characters:
 
-| Benchmark | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 | 0.5.0 |
-|---|---|---|---|---|---|
-| `InsertAtEnd` | 231 ns | 65 ns | 34.8 ns | 32.9 ns | **33.7 ns** |
-| `ApplyRemote` (10 000 operations) | 823 µs | 441 µs | 302 µs | 279 µs | **295 µs** |
-| `Load` | 1.48 ms | 1.02 ms | 830 µs | 756 µs | **613 µs** |
-| `String` | 34.7 µs | 31.0 µs | 27.4 µs | 23.7 µs | **23.6 µs** |
-| memory, one run | 107.7 B/char | 73.1 | 4.19 | 4.20 | **4.19** |
-| `ScatteredInsert` | | | | 12.3 µs | **0.37 µs** |
-| `SameOriginFlood` (5000 operations) | | | | 27.3 ms | **1.07 ms** |
+| Benchmark | 0.1.0 | 0.2.0 | 0.3.0 | 0.4.0 | 0.5.0 | today |
+|---|---|---|---|---|---|---|
+| `InsertAtEnd` | 231 ns | 65 ns | 34.8 ns | 32.9 ns | 33.7 ns | **36.4 ns** |
+| `ApplyRemote` (10 000 operations) | 823 µs | 441 µs | 302 µs | 279 µs | 295 µs | **351 µs** |
+| `Load` | 1.48 ms | 1.02 ms | 830 µs | 756 µs | 613 µs | **747 µs** |
+| `String` | 34.7 µs | 31.0 µs | 27.4 µs | 23.7 µs | 23.6 µs | **24.6 µs** |
+| memory, one run | 107.7 B/char | 73.1 | 4.19 | 4.20 | 4.19 | **4.19** |
+| `ScatteredInsert` † | | | | 12.3 µs | 0.37 µs | **0.41 µs** |
+| `SameOriginFlood` (5000 operations) | | | | 27.3 ms | 1.07 ms | **1.23 ms** |
 
 `go test -run '^$' -bench . -benchmem`. The last two arrived with 0.5.0; their
 0.4.0 column is the same benchmark run against the release before it.
@@ -716,6 +716,49 @@ The 0.5.0 column holds two changes and a busy machine, so it was taken beside th
 commit before it in the same session, which read 32.9 ns, 291 µs, 607 µs, 24.0 µs
 and 4.19 B/char. `Load` is the run-length snapshot format; what the index costs
 here is under a nanosecond of `InsertAtEnd` and 4 µs of `ApplyRemote`.
+
+**The `today` column was taken beside the 0.5.0 one**, not quoted across the
+fifty releases between them: both trees built and run alternately, six rounds
+each, medians. Measured that way the commit the 0.5.0 column describes reads
+34.98 ns, 304.89 µs, 641.27 µs, 25.23 µs and 1.17 ms — within 4–8% of what it
+published, which is what says the comparison is between the two versions and not
+between two sessions. Fifty releases cost 15% on `ApplyRemote` and 16% on `Load`
+and nothing anywhere else.
+
+### † A benchmark whose answer depended on how long you ran it
+
+`ScatteredInsert` inserted into a document it never stopped growing: one
+character per iteration, from the same `b.N` loop whose length Go chooses by
+ramping until a second has passed. So its answer was a function of `b.N` — and
+therefore of how fast the machine was that day, in the direction nobody expects.
+**A faster machine reaches a larger `b.N`, inserts into a larger document, and
+reports a worse figure.**
+
+On the commit that first published this row, that same code reads:
+
+| `-benchtime` | ns/op | the document it ends on |
+|---|---|---|
+| 1000x | **370** | 11 000 characters |
+| 10000x | 490 | 20 000 |
+| 500000x | 945 | 510 000 |
+| 1000000x | 1 300 | 1 010 000 |
+| *default (1s), here, today* | *1 246–1 514* | *1 010 000* |
+
+The **0.37 µs** this table used to quote is the 1000x reading. Nothing was wrong
+with the measurement; what was wrong was treating it as a quantity the code has.
+Run the same command on this machine today and it prints 1.3 µs — not because
+anything regressed, but because a second now buys a million iterations.
+
+The benchmark now rebuilds its document whenever it grows past 110% of
+`benchSize`, with the timer stopped, so the thing being measured is an insertion
+into a document of about ten thousand characters, which is what the row claims.
+It reads 360–410 ns from a hundred thousand iterations upward, and the default
+budget is thirty times that.
+
+**And there was no regression.** With the bounded benchmark run alternately on
+both trees, the 0.5.0 commit reads 405.8 ns and today reads 410.6 ns — 1.01×. The
+published 0.37 µs was about right for what it names; it just could not be
+obtained twice.
 
 ## What changed, and why
 
