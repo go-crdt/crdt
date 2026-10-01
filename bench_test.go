@@ -101,15 +101,43 @@ func BenchmarkApplyRemote(b *testing.B) {
 // asks for a position the mark cannot help with. The document here is built one
 // character at a time at positions that jump, so it holds as many runs as
 // characters and every walk it forces is the length of the document.
-func BenchmarkScatteredInsert(b *testing.B) {
+// scattered builds the document this benchmark inserts into: benchSize
+// characters placed at positions that jump around, so no cursor or last-edit
+// mark can help.
+func scattered(b *testing.B) *Doc {
+	b.Helper()
 	d := New(1)
 	for i := range benchSize {
 		if _, err := d.Insert((i*7919)%(i+1), "x"); err != nil {
 			b.Fatal(err)
 		}
 	}
-	b.ResetTimer()
-	for i := range b.N {
+	return d
+}
+
+// BenchmarkScatteredInsert measures one insertion at a position nothing can
+// predict, into a document of about benchSize characters.
+//
+// "About", and rebuilt when it outgrows that, because the document this inserts
+// into is the thing being measured. Letting it grow for the whole run made the
+// benchmark's answer a function of b.N — and b.N is chosen by ramping until a
+// second has passed, so the answer also depended on how fast the machine was
+// that day, in the direction nobody expects: a faster machine reaches a larger
+// b.N and reports a worse ns/op.
+//
+// It was not a small effect. On the commit that first published this row, the
+// same code reads 370 ns at -benchtime 1000x, 490 ns at 10000x, 950 ns at
+// 500000x and 1300 ns at 1000000x. The 0.37 µs this document used to quote is
+// the 1000x reading; nothing was wrong with the measurement, only with treating
+// it as a quantity the code has.
+func BenchmarkScatteredInsert(b *testing.B) {
+	d := scattered(b)
+	for i := 0; b.Loop(); i++ {
+		if d.Len() >= benchSize+benchSize/10 {
+			b.StopTimer()
+			d = scattered(b)
+			b.StartTimer()
+		}
 		if _, err := d.Insert((i*7919)%d.Len(), "y"); err != nil {
 			b.Fatal(err)
 		}
