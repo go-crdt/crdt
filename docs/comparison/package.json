@@ -13,7 +13,7 @@
     "@automerge/automerge-wasm": "1.0.0-preview.0",
     "diamond-types-node": "1.0.2",
     "list-positions": "2.0.0",
-    "loro-crdt": "1.16.3",
+    "loro-crdt": "1.16.4",
     "yjs": "13.6.33"
   }
 }
