@@ -327,6 +327,42 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
+      # What `go test -fuzz` discovers lives in $GOCACHE/fuzz, and setup-go's
+      # cache does restore -- the logs say "Cache restored successfully" -- but on
+      # an exact key hit actions/cache does not write back, so nothing discovered
+      # here was ever saved. Measured in the logs of a real run: these targets
+      # start from a baseline corpus of 1 to 6 inputs, which is the seeds in
+      # testdata/fuzz and nothing else, every time.
+      #
+      # That matters because 30 seconds is not where these targets finish. On a
+      # cleared cache, four of them found 33-50 interesting inputs in the first
+      # 30 seconds and 56-60 by 120 seconds, and two were still finding new
+      # coverage at the 120-second mark. Each run was therefore stopping in the
+      # steep part of its own discovery curve and then throwing the result away.
+      #
+      # The key carries the run number so every run saves, and restore-keys picks
+      # up the most recent previous one. GitHub evicts least-recently-used, which
+      # is the pruning this wants.
+      # Asked of Go rather than written down: a cache whose path does not exist
+      # restores nothing, saves nothing, and reports success either way.
+      - name: Locate the fuzz corpus
+        run: echo "FUZZ_CORPUS=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
+      - name: Restore the fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FUZZ_CORPUS }}
+          key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ runner.os }}-
+      # The corpus is counted on the way in and on the way out, because a cache
+      # that restores nothing and a cache that works report the same success.
+      # Two runs of this lane on main with the second number no larger than the
+      # first mean it is not accumulating, whatever the cache step says.
+      - name: What the corpus arrived with
+        run: |
+          n=$(find "$FUZZ_CORPUS" -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "corpus on entry: ${n:-0} inputs"
+          echo "FUZZ_CORPUS_IN=${n:-0}" >> "$GITHUB_ENV"
       - name: Fuzz every hostile target
         run: |
           targets=$(grep -rhoE 'func (Fuzz[A-Za-z0-9_]+)' structured/hostile_test.go | awk '{print $2}' | sort)
@@ -354,6 +390,15 @@ jobs:
             fi
             echo "::error::$t failed"
             failed="$failed $t"
+      - name: What the corpus leaves with
+        if: always()
+        run: |
+          n=$(find "$FUZZ_CORPUS" -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "corpus on exit: ${n:-0} inputs (entered with $FUZZ_CORPUS_IN)"
+          if [ "${n:-0}" -lt "$FUZZ_CORPUS_IN" ]; then
+            echo "::warning::the corpus shrank; the cache is not carrying what this lane finds"
+          fi
+
           done
           if [ -n "$failed" ]; then
             echo "::error::these targets failed:$failed"
