@@ -231,12 +231,18 @@ what the timing table above had to be re-taken for — and saying so is only wor
 anything because it was checked: diamond-types at 108 996 bytes, Yjs at 159 929
 and 311 038, ours at 259 890, all to the byte.
 
-Each row is labelled with the version that produced it, and two of those
-versions have moved since without moving a format. **Automerge 3.5.0 encodes this
-document into exactly the same 129 103 bytes as 3.4.1** — the 6.9× it gained in
-speed cost nothing and bought nothing here — and loro 1.16.3 lands 33 bytes from
-1.15.1 on a 251 KB document. So the table is current to within those 33 bytes,
-not merely correct as taken.
+Each row is labelled with the version that produced it — including when the pin
+moves under it, as `loro-crdt` has twice. The harness installs **1.16.4** today;
+it encodes this document into the same **251 391 bytes** as 1.16.3, to the byte,
+and a paired run against it replays in 188.7 ms, inside the 185.1–213.4 ms the
+table above records. Neither row is re-taken for it, because a row measured on a
+different day under a different load is the thing this page spent #132 removing.
+
+Two other versions have moved without moving a format either. **Automerge 3.5.0
+encodes this document into exactly the same 129 103 bytes as 3.4.1** — the 6.9×
+it gained in speed cost nothing and bought nothing here — and loro 1.16.3 lands
+33 bytes from 1.15.1 on a 251 KB document. So the table is current to within
+those 33 bytes, not merely correct as taken.
 
 This is what the comparison was for. At 0.4.0 ours was between eight and
 twenty-four times larger than anyone else's, because `Snapshot` wrote one record
