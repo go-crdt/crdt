@@ -27,6 +27,32 @@ jobs:
             exit 1
           fi
 
+      # A workflow whose shell is broken is still valid YAML. An edit that split
+      # one of these run blocks in half parsed fine, passed a yaml.safe_load
+      # check, and only failed on the runner with "unexpected end of file". So
+      # the shell is parsed here too, which is the control that catches it.
+      - name: Every run block must parse as shell
+        run: |
+          python3 - <<'EOF'
+          import subprocess, sys, yaml
+          bad = []
+          for name in ("ci.yml",):
+              doc = yaml.safe_load(open(f".github/workflows/{name}"))
+              for job, spec in (doc.get("jobs") or {}).items():
+                  for step in spec.get("steps") or []:
+                      src = step.get("run")
+                      if not src:
+                          continue
+                      r = subprocess.run(["bash", "-n"], input=src, text=True,
+                                         capture_output=True)
+                      if r.returncode != 0:
+                          bad.append((name, job, step.get("name", "(unnamed)"),
+                                      r.stderr.strip().splitlines()[-1]))
+          for name, job, step, err in bad:
+              print(f"::error file=.github/workflows/{name}::{job} / {step}: {err}")
+          sys.exit(1 if bad else 0)
+          EOF
+
   # Build, vet, race-test, and enforce 100% statement coverage on three OSes.
   test:
     name: test (${{ matrix.os }})
@@ -327,6 +353,42 @@ jobs:
       - uses: actions/setup-go@v7
         with:
           go-version: stable
+      # What `go test -fuzz` discovers lives in $GOCACHE/fuzz, and setup-go's
+      # cache does restore -- the logs say "Cache restored successfully" -- but on
+      # an exact key hit actions/cache does not write back, so nothing discovered
+      # here was ever saved. Measured in the logs of a real run: these targets
+      # start from a baseline corpus of 1 to 6 inputs, which is the seeds in
+      # testdata/fuzz and nothing else, every time.
+      #
+      # That matters because 30 seconds is not where these targets finish. On a
+      # cleared cache, four of them found 33-50 interesting inputs in the first
+      # 30 seconds and 56-60 by 120 seconds, and two were still finding new
+      # coverage at the 120-second mark. Each run was therefore stopping in the
+      # steep part of its own discovery curve and then throwing the result away.
+      #
+      # The key carries the run number so every run saves, and restore-keys picks
+      # up the most recent previous one. GitHub evicts least-recently-used, which
+      # is the pruning this wants.
+      # Asked of Go rather than written down: a cache whose path does not exist
+      # restores nothing, saves nothing, and reports success either way.
+      - name: Locate the fuzz corpus
+        run: echo "FUZZ_CORPUS=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
+      - name: Restore the fuzz corpus
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.FUZZ_CORPUS }}
+          key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ runner.os }}-
+      # The corpus is counted on the way in and on the way out, because a cache
+      # that restores nothing and a cache that works report the same success.
+      # Two runs of this lane on main with the second number no larger than the
+      # first mean it is not accumulating, whatever the cache step says.
+      - name: What the corpus arrived with
+        run: |
+          n=$(find "$FUZZ_CORPUS" -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "corpus on entry: ${n:-0} inputs"
+          echo "FUZZ_CORPUS_IN=${n:-0}" >> "$GITHUB_ENV"
       - name: Fuzz every hostile target
         run: |
           targets=$(grep -rhoE 'func (Fuzz[A-Za-z0-9_]+)' structured/hostile_test.go | awk '{print $2}' | sort)
@@ -359,6 +421,15 @@ jobs:
             echo "::error::these targets failed:$failed"
             exit 1
           fi
+      - name: What the corpus leaves with
+        if: always()
+        run: |
+          n=$(find "$FUZZ_CORPUS" -type f 2>/dev/null | wc -l | tr -d ' ')
+          echo "corpus on exit: ${n:-0} inputs (entered with $FUZZ_CORPUS_IN)"
+          if [ "${n:-0}" -lt "$FUZZ_CORPUS_IN" ]; then
+            echo "::warning::the corpus shrank; the cache is not carrying what this lane finds"
+          fi
+
       - name: Upload any failing input
         if: failure()
         uses: actions/upload-artifact@v7
