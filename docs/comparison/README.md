@@ -71,3 +71,24 @@ what `load1` said, so a reader can see it — not so a result can be justified b
 it. What contention does to a comparison is in
 [../performance.md](../performance.md), and it is not a constant factor: it does
 not fall on every implementation alike.
+
+## When a dependency bump moves a pin under a published number
+
+`package.json` pins every library this harness measures, and Renovate moves those
+pins. The tables in [../performance.md](../performance.md) label each row with the
+version that produced it, so a bump does not silently rewrite a measurement — but
+it does leave the harness installing something the tables do not name.
+
+What to do with such a bump, in the order that costs least:
+
+1. **Sizes first.** `node --expose-gc bench.js <impl> --runs 1` prints
+   `serialized_bytes`; they are deterministic, so one run settles whether the
+   format moved. `loro-crdt` 1.15.1, 1.16.3 and 1.16.4 all encode the trace into
+   251 358–251 391 bytes, and `@automerge/automerge` 3.4.1 and 3.5.0 into exactly
+   129 103 — a 6.9× speed change that touched nothing on the wire.
+2. **Then the replay, paired.** `node paired.js --arms ours,<impl>` against the
+   current code, and compare with the `min–max` column rather than the median: a
+   figure inside that spread is not news.
+3. **Only re-take the table if it moved**, and re-take *the whole table* in one
+   session if so. One row measured on another day under another load is what
+   #132 was for.
