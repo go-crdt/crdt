@@ -202,15 +202,17 @@ are checked against node's, not against ours.
 
 ## Status
 
-Version 0.27: the text, list and map CRDTs, a composite document that holds them
+What is here: the text, list and map CRDTs, a composite document that holds them
 as named parts, the wire and snapshot formats, awareness, and the surface an
 editor needs — reported changes, anchors, authorship, UTF-16 addressing, undo,
-and reading a document as it stood at any version.
-Pure Go, CGO=0, **100% statement coverage** on both packages, race-clean, six-arch
-CI, and the full suite green under `js/wasm`.
+and reading a document as it stood at any version. The released version is
+whatever the newest tag says; this sentence used to name one and was twenty-eight
+releases behind it.
+Pure Go, CGO=0, **100% statement coverage** on all three packages, race-clean,
+six-arch CI, and the full suite green under `js/wasm`.
 
 A real editing history — 259 778 edits from the trace text CRDTs are commonly
-measured on — replays in **18.4 ms** and matches the recorded text exactly; the
+measured on — replays in **20.0 ms** and matches the recorded text exactly; the
 same history delivered back to front, nothing applicable until the last
 operation, settles in 0.25 s, and the document encodes to 260 KB. See [docs/performance.md](docs/performance.md).
 
