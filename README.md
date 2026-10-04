@@ -213,7 +213,12 @@ and reading a document as it stood at any version. The released version is
 whatever the newest tag says; this sentence used to name one and was twenty-eight
 releases behind it.
 Pure Go, CGO=0, **100% statement coverage** on all three packages, race-clean,
-six-arch CI, and the full suite green under `js/wasm`.
+six-arch CI, and the full suite green under `js/wasm`. Full coverage says every
+line runs, not that anything would notice if a line were wrong — [what 100% of
+statements does not
+say](docs/design.md#what-100-of-statements-does-not-say) measures the
+difference over the 104 refusals in the three files that read somebody else's
+bytes.
 
 A real editing history — 259 778 edits from the trace text CRDTs are commonly
 measured on — replays in **20.0 ms** and matches the recorded text exactly; the

@@ -944,6 +944,65 @@ it is the point.
   replica returning from offline does; turning one down costs nothing, because
   the operations were never applied.
 
+## What 100% of statements does not say
+
+CI gates on full statement coverage over all three packages. That gate says
+every line runs; it does not say anything would notice if a line were wrong.
+The difference is measurable: delete a guard, run the suite, see whether it
+still passes.
+
+Done on 2026-10-04 over the 104 refusals and bounds in the three files that
+read bytes somebody else wrote — `op.go`, `snapshot.go` and `utf16.go` — each
+found by walking the AST for an `if` whose body returns a refusal:
+
+| | |
+| --- | --- |
+| deletions that did not compile, so not mutants at all | 29 |
+| caught by the suite | 63 |
+| survived | 12 |
+
+**All twelve are unproductive**, in Petrović and Ivanković's sense: "either
+trivially equivalent to the original program or it is detectable, but adding a
+test for it would not improve the test suite" (*Practical Mutation Testing at
+Scale: A View From Google*, IEEE TSE, 2021). They fall into two families, and
+the families are the interesting part.
+
+**Seven are fast paths in `utf16.go`.** `d.sup == 0` means no character in the
+document is more than one code unit, so the UTF-16 offset *is* the rune offset;
+removing the short-circuit sends the same question through the general path,
+which computes the same answer more slowly. The same for `b.nsup == 0` and for
+`pos == d.visible + d.sup`. A mutation cannot tell a fast path from a decision,
+and neither of those is a refusal.
+
+**Five are bounds doubled one layer down**, which is what defence in depth
+looks like from a single-layer mutation:
+
+- `decodeOp`'s check on the operation kind, where the same function ends with
+  `op.validate()` and its `default` returns the same `ErrInvalidOp`;
+- `DeleteUTF16`'s `length < 0`, where `Delete` refuses the converted range —
+  measured, `ErrOutOfRange` either way, for four negative lengths;
+- `snapshot.go`'s `nSites` and run-count bounds, where the accounting that
+  every operation the version vector promises must appear exactly once refuses
+  what the bound would have;
+- `column.open`'s empty-column check, which truncation cannot reach at all: a
+  column's length is checked against the bytes before the column is read, and
+  **all 102 truncations of a real snapshot are refused with the check and
+  without it**.
+
+That last one was worth measuring rather than reasoning about, and so was the
+fuzzer: 27.7 million executions against the mutated `column.open` found
+nothing, because `FuzzLoad` asserts that a load does not panic, and "it
+accepted what it should have refused" is not what that target asks.
+
+The conclusion is not that the suite is beyond improvement; it is that in this
+package the outer bound of a pair is not individually pinnable, and a test
+written for one of them would be a test about an implementation detail. What
+*is* worth pinning is the answer the pair gives, which is why
+`TestEveryDecoderRefusesAnUnknownOperationKind` asserts the identity of the
+error and not its existence: with both layers removed, a reserved kind comes
+back as `ErrMalformed` — corruption — rather than as an invalid operation,
+which is the distinction the forward compatibility in #80 depends on.
+
 ## Next
 
 The three things this section used to list are done:
