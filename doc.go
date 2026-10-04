@@ -63,6 +63,13 @@
 // identity is injected by the caller as a [SiteID]; see [DeriveSiteID] for a
 // deterministic way to obtain one from bytes the caller already has.
 //
+// TestTheSourceNeverReadsTheClockOrDrawsRandomNumbers holds this one, and it
+// reads the source rather than exercising the code, because what the sentence
+// forbids is an absence. A time.Now() added to a new file tomorrow would break
+// it with every test still passing — the convergence suite least of all, since
+// two replicas that both read the clock can still agree with each other and
+// disagree only with a replay of themselves.
+//
 // # Two counters
 //
 // Each operation carries two numbers, and they are not the same thing:
