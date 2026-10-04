@@ -18,7 +18,11 @@ every browser tab** — one implementation, one source of truth, no second
 codebase in JavaScript to keep in step. The whole test suite, convergence
 properties included, runs under `js/wasm` in CI.
 
-Zero dependencies.
+Zero dependencies. CI still scans for known vulnerabilities on every run, which
+for a module that requires nothing means the standard library — the half nobody
+thinks to scan, and the half a toolchain bump changes underneath you. The lane
+judges the findings rather than govulncheck's exit status, which is 0 over an
+advisory it decides a module does not call.
 
 ## Packages
 
