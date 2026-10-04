@@ -952,9 +952,8 @@ The three things this section used to list are done:
    [`grpc-transports/websocket`](https://github.com/grpc-transports/websocket)
    that fans out operations, snapshots late joiners and persists, with no
    transform because the CRDT converges.
-2. **The end-to-end proof** is `TestWasmConverges` in that repository: two
-   `js/wasm` clients editing through the server, asserting convergence
-   programmatically.
+2. **The end-to-end proof** is collab's `TestWasmConverges`: two `js/wasm`
+   clients editing through the server, asserting convergence programmatically.
 3. **Run-length blocks** shipped, at 73.1 → 4.19 bytes per character — see
    [performance.md](performance.md).
 

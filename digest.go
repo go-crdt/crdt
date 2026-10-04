@@ -53,9 +53,8 @@ import (
 // thousand characters, because one hash over a stream costs far less than a
 // hundred thousand hashes and an addition each. It needs no invented
 // construction, and it is about twice what [Doc.Snapshot] costs over the same
-// blocks — which is what a fresh join already pays. See
-// TestWhatADigestWalkCostsAgainstASnapshot for the table and for the two
-// corrections that produced it.
+// blocks — which is what a fresh join already pays. The table is the file
+// comment of digest_cost_test.go, with the two corrections that produced it.
 //
 // That price is affordable at the rate replicas need to compare and at no other:
 // collab measures one join per participant per session against one
