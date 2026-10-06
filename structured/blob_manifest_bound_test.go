@@ -62,3 +62,61 @@ func TestAManifestThatWrapsOn32BitIsRefusedThere(t *testing.T) {
 		t.Errorf("Size = %d for a manifest int cannot count", size)
 	}
 }
+
+// A file of no bytes has no chunks, and a file of some bytes has some. A
+// manifest saying otherwise cannot be assembled, and decodeManifest refuses it
+// -- a line nothing tested, which is how this was found: deleting it left the
+// whole structured suite green.
+//
+// What it protects is not an allocation but an ANSWER. Measured with the check
+// removed, a ten-byte manifest saying "one gibibyte, no chunks" decodes to
+// total=1073741824 with ok=true, and then: Size reports a gibibyte and says so
+// is true, Missing reports nothing missing because there are no keys to miss,
+// and Get refuses -- len 0, ok false. So a reader is shown a gibibyte that
+// nothing is waiting for and that never arrives, which is worse than an error
+// because there is nothing to retry and nothing to report.
+func TestAManifestWhoseSizeAndChunkCountDisagreeIsNotAFile(t *testing.T) {
+	gibibyteWithNoChunks := binary.AppendUvarint(nil, 1<<30)
+	gibibyteWithNoChunks = binary.AppendUvarint(gibibyteWithNoChunks, 0)
+
+	noBytesButAChunk := binary.AppendUvarint(nil, 0)
+	noBytesButAChunk = binary.AppendUvarint(noBytesButAChunk, 1)
+	noBytesButAChunk = append(noBytesButAChunk, make([]byte, 32)...) // one (fake) digest
+
+	for _, tt := range []struct {
+		name  string
+		value []byte
+	}{
+		{"a gibibyte with no chunks", gibibyteWithNoChunks},
+		{"no bytes but a chunk", noBytesButAChunk},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if total, keys, ok := decodeManifest(tt.value); ok {
+				t.Errorf("decodeManifest accepted it: total=%d keys=%d", total, len(keys))
+			}
+			b := NewBlobs(1)
+			if _, err := b.manifest.Set("claim.bin", tt.value); err != nil {
+				t.Fatal(err)
+			}
+			if size, ok := b.Size("claim.bin"); ok {
+				t.Errorf("Blobs.Size reports %d bytes for a manifest that cannot be assembled", size)
+			}
+			if got, ok := b.Get("claim.bin"); ok {
+				t.Errorf("Blobs.Get handed back %d bytes as a complete file", len(got))
+			}
+			if missing := b.Missing("claim.bin"); missing != 0 {
+				t.Logf("Missing reports %d, which is only meaningful for a file this reads at all", missing)
+			}
+		})
+	}
+
+	// The control: a manifest whose two numbers agree is still a file, so the
+	// check above refuses a shape rather than everything.
+	real := NewBlobs(1)
+	if _, err := real.Put("real.bin", []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if size, ok := real.Size("real.bin"); !ok || size != 5 {
+		t.Fatalf("an ordinary file reads as size=%d ok=%v, so this test refuses everything", size, ok)
+	}
+}
