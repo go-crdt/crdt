@@ -75,6 +75,18 @@ func TestAManifestThatWrapsOn32BitIsRefusedThere(t *testing.T) {
 // and Get refuses -- len 0, ok false. So a reader is shown a gibibyte that
 // nothing is waiting for and that never arrives, which is worse than an error
 // because there is nothing to retry and nothing to report.
+//
+// The shape has a name. Sassaman, Patterson, Bratus, Locasto and Shubina
+// (Security Applications of Formal Language Theory, Dartmouth TR2011-709,
+// 2011) call it a parse tree differential: they found X.509 cases where "two
+// implementations of the X.509 system behaved differently when given the same
+// input", a certificate authority signing what it read one way while the
+// browser read the same bytes another. This is that, inside ONE program:
+// without the check, Size and Missing read these ten bytes as a file of a
+// gibibyte with nothing outstanding, and Get reads the same ten bytes as not a
+// file. The recognizer let through an input the rest of the package cannot
+// agree on, which is the reason a bound like this belongs in the decoder and
+// not in each caller.
 func TestAManifestWhoseSizeAndChunkCountDisagreeIsNotAFile(t *testing.T) {
 	gibibyteWithNoChunks := binary.AppendUvarint(nil, 1<<30)
 	gibibyteWithNoChunks = binary.AppendUvarint(gibibyteWithNoChunks, 0)
