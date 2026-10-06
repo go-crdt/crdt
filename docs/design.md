@@ -951,17 +951,37 @@ every line runs; it does not say anything would notice if a line were wrong.
 The difference is measurable: delete a guard, run the suite, see whether it
 still passes.
 
-Done on 2026-10-04 over the 104 refusals and bounds in the three files that
-read bytes somebody else wrote — `op.go`, `snapshot.go` and `utf16.go` — each
-found by walking the AST for an `if` whose body returns a refusal:
+Done over every refusal and bound in the files that read bytes somebody else
+wrote, each found by walking the AST for an `if` whose body returns a refusal —
+`op.go`, `snapshot.go` and `utf16.go` on 2026-10-04, and `structured`'s three
+decoding files on 2026-10-06:
 
-| | |
-| --- | --- |
-| deletions that did not compile, so not mutants at all | 29 |
-| caught by the suite | 63 |
-| survived | 12 |
+| | core | `structured` |
+| --- | --- | --- |
+| refusals and bounds taken as subjects | 104 | 38 |
+| deletions that did not compile, so not mutants at all | 29 | 19 |
+| caught by the suite | 63 | 14 |
+| survived | 12 | 5 |
+| of those, **real** | 0 | **1** |
 
-**All twelve are unproductive**, in Petrović and Ivanković's sense: "either
+### The one that was real
+
+`decodeManifest` refuses a blob manifest whose byte count and chunk count
+disagree — "a file of no bytes has no chunks, and a file of some bytes has
+some" — and nothing tested that line. What it protects is an ANSWER rather than
+an allocation. Measured with the check removed, a ten-byte manifest saying *one
+gibibyte, no chunks* decodes to `total=1073741824, ok=true`, and then
+[Blobs.Size] reports a gibibyte and says so is true, [Blobs.Missing] reports
+nothing missing because there are no keys to miss, and [Blobs.Get] hands back
+nothing. A gibibyte that nothing is waiting for and that never arrives, which
+is worse than an error: there is nothing to retry and nothing to report.
+`TestAManifestWhoseSizeAndChunkCountDisagreeIsNotAFile` holds it now, both
+directions of the disagreement, with an ordinary five-byte file as the control.
+
+### The sixteen that were not
+
+**All twelve of the core run, and four of the five in `structured`, are
+unproductive**, in Petrović and Ivanković's sense: "either
 trivially equivalent to the original program or it is detectable, but adding a
 test for it would not improve the test suite" (*Practical Mutation Testing at
 Scale: A View From Google*, IEEE TSE, 2021). They fall into two families, and
@@ -988,6 +1008,10 @@ looks like from a single-layer mutation:
   column's length is checked against the bytes before the column is read, and
   **all 102 truncations of a real snapshot are refused with the check and
   without it**.
+
+`structured`'s four are the same shape: a varint that will not decode, refused
+again by the rule that any trailing byte is refused, so the answer is the same
+with the check and without it.
 
 That last one was worth measuring rather than reasoning about, and so was the
 fuzzer: 27.7 million executions against the mutated `column.open` found
