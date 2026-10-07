@@ -951,20 +951,24 @@ every line runs; it does not say anything would notice if a line were wrong.
 The difference is measurable: delete a guard, run the suite, see whether it
 still passes.
 
-Done over every refusal and bound in the files that read bytes somebody else
-wrote, each found by walking the AST for an `if` whose body returns a refusal —
-`op.go`, `snapshot.go` and `utf16.go` on 2026-10-04, and `structured`'s three
-decoding files on 2026-10-06:
+Done over every refusal and bound in this module, each found by walking the AST
+for an `if` whose body returns a refusal — `op.go`, `snapshot.go` and `utf16.go`
+first, then `structured`'s three decoding files, then the rest of `structured`:
 
-| | core | `structured` |
-| --- | --- | --- |
-| refusals and bounds taken as subjects | 104 | 38 |
-| deletions that did not compile, so not mutants at all | 29 | 19 |
-| caught by the suite | 63 | 14 |
-| survived | 12 | 5 |
-| of those, **real** | 0 | **1** |
+| | core | `structured` decoders | `structured`, the rest |
+| --- | --- | --- | --- |
+| refusals and bounds taken as subjects | 104 | 38 | 242 |
+| deletions that did not compile, so not mutants at all | 29 | 19 | 101 |
+| caught by the suite | 63 | 14 | 108 |
+| survived | 12 | 5 | 33 |
+| of those, **real** | 0 | **1** | **4** |
 
-### The one that was real
+**384 subjects, 149 of them not mutants, 185 caught, 50 survivors, 5 real.** The
+sibling repository ran the same thing over its wire and its stores; the two
+together are on the [methodology
+page](https://go-crdt.github.io/docs/latest/methodology/).
+
+### The five that were real
 
 `decodeManifest` refuses a blob manifest whose byte count and chunk count
 disagree — "a file of no bytes has no chunks, and a file of some bytes has
@@ -978,10 +982,33 @@ is worse than an error: there is nothing to retry and nothing to report.
 `TestAManifestWhoseSizeAndChunkCountDisagreeIsNotAFile` holds it now, both
 directions of the disagreement, with an ordinary five-byte file as the control.
 
-### The sixteen that were not
+#### And four more, from the rest of `structured`
 
-**All twelve of the core run, and four of the five in `structured`, are
-unproductive**, in Petrović and Ivanković's sense: "either
+- **`Blocks.SetType("")` takes the type off by DELETING the field**, not by
+  writing an empty value. A block with an empty type and a block with no type
+  read the same, so nothing noticed — but a delete against a concurrent
+  `SetType("heading")` is a removal against a write, and an empty set against
+  the same write is two writes. `TestTheEmptyTypeTakesTheTypeOffRatherThanWritingAnEmptyOne`.
+- **A varint count used as an index.** `binary.Uvarint` returns a NEGATIVE count
+  for an encoding that overflows sixty-four bits, and the line after one of
+  these is `value[used:]`, which panics. Twelve bytes of continuation bits in a
+  peer's ink operation gave `slice bounds out of range [-11:]` with
+  `decodePoint`'s first check deleted. Both the case and the class are pinned:
+  `TestEveryVarintCountIsCheckedBeforeItIsUsed` walks the syntax tree and
+  requires each of the twenty decodes to be followed by an `if` testing its
+  count.
+- **An unknown mark kind.** The only question asked of a decoded mark below is
+  `m.kind == markAdd`; everything else is a REMOVAL. Accepting an unknown kind
+  takes formatting away here while a build that knows the kind does something
+  else — two replicas of one document showing different text, from bytes both
+  accepted. `TestAnUnknownMarkKindIsRefused`.
+- **A cleared reading with trailing bytes.** Replicas here are compared on their
+  encoded state, so a byte nobody reads is still a difference between two
+  documents that agree. `TestAClearedReadingWithTrailingBytesIsRefused`.
+
+### The forty-five that were not
+
+**Forty-five of the fifty are unproductive**, in Petrović and Ivanković's sense: "either
 trivially equivalent to the original program or it is detectable, but adding a
 test for it would not improve the test suite" (*Practical Mutation Testing at
 Scale: A View From Google*, IEEE TSE, 2021). They fall into two families, and
