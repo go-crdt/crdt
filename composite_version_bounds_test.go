@@ -104,3 +104,45 @@ func TestASmallVersionCannotAskTheDecoderForALargeAllocation(t *testing.T) {
 		})
 	}
 }
+
+// A count that promises one more part than the bytes hold is refused, not read
+// past.
+//
+// This pins the OUTCOME, and deliberately not the guard it looks like it pins.
+// The sweep also reported the two "if !ok" refusals inside the loop as
+// survivors, and they are survivors for a reason: each is unreachable while the
+// other stands. Deleting the one after r.bytes(1) leaves kind nil, but the read
+// of the name underneath it fails on the same empty buffer and refuses first, so
+// kind[0] is never evaluated. Deleting the one after r.sized() leaves name nil,
+// which is the empty string, which no part name may be -- so part.valid()
+// refuses and the answer is the same ErrMalformed. Both were deleted and this
+// test stayed green, which is the honest verdict on them: equivalent mutants,
+// not defects.
+//
+// What is worth holding is what a caller sees, which no refactoring of which
+// guard fires may change: a full encoding whose count lies about how many parts
+// follow is refused rather than read past the end.
+func TestAPartCountThatOutrunsTheBytesIsRefused(t *testing.T) {
+	one := binary.AppendUvarint(nil, 1) // one site
+	one = binary.AppendUvarint(one, 7)
+	one = binary.AppendUvarint(one, 1) // ... and one part, which is the truth
+	one = append(one, byte(PartText))
+	one = binary.AppendUvarint(one, 1)
+	one = append(one, 'a')
+	one = binary.AppendUvarint(one, 1) // one entry
+	one = binary.AppendUvarint(one, 0) // site index
+	one = binary.AppendUvarint(one, 1) // sequence
+
+	var control CompositeVersion
+	if err := control.UnmarshalBinary(one); err != nil {
+		t.Fatalf("the control does not decode: %v", err)
+	}
+
+	lying := append([]byte(nil), one...)
+	lying[2] = 2 // the same bytes, now claiming two parts
+
+	var got CompositeVersion
+	if err := got.UnmarshalBinary(lying); !errors.Is(err, ErrMalformed) {
+		t.Fatalf("a %d-byte version claiming two parts and holding one gave %v, want ErrMalformed", len(lying), err)
+	}
+}
