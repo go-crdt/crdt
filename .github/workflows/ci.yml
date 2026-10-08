@@ -31,29 +31,27 @@ jobs:
       # one of these run blocks in half parsed fine, passed a yaml.safe_load
       # check, and only failed on the runner with "unexpected end of file". So
       # the shell is parsed here too, which is the control that catches it.
+      # A workflow whose shell is broken is still valid YAML: an edit here split
+      # a run block between a loop's body and its `done`, parsed, and failed on
+      # the runner (#138).
+      #
+      # actionlint is the tool for this and it already existed -- a Go program
+      # that runs shellcheck over every run block and also checks the workflow's
+      # schema, its expressions and its runner labels. Two things measured on
+      # 2026-10-08 before trusting it: at the default severity it fails on
+      # STYLE, so shellcheck is asked for errors only, where it still catches an
+      # unclosed loop (SC1061/SC1062/SC1072) and an unterminated heredoc
+      # (SC1044/SC1072/SC1073); and it SKIPS shellcheck silently when it cannot
+      # find it -- exit 0, no output -- so its presence is asserted first.
       - name: Every run block must parse as shell
         run: |
-          python3 - <<'EOF'
-          import subprocess, sys, yaml
-          bad = []
-          for name in ("ci.yml",):
-              doc = yaml.safe_load(open(f".github/workflows/{name}"))
-              for job, spec in (doc.get("jobs") or {}).items():
-                  for step in spec.get("steps") or []:
-                      src = step.get("run")
-                      if not src:
-                          continue
-                      r = subprocess.run(["bash", "-n"], input=src, text=True,
-                                         capture_output=True)
-                      if r.returncode != 0:
-                          bad.append((name, job, step.get("name", "(unnamed)"),
-                                      r.stderr.strip().splitlines()[-1]))
-          for name, job, step, err in bad:
-              print(f"::error file=.github/workflows/{name}::{job} / {step}: {err}")
-          sys.exit(1 if bad else 0)
-          EOF
+          command -v shellcheck >/dev/null || {
+            echo "::error::shellcheck is not installed, and actionlint would skip it and pass"
+            exit 1
+          }
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          "$(go env GOPATH)/bin/actionlint" -shellcheck="shellcheck -S error" .github/workflows/ci.yml
 
-  # Build, vet, race-test, and enforce 100% statement coverage on three OSes.
   vulnerabilities:
     name: known vulnerabilities
     runs-on: ubuntu-latest
@@ -66,62 +64,16 @@ jobs:
         run: go install golang.org/x/vuln/cmd/govulncheck@latest
       - name: Scan, and judge the findings rather than the exit status
         run: |
-          # This module requires nothing, so today the subject is the standard
-          # library -- which is the half nobody thinks to scan, and the half a
-          # toolchain bump changes under you.
+          # This module requires nothing, so the subject is the standard
+          # library: the half nobody thinks to scan, and the half a toolchain
+          # bump changes underneath you.
           #
-          # The exit status is not the gate: govulncheck exits 0 over an
-          # advisory it decides a module does not call, measured in the sibling
-          # repository on GO-2026-6443. A lane reading the status would be
-          # silent about exactly the finding somebody has to decide about.
+          # The exit status is not the gate. Measured in the sibling repository
+          # on GO-2026-6443, govulncheck exits 0 over an advisory it decides a
+          # module does not call. tools/vulngate reads the findings, and unlike
+          # an inline script it has tests of its own.
           govulncheck -format json ./... > findings.json
-          python3 - findings.json <<'EOF'
-          import json, sys
-
-          text = open(sys.argv[1], encoding="utf8").read()
-          dec, i = json.JSONDecoder(), 0
-          kinds, findings = {}, []
-          while i < len(text):
-              while i < len(text) and text[i] in " \n\r\t":
-                  i += 1
-              if i >= len(text):
-                  break
-              obj, i = dec.raw_decode(text, i)
-              for k in obj:
-                  kinds[k] = kinds.get(k, 0) + 1
-              if "finding" in obj:
-                  findings.append(obj["finding"])
-
-          # A scan that did not run reports nothing wrong. govulncheck exits 0 over an
-          # advisory it decided we do not call, so the exit status cannot be the gate.
-          if not kinds.get("config") or not kinds.get("osv"):
-              print("::error::govulncheck produced no config or no advisories: it did not run")
-              sys.exit(1)
-          print(f"advisories in the database: {kinds.get('osv', 0)}; findings against this module: {len(findings)}")
-
-          released = lambda v: v and v.count(".") == 2 and "-" not in v and "+" not in v
-          bad = False
-          seen = set()
-          for f in findings:
-              osv, fix = f.get("osv"), f.get("fixed_version")
-              trace = f.get("trace") or []
-              called = any(fr.get("function") for fr in trace)
-              key = (osv, called)
-              if key in seen:
-                  continue
-              seen.add(key)
-              if called:
-                  where = next((fr for fr in trace if fr.get("function")), {})
-                  print(f"::error::{osv} is reachable from this module: {where.get('module')}.{where.get('function')} (fixed in {fix})")
-                  bad = True
-              elif released(fix):
-                  print(f"::error::{osv} is not called from here, and a RELEASED fix exists ({fix}): upgrade rather than carry it")
-                  bad = True
-              else:
-                  print(f"::notice::{osv} is in a module this one requires, not called from here, "
-                        f"and has no released fix yet (upstream fix: {fix})")
-          sys.exit(1 if bad else 0)
-          EOF
+          cd tools && go run ./vulngate ../findings.json
 
   test:
     name: test (${{ matrix.os }})
