@@ -146,3 +146,39 @@ func TestAPartCountThatOutrunsTheBytesIsRefused(t *testing.T) {
 		t.Fatalf("a %d-byte version claiming two parts and holding one gave %v, want ErrMalformed", len(lying), err)
 	}
 }
+
+// The same claim, one layer down: a version vector on its own.
+//
+// [VersionVector.UnmarshalBinary] is the decoder a composite version is made of,
+// and it reaches a peer by itself -- collab sends one in every Welcome. Its
+// count is believed in the same way and sizes the same kind of allocation.
+//
+// Its OTHER survivor from the same sweep, the "used <= 0" after the site varint,
+// is not here and should not be: deleting it leaves rest unmoved, and the
+// sequence number is then read from the same bytes by the same function and
+// fails in the same way. Same ErrMalformed, no path between them. An equivalent
+// mutant, measured rather than assumed.
+func TestASmallVersionVectorCannotAskForALargeAllocation(t *testing.T) {
+	const claimed = 1 << 24
+	const ceiling = 1 << 20
+
+	in := binary.AppendUvarint(nil, claimed)
+	if len(in) > 8 {
+		t.Fatalf("the input is %d bytes, which is no longer the point", len(in))
+	}
+
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	var v VersionVector
+	err := v.UnmarshalBinary(in)
+	runtime.ReadMemStats(&after)
+
+	if !errors.Is(err, ErrMalformed) {
+		t.Fatalf("%d bytes claiming %d entries gave %v, want ErrMalformed", len(in), claimed, err)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > ceiling {
+		t.Errorf("%d bytes claiming %d entries cost %d bytes of allocation, want under %d",
+			len(in), claimed, grew, ceiling)
+	}
+}
