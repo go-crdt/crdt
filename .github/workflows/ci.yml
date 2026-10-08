@@ -316,7 +316,7 @@ jobs:
       - name: Locate the fuzz corpus
         run: echo "FUZZ_CORPUS=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
       - name: Restore the corpus for ${{ matrix.pkg }} ${{ matrix.target }}
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.FUZZ_CORPUS }}
           key: fuzz-corpus-${{ runner.os }}-${{ matrix.pkg }}-${{ matrix.target }}-${{ github.run_id }}
@@ -429,7 +429,7 @@ jobs:
       - name: Locate the fuzz corpus
         run: echo "FUZZ_CORPUS=$(go env GOCACHE)/fuzz" >> "$GITHUB_ENV"
       - name: Restore the fuzz corpus
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ${{ env.FUZZ_CORPUS }}
           key: fuzz-corpus-${{ runner.os }}-${{ github.run_id }}
