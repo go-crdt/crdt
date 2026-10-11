@@ -77,12 +77,25 @@ jobs:
           # repository and go-crdt/collab each held a byte-identical copy, so a
           # fix had to be applied twice.
           #
-          # -go holds the scan to the toolchain this job pins. Standard library
-          # findings are decided by that one version, so a lane that silently
-          # resolved another answered a different question -- which is this
-          # job's whole subject.
-          govulncheck -format json ./... > findings.json
-          vulngate -go go1.27.2 findings.json
+          # ⛔ `|| true` AND NO pipefail, deliberately. The default shell here is
+          # `bash -e`, so without this a non-zero govulncheck aborts the step
+          # BEFORE the gate runs -- which hands the lane straight back to the
+          # exit status the gate exists not to read. An unread scan is caught by
+          # vulngate instead, which believes a run only when it carried a config
+          # and an SBOM.
+          #
+          # ⛔ -go holds the scan to the toolchain it ACTUALLY RAN UNDER, from
+          # `go env GOVERSION` rather than a literal. A literal is a second place
+          # the version is written, and the one that drifts from the go-version
+          # this job pins. Standard library findings are decided by one version,
+          # so a lane that silently resolved another answered a different
+          # question -- which is this job's whole subject.
+          #
+          # This shape is go-fleettools/fleettools#71's, which wired the same
+          # gate into its own repository and got these two right first.
+          govulncheck -format json ./... > findings.json || true
+          test -s findings.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
+          vulngate -go "$(go env GOVERSION)" findings.json
 
   test:
     name: test (${{ matrix.os }})
