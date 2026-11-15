@@ -78,8 +78,16 @@ jobs:
           #
           # ⭐ What the lane GAINS at v0.125.0, read from its --help rather
           # than assumed: --max-db-age, which refuses a scan whose vulnerability
-          # database is older than 504h. A judge that believed a stale database
-          # was the remaining way this lane could pass for the wrong reason.
+          # database is older than 504h, and a summary line stating the
+          # toolchain, the database's date and how many advisories were in it.
+          #
+          # ⚠ That closes the way a stale DATABASE could be believed, and not
+          # more than that. A review caught this comment claiming it was "the
+          # remaining way this lane could pass for the wrong reason", which is
+          # false: `govulncheck@latest` floats, so two runs can disagree, and
+          # `|| true` on the scan is answered by vulngate's config-and-SBOM
+          # check rather than by anything here. A gate's own comment
+          # overstating its reach is how the next reader stops looking.
           go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.125.0
       - name: Scan, and judge the findings rather than the exit status
         run: |
@@ -119,7 +127,16 @@ jobs:
           # gate into its own repository and got these two right first.
           govulncheck -format json ./... > findings.json || true
           test -s findings.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
-          vulngate --go "$(go env GOVERSION)" findings.json
+          # ⛔ THE PIN IS READ INTO A VARIABLE AND CHECKED, because an empty
+          # --go is ACCEPTED: vulngate's help says it then "accepts whatever it
+          # reports", which is the one question this step exists to ask.
+          # Measured: `vulngate --go "" findings.json` exits 0 and prints the
+          # same line as a pinned run, so the loss is invisible. A command
+          # substitution that fails inside an argument does not trip `bash -e`,
+          # so without this the pin could drop in silence.
+          goversion="$(go env GOVERSION)"
+          test -n "$goversion" || { echo "::error::go env GOVERSION printed nothing, so the scan would be judged against no toolchain"; exit 1; }
+          vulngate --go "$goversion" findings.json
 
   test:
     name: test (${{ matrix.os }})
