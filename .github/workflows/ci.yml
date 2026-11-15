@@ -9,7 +9,12 @@ on:
 permissions:
   contents: read
 
-# Track the latest stable Go (org convention). go.mod floor is 1.26.4.
+# ⛔ Every setup-go step below reads go.mod. There is no Go version in this
+# file, deliberately: this comment used to say "Track the latest stable Go
+# (org convention). go.mod floor is 1.26.4." and it was wrong twice over -- the
+# directive was 1.27.2, not 1.26.4, and the lanes pinned a literal rather than
+# tracking anything. A number here is the second place the version is written,
+# which is what the vulnerability lane's own comment argues against.
 jobs:
   # Every file must be gofmt-clean.
   gofmt:
@@ -18,7 +23,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -59,7 +64,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
@@ -108,7 +113,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       - run: go version
       - run: go vet ./...
       - run: go build ./...
@@ -131,7 +136,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       - uses: actions/setup-node@v7
         with:
           node-version: '26'
@@ -154,7 +159,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       - name: Cache the trace
         id: trace
         uses: actions/cache@v6
@@ -209,7 +214,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       - run: go env GOARCH && go test ./...
 
   # The 32-bit targets, built and vetted rather than run: qemu-user for them is
@@ -230,7 +235,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       - name: Build and vet, tests included
         env:
           GOOS: linux
@@ -257,7 +262,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       # apt has sat on this step for the better part of an hour, more than once,
       # on nothing this repository does. It is bounded and retried rather than
       # waited on, and bounding it is what identified the culprit: three
@@ -350,7 +355,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
 
       # What a target found last time, so that 120 seconds a run accumulate
       # rather than starting over. go test writes the inputs it found
@@ -456,7 +461,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version: 1.27.4
+          go-version-file: go.mod
       # What `go test -fuzz` discovers lives in $GOCACHE/fuzz, and setup-go's
       # cache does restore -- the logs say "Cache restored successfully" -- but on
       # an exact key hit actions/cache does not write back, so nothing discovered
