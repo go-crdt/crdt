@@ -9,7 +9,12 @@ on:
 permissions:
   contents: read
 
-# Track the latest stable Go (org convention). go.mod floor is 1.26.4.
+# ⛔ Every setup-go step below reads go.mod. There is no Go version in this
+# file, deliberately: this comment used to say "Track the latest stable Go
+# (org convention). go.mod floor is 1.26.4." and it was wrong twice over -- the
+# directive was 1.27.2, not 1.26.4, and the lanes pinned a literal rather than
+# tracking anything. A number here is the second place the version is written,
+# which is what the vulnerability lane's own comment argues against.
 jobs:
   # Every file must be gofmt-clean.
   gofmt:
