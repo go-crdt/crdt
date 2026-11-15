@@ -68,7 +68,27 @@ jobs:
       - name: Install govulncheck and the gate that judges it
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.84.1
+          # ⛔ THE JUDGE IS THE WORST PLACE FOR A STALE PIN. This read v0.84.1
+          # while the module was at v0.125.0 -- forty-one minor versions of the
+          # thing that decides what a vulnerability finding means. Renovate's
+          # open proposal was v0.121.0, already behind by the time it was read:
+          # a version inside a `run:` block is seen by no manager, and the
+          # organisation's one customManager matches `go install <mod>@vN`,
+          # which is why this one at least gets offered at all.
+          #
+          # ⭐ What the lane GAINS at v0.125.0, read from its --help rather
+          # than assumed: --max-db-age, which refuses a scan whose vulnerability
+          # database is older than 504h, and a summary line stating the
+          # toolchain, the database's date and how many advisories were in it.
+          #
+          # ⚠ That closes the way a stale DATABASE could be believed, and not
+          # more than that. A review caught this comment claiming it was "the
+          # remaining way this lane could pass for the wrong reason", which is
+          # false: `govulncheck@latest` floats, so two runs can disagree, and
+          # `|| true` on the scan is answered by vulngate's config-and-SBOM
+          # check rather than by anything here. A gate's own comment
+          # overstating its reach is how the next reader stops looking.
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.125.0
       - name: Scan, and judge the findings rather than the exit status
         run: |
           # This module requires nothing, so the subject is the standard
@@ -89,18 +109,34 @@ jobs:
           # vulngate instead, which believes a run only when it carried a config
           # and an SBOM.
           #
-          # ⛔ -go holds the scan to the toolchain it ACTUALLY RAN UNDER, from
+          # ⛔ --go holds the scan to the toolchain it ACTUALLY RAN UNDER, from
           # `go env GOVERSION` rather than a literal. A literal is a second place
-          # the version is written, and the one that drifts from the go-version
-          # this job pins. Standard library findings are decided by one version,
-          # so a lane that silently resolved another answered a different
-          # question -- which is this job's whole subject.
+          # the version is written, and the one that drifts from the toolchain
+          # this job resolves. Standard library findings are decided by one
+          # version, so a lane that silently resolved another answered a
+          # different question -- which is this job's whole subject.
+          #
+          # ⚠ TWO DASHES, and it used to be one. vulngate's own --help says the
+          # single-dash spelling is accepted with a warning on stderr and "that
+          # shim will not outlive the next major", naming thirteen fleet lanes
+          # that still call it the old way. A lane whose correctness rests on a
+          # compatibility shim is a lane that breaks on an upgrade nobody
+          # connected to it, so this one stops resting on it.
           #
           # This shape is go-fleettools/fleettools#71's, which wired the same
           # gate into its own repository and got these two right first.
           govulncheck -format json ./... > findings.json || true
           test -s findings.json || { echo "::error::govulncheck wrote nothing at all"; exit 1; }
-          vulngate -go "$(go env GOVERSION)" findings.json
+          # ⛔ THE PIN IS READ INTO A VARIABLE AND CHECKED, because an empty
+          # --go is ACCEPTED: vulngate's help says it then "accepts whatever it
+          # reports", which is the one question this step exists to ask.
+          # Measured: `vulngate --go "" findings.json` exits 0 and prints the
+          # same line as a pinned run, so the loss is invisible. A command
+          # substitution that fails inside an argument does not trip `bash -e`,
+          # so without this the pin could drop in silence.
+          goversion="$(go env GOVERSION)"
+          test -n "$goversion" || { echo "::error::go env GOVERSION printed nothing, so the scan would be judged against no toolchain"; exit 1; }
+          vulngate --go "$goversion" findings.json
 
   test:
     name: test (${{ matrix.os }})
