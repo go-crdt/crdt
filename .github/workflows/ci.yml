@@ -363,15 +363,33 @@ jobs:
           #   FAIL github.com/go-crdt/crdt 600.135s
           #
           # and the commit before it was green, having touched nothing in this
-          # job: the previous run's riscv64 lane took 310s end to end, so the
-          # runner was about twice as slow that hour. Under emulation that is
-          # ordinary, and nothing here should turn it into a red default branch.
+          # job: 684af65's diff is 43 lines inside the vulnerability job and
+          # names neither qemu nor timeout.
           #
-          # ⛔ 30m, and the number is chosen rather than measured: the green lane
-          # is 310s, so this is roughly six times its own worst reading, and a
-          # genuine hang still fails inside it rather than at GitHub's job
-          # ceiling. It is a ceiling on PATIENCE, not a performance budget --
-          # a lane that starts needing 25 minutes is a finding of its own.
+          # ⭐ WHAT IT IS, measured per PACKAGE over the green run and a re-run
+          # of the red one -- and the timeout is per TEST BINARY, so these are
+          # the clocks that matter rather than the job's:
+          #
+          #   package      993138b green   684af65 attempt 2
+          #   root            276.028s        600.139s (timed out)
+          #   structured      102.606s        233.379s
+          #   awareness         0.217s          0.221s   <- the control
+          #
+          # Both working packages scaled by about 2.2x while the trivial one did
+          # not move at all, under the SAME emulator (both logs print "running
+          # riscv64 under qemu-riscv64", so the lane's two-name search is not the
+          # variable) and the same code. A code change would slow particular
+          # tests; a uniform factor with an unmoved control is a slower machine.
+          # Two slow runs (15-11 16:27, 16-11 07:47) against one fast one
+          # (15-11 15:56): the lane's speed varies by more than 2x between
+          # runners, and the 600s default sits inside that band.
+          #
+          # ⛔ 30m, and the number is CHOSEN rather than measured: the slowest
+          # reading of the slowest package is 600s+, so this is about three
+          # times it, and a genuine hang still fails inside it rather than at
+          # GitHub's job ceiling. It is a ceiling on PATIENCE, not a performance
+          # budget -- a lane that starts needing 25 minutes is a finding of its
+          # own, and this comment is where to come back to.
           #
           # ⚠ WHY ONLY THIS LANE, measured on the last green run rather than
           # applied everywhere: the whole suite runs here as ONE invocation, so
