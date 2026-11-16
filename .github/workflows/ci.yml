@@ -355,7 +355,32 @@ jobs:
           # Printed on purpose: without it, "ran under emulation" and "skipped" are
           # indistinguishable from a green tick.
           echo "running ${{ matrix.goarch }} under $q"
-          GOARCH=${{ matrix.goarch }} go test -exec="$q" ./...
+          # ⛔⛔ THE TIMEOUT IS STATED BECAUSE THE DEFAULT IS 10 MINUTES AND THIS
+          # LANE LIVES NEAR IT. main went red on 2026-11-15 at 684af65 with
+          #
+          #   panic: test timed out after 10m0s
+          #   running tests: TestDeriveSiteIDAtEduGAINScale (1m28s)
+          #   FAIL github.com/go-crdt/crdt 600.135s
+          #
+          # and the commit before it was green, having touched nothing in this
+          # job: the previous run's riscv64 lane took 310s end to end, so the
+          # runner was about twice as slow that hour. Under emulation that is
+          # ordinary, and nothing here should turn it into a red default branch.
+          #
+          # ⛔ 30m, and the number is chosen rather than measured: the green lane
+          # is 310s, so this is roughly six times its own worst reading, and a
+          # genuine hang still fails inside it rather than at GitHub's job
+          # ceiling. It is a ceiling on PATIENCE, not a performance budget --
+          # a lane that starts needing 25 minutes is a finding of its own.
+          #
+          # ⚠ WHY ONLY THIS LANE, measured on the last green run rather than
+          # applied everywhere: the whole suite runs here as ONE invocation, so
+          # one clock covers everything. `fuzz (hostile)` is the longest job at
+          # 486s but spends it across many short `go test -fuzz` calls, each
+          # with its own clock; the next single-invocation lane is
+          # `test (windows-latest)` at 289s, which is not near enough to buy a
+          # change here. The others are 245s and below.
+          GOARCH=${{ matrix.goarch }} go test -timeout 30m -exec="$q" ./...
 
   # Every decoder here reads bytes from other participants. The seed corpus runs
   # in the ordinary test job; this one spends real time looking for new inputs,
