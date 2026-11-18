@@ -309,11 +309,17 @@ func (u *Undo) rename(old, now []crdt.ID) {
 	}
 	fix := func(steps []step) {
 		for _, s := range steps {
-			for _, e := range s.edits {
+			for k := range s.edits {
+				e := &s.edits[k]
 				for i, id := range e.ids {
 					if n, ok := to[id]; ok {
 						e.ids[i] = n
 					}
+				}
+				// A removal that followed one of these goes back after the new one:
+				// the old one is gone, and the text would close up to wherever it was.
+				if n, ok := to[e.after]; ok {
+					e.after = n
 				}
 			}
 		}

@@ -235,3 +235,74 @@ func TestUndoingAGroupAfterUndoingARemovalInIt(t *testing.T) {
 		t.Fatalf("after undoing the typing: %q, want it all taken back", s)
 	}
 }
+
+// Doing a group again puts its pieces back in the order they were typed in, even
+// though every one of them is a new character: a piece placed after another
+// follows the new one, not the one that is gone.
+func TestRedoingAGroupKeepsItsPiecesInOrder(t *testing.T) {
+	u := NewUndo(crdt.New(1))
+	u.Begin()
+	if _, err := u.Insert(0, "one "); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := u.Insert(4, "two"); err != nil {
+		t.Fatal(err)
+	}
+	u.Commit()
+	for round := range 3 {
+		if _, err := u.Undo(); err != nil {
+			t.Fatal(err)
+		}
+		if s := u.Doc().String(); s != "" {
+			t.Fatalf("round %d: after undo %q", round, s)
+		}
+		if _, err := u.Redo(); err != nil {
+			t.Fatal(err)
+		}
+		if s := u.Doc().String(); s != "one two" {
+			t.Fatalf("round %d: after redo %q, want the group back in order", round, s)
+		}
+	}
+}
+
+// A group whose pieces were put back as new characters, while a peer had typed
+// next to them, comes back in order and the replicas agree: the removal that
+// follows a character the undo replaced follows the new one.
+func TestRedoingAGroupBesideAPeersTyping(t *testing.T) {
+	u, theirs, send := pair(t)
+	step := func(want string, ops []crdt.Op, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		send(t, ops, theirs)
+		if u.Doc().String() != theirs.String() || u.Doc().String() != want {
+			t.Fatalf("want %q on both, mine %q theirs %q", want, u.Doc().String(), theirs.String())
+		}
+	}
+	u.Begin()
+	a, err := u.Insert(0, "one ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := u.Insert(4, "two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	u.Commit()
+	send(t, append(a, b...), theirs)
+	bang, err := theirs.Insert(7, "!")
+	if err != nil {
+		t.Fatal(err)
+	}
+	send(t, bang, u.Doc())
+
+	ops, err := u.Delete(0, 4)
+	step("two!", ops, err)
+	ops, err = u.Undo() // "one " again, as new characters
+	step("one two!", ops, err)
+	ops, err = u.Undo() // the typing
+	step("!", ops, err)
+	ops, err = u.Redo() // the typing again, in order, before the peer's "!"
+	step("one two!", ops, err)
+}
