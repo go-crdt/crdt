@@ -60,6 +60,10 @@ type edit struct {
 	ids []crdt.ID
 	// text is what a removal took out. Empty for an insertion.
 	text string
+	// gone names the characters a removal took out, one per rune of text. Putting
+	// the text back makes new characters, and every earlier edit that named the
+	// old ones has to be told, or undoing it afterwards would miss them.
+	gone []crdt.ID
 	// after is the character the removed text followed, so it can go back where
 	// it was rather than where that offset now is. The zero ID means the start
 	// of the document — which cannot move.
@@ -97,11 +101,16 @@ func (u *Undo) Delete(pos, count int) ([]crdt.Op, error) {
 	if err != nil {
 		return nil, err
 	}
+	names := make([]crdt.ID, 0, count)
+	for i := range count {
+		id, _ := u.doc.Anchor(pos + i) // in range: textAt checked it
+		names = append(names, id)
+	}
 	ops, err := u.doc.Delete(pos, count)
 	if err != nil {
 		return nil, err
 	}
-	u.record(edit{text: gone, after: after})
+	u.record(edit{text: gone, gone: names, after: after})
 	return ops, nil
 }
 
@@ -156,7 +165,11 @@ func (u *Undo) Commit() {
 }
 
 // CanUndo and CanRedo report whether there is anything to put back or do again.
-func (u *Undo) CanUndo() bool { return len(u.done) > 0 }
+// An open group with something in it counts: [Undo.Undo] closes it first, so it
+// is what an undo would put back.
+func (u *Undo) CanUndo() bool {
+	return len(u.done) > 0 || (u.open != nil && len(u.open.edits) > 0)
+}
 
 func (u *Undo) CanRedo() bool { return len(u.redo) > 0 }
 
@@ -232,6 +245,7 @@ func (u *Undo) invertOne(e edit) ([]crdt.Op, edit, error) {
 func (u *Undo) removeAgain(e edit) ([]crdt.Op, edit, error) {
 	var ops []crdt.Op
 	var text []rune
+	var gone []crdt.ID
 	var after crdt.ID
 	runes := []rune(u.doc.String())
 	// Highest offset first: removing a character moves everything after it.
@@ -249,13 +263,14 @@ func (u *Undo) removeAgain(e edit) ([]crdt.Op, edit, error) {
 			}
 		}
 		text = append([]rune{runes[pos]}, text...)
+		gone = append([]crdt.ID{id}, gone...)
 		got, err := u.doc.Delete(pos, 1)
 		if err != nil {
 			return nil, edit{}, err
 		}
 		ops = append(ops, got...)
 	}
-	return ops, edit{text: string(text), after: after}, nil
+	return ops, edit{text: string(text), gone: gone, after: after}, nil
 }
 
 // putBack re-inserts what a removal took out, after the character it followed.
@@ -282,5 +297,40 @@ func (u *Undo) putBack(e edit) ([]crdt.Op, edit, error) {
 	for _, op := range ops {
 		ids = append(ids, op.ID)
 	}
+	u.rename(e.gone, ids)
 	return ops, edit{ids: ids}, nil
+}
+
+// rename tells every edit still to be undone or redone that the characters in
+// old are now the ones in now, position for position. Without it, typing "ab",
+// removing the b and undoing that would leave a b the typing no longer names,
+// and undoing the typing would leave it behind.
+func (u *Undo) rename(old, now []crdt.ID) {
+	// Same length by construction: one operation per rune of the text put back.
+	to := make(map[crdt.ID]crdt.ID, len(old))
+	for i, id := range old {
+		to[id] = now[i]
+	}
+	fix := func(steps []step) {
+		for _, s := range steps {
+			for k := range s.edits {
+				e := &s.edits[k]
+				for i, id := range e.ids {
+					if n, ok := to[id]; ok {
+						e.ids[i] = n
+					}
+				}
+				// A removal that followed one of these goes back after the new one:
+				// the old one is gone, and the text would close up to wherever it was.
+				if n, ok := to[e.after]; ok {
+					e.after = n
+				}
+			}
+		}
+	}
+	fix(u.done)
+	fix(u.redo)
+	// Not the open group: it is empty whenever this runs. Undo closes it first,
+	// and a Redo only exists while nothing has been recorded since the Undo, which
+	// an edit in an open group would have been.
 }
