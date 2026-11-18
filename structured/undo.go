@@ -165,7 +165,11 @@ func (u *Undo) Commit() {
 }
 
 // CanUndo and CanRedo report whether there is anything to put back or do again.
-func (u *Undo) CanUndo() bool { return len(u.done) > 0 }
+// An open group with something in it counts: [Undo.Undo] closes it first, so it
+// is what an undo would put back.
+func (u *Undo) CanUndo() bool {
+	return len(u.done) > 0 || (u.open != nil && len(u.open.edits) > 0)
+}
 
 func (u *Undo) CanRedo() bool { return len(u.redo) > 0 }
 

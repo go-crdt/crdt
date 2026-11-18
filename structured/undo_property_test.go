@@ -306,3 +306,25 @@ func TestRedoingAGroupBesideAPeersTyping(t *testing.T) {
 	ops, err = u.Redo() // the typing again, in order, before the peer's "!"
 	step("one two!", ops, err)
 }
+
+// An undo reaches what is in a group that is still open, so a menu that asks
+// whether there is anything to undo must say yes while the word is being typed.
+func TestCanUndoCountsTheOpenGroup(t *testing.T) {
+	u := NewUndo(crdt.New(1))
+	u.Begin()
+	if u.CanUndo() {
+		t.Fatal("an empty group is nothing to undo")
+	}
+	if _, err := u.Insert(0, "w"); err != nil {
+		t.Fatal(err)
+	}
+	if !u.CanUndo() {
+		t.Fatal("the open group holds an edit and Undo would take it back")
+	}
+	if _, err := u.Undo(); err != nil {
+		t.Fatal(err)
+	}
+	if u.CanUndo() {
+		t.Fatal("nothing left")
+	}
+}
