@@ -330,7 +330,7 @@ func (u *Undo) rename(old, now []crdt.ID) {
 	}
 	fix(u.done)
 	fix(u.redo)
-	if u.open != nil {
-		fix([]step{*u.open})
-	}
+	// Not the open group: it is empty whenever this runs. Undo closes it first,
+	// and a Redo only exists while nothing has been recorded since the Undo, which
+	// an edit in an open group would have been.
 }
