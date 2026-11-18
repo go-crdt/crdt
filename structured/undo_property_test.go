@@ -19,16 +19,11 @@ import (
 // character removed, an undo or a redo of its own. No site's count is ever moved
 // by another site's undo. If one were, the final text would not match.
 //
-// The literature this follows: selective undo in a sequence CRDT rests on the
-// undo being a new operation that names the effect of the old one by identity,
-// not a restoration of an earlier state — Weiss, Urso and Molli, "Logoot-Undo:
-// Distributed Collaborative Editing System on P2P Networks", IEEE TPDS 21(8)
-// 2010; Sun, "Operational Transformation in Real-Time Group Editors: Issues,
-// Algorithms, and Achievements" (CSCW 1998), whose selective-undo requirement
-// is that an undo has the effect of its operation never having been executed,
-// whatever was executed after it, and Yu et al., "Undo in Collaborative
-// Editors" (the "ANYUNDO" scheme). This test checks that property directly
-// instead of assuming it from the construction.
+// The specification is the one on [Undo]: an undo is a new edit that names the
+// old one's effect by identity, not a restoration of an earlier state. This test
+// checks that property directly instead of assuming it from the construction.
+// (The selective-undo literature was not opened for this change, so none is
+// cited.)
 
 var siteAlphabets = [3]string{"abcdefgh", "ABCDEFGH", "01234567"}
 
