@@ -88,7 +88,7 @@ jobs:
           # `|| true` on the scan is answered by vulngate's config-and-SBOM
           # check rather than by anything here. A gate's own comment
           # overstating its reach is how the next reader stops looking.
-          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.135.0
+          go install github.com/go-fleettools/fleettools/cmd/vulngate@v0.149.0
       - name: Scan, and judge the findings rather than the exit status
         run: |
           # This module requires nothing, so the subject is the standard
@@ -608,7 +608,7 @@ jobs:
       # on this branch before it was pushed.
       - name: Install fuzzrun
         run: |
-          go install github.com/go-fleettools/fuzzrun@v0.7.0
+          go install github.com/go-fleettools/fuzzrun@v0.7.1
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Fuzz every target of ./structured
         run: |
