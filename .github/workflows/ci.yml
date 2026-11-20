@@ -577,38 +577,43 @@ jobs:
           n=$(find "$FUZZ_CORPUS" -type f 2>/dev/null | wc -l | tr -d ' ')
           echo "corpus on entry: ${n:-0} inputs"
           echo "FUZZ_CORPUS_IN=${n:-0}" >> "$GITHUB_ENV"
-      - name: Fuzz every hostile target
+      # ⛔ A DRAFT, TO BE MEASURED BEFORE IT IS MERGED (go-crdt/crdt#184).
+      #
+      # The loop this replaces drew the line by hand -- a failing input is red,
+      # `context deadline exceeded` is a warning -- and no auditor could read it,
+      # because its -fuzz pattern was a shell variable: `fuzzrun audit` reported
+      # these 15 targets UNCERTAIN. `fuzzrun run` is read by the audit as
+      # covering every target of its --package, and since v0.7.0
+      # (go-fleettools/fuzzrun#17) it draws the same line itself: CRASH when a
+      # failing input was written (checked first), DEADLINE when the output holds
+      # `context deadline exceeded` and none was, FAIL otherwise -- and only FAIL
+      # or CRASH exits 1. An empty package is exit 2, where the loop had its own
+      # "no hostile fuzz targets found" refusal.
+      #
+      # ⚠ What changes, stated rather than discovered:
+      #   - it fuzzes the 21 targets of ./structured, the 6 the matrix above also
+      #     names included, where the loop read only hostile_test.go's 15;
+      #   - two targets run at once (--jobs 2), each with two workers, where the
+      #     loop ran one; --max-load 6 waits before starting one while the
+      #     runner is busier than that, which is what the false reds of #30 and
+      #     #36 came from;
+      #   - no per-target -timeout 5m: a genuinely hung target falls back to go
+      #     test's own 10-minute default, a looser bound than before;
+      #   - a DEADLINE is a line in the log and the summary, not a ::warning::
+      #     annotation in the checks view.
+      # On PATH and called by its bare name, and that is not style: `fuzzrun
+      # audit` recognises a `fuzzrun run` step by the program name followed by
+      # whitespace, so `"$(go env GOPATH)/bin/fuzzrun" run` -- a quote after the
+      # name -- is not read as one, and the 15 targets come out GAP. Measured
+      # on this branch before it was pushed.
+      - name: Install fuzzrun
         run: |
-          targets=$(grep -rhoE 'func (Fuzz[A-Za-z0-9_]+)' structured/hostile_test.go | awk '{print $2}' | sort)
-          if [ -z "$targets" ]; then
-            echo "::error::no hostile fuzz targets found; this lane has stopped asking anything"
-            exit 1
-          fi
-          echo "targets: $(echo $targets | tr '\n' ' ')"
-          failed=""
-          for t in $targets; do
-            echo "--- $t"
-            if go test -run '^$' -fuzz "^$t\$" -fuzztime 30s -parallel 2 \
-                -timeout 5m ./structured 2>&1 | tee fuzz.log; then
-              continue
-            fi
-            if grep -q 'Failing input written to' fuzz.log; then
-              echo "::error::$t found a failing input"
-              failed="$failed $t"
-              continue
-            fi
-            if grep -q 'context deadline exceeded' fuzz.log; then
-              execs=$(grep -o 'execs: [0-9]*' fuzz.log | tail -1)
-              echo "::warning::$t: the fuzz deadline arrived while a worker was still in an input; ${execs:-no execs reported}, no failing input. The loaded runner, not the code."
-              continue
-            fi
-            echo "::error::$t failed"
-            failed="$failed $t"
-          done
-          if [ -n "$failed" ]; then
-            echo "::error::these targets failed:$failed"
-            exit 1
-          fi
+          go install github.com/go-fleettools/fuzzrun@v0.7.0
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+      - name: Fuzz every target of ./structured
+        run: |
+          fuzzrun run --package structured --time 30s \
+            --parallel 2 --jobs 2 --max-load 6 --logs fuzz-logs 2>&1 | tee fuzz.log
       - name: What the corpus leaves with
         if: always()
         run: |
@@ -623,4 +628,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: fuzz-failure-hostile
-          path: structured/testdata/fuzz/
+          # fuzz-logs/ holds one log per target, which is where a FAIL that is
+          # not a crash says what it was.
+          path: |
+            structured/testdata/fuzz/
+            fuzz-logs/
